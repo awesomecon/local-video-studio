@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import time
 import wave
 from pathlib import Path
@@ -523,6 +524,9 @@ def _fake_breeze_api(port: int, recorder: list, fail_first_409: bool = False):
 def _breeze_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str):
     import services.tts_worker.app as worker_app
 
+    # Breeze is an HTTP child-service adapter; the parent worker must not need
+    # PyTorch merely to proxy its generated waveform.
+    monkeypatch.setitem(sys.modules, "torch", None)
     source = tmp_path / "breeze-source"
     (source / "breeze_infer").mkdir(parents=True)
     (source / "breeze_infer" / "api.py").write_text("# pinned fake\n", encoding="utf-8")

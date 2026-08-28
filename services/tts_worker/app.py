@@ -114,11 +114,16 @@ class SpeechProvider(ABC):
             raise ValueError("reference WAV does not exist")
         import numpy as np
         import soundfile as sf
-        import torch
+
+        try:
+            import torch
+        except ImportError:
+            torch = None
 
         self.load()
-        torch.manual_seed(payload.seed)
-        if torch.cuda.is_available():
+        if torch is not None:
+            torch.manual_seed(payload.seed)
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.manual_seed_all(payload.seed)
             torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
@@ -133,7 +138,7 @@ class SpeechProvider(ABC):
         sf.write(payload.output_path, audio, sample_rate, subtype="PCM_16")
         duration = len(audio) / sample_rate
         peak = current = 0.0
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             peak = torch.cuda.max_memory_allocated() / 1024**3
             current = torch.cuda.memory_allocated() / 1024**3
         return {
