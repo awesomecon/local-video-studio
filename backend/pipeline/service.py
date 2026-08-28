@@ -3472,11 +3472,13 @@ class PipelineService:
             stage_settings["text_overlay_layout"] = text_overlay_layout
         h3_quality = changes.pop("h3_quality", None)
         if h3_quality is not None:
-            if h3_quality not in H3Quality:
+            try:
+                h3_quality = H3Quality(h3_quality)
+            except (TypeError, ValueError):
                 valid = ", ".join(quality.value for quality in H3Quality)
                 raise ValueError(
                     f"Invalid h3_quality {h3_quality!r}. Valid values: {valid}."
-                )
+                ) from None
             stage_settings["h3_quality"] = h3_quality
         elif switching_to_h3 and not (
             isinstance(stage_settings.get("h3_canvas"), str)

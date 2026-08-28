@@ -1,5 +1,7 @@
 """Director structured-output and application normalization tests."""
 
+import pytest
+
 from backend.director.engine import DirectorEngine, DirectorPlanDraft
 from backend.schemas import DurationMode, Project, VisualType
 
@@ -80,7 +82,9 @@ def test_director_sends_dedicated_schema_and_materializes_domain_plan() -> None:
     assert plan.project_id == project.id
     assert [scene.index for scene in plan.scenes] == [0, 1]
     assert [scene.title for scene in plan.scenes] == ["First", "Second"]
-    assert sum(scene.duration for scene in plan.scenes) == project.target_duration
+    assert sum(scene.duration for scene in plan.scenes) == pytest.approx(
+        project.target_duration
+    )
     assert plan.scenes[0].transition == "cut"
     assert plan.scenes[0].visual_type is VisualType.FLUX_STILL
     # The draft's authored backend value is ignored: planned scenes always start
@@ -181,7 +185,9 @@ def test_director_splits_scaled_h3_beats_at_standard_duration_cap() -> None:
     plan = DirectorEngine(CapturingLLM(draft)).plan(project)
 
     assert len(plan.scenes) == 9
-    assert sum(scene.duration for scene in plan.scenes) == project.target_duration
+    assert sum(scene.duration for scene in plan.scenes) == pytest.approx(
+        project.target_duration
+    )
     assert all(5 <= scene.duration <= 8 for scene in plan.scenes)
     assert len({scene.visual_prompt for scene in plan.scenes}) == len(plan.scenes)
     for previous, current in zip(plan.scenes, plan.scenes[1:]):

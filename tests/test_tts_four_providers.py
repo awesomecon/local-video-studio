@@ -330,16 +330,21 @@ def test_non_loopback_comparison_endpoint_is_rejected() -> None:
         load_config(environ=environ)
 
 
-def test_managed_worker_supervisor_discovers_omnivoice() -> None:
+def test_managed_worker_supervisor_discovers_omnivoice(tmp_path: Path) -> None:
     from backend.workers.tts_processes import TTSWorkerSupervisor
 
-    config = load_config(environ={})
+    model_path = tmp_path / "OmniVoice"
+    model_path.mkdir()
+    config = load_config(environ={
+        "LOCAL_VIDEO_STUDIO__BACKENDS__OMNIVOICE__MODEL_PATH": str(model_path),
+    })
     supervisor = TTSWorkerSupervisor.from_config(
         config, output_root=Path("/tmp/lvs-out"),
     )
     assert "omnivoice" in supervisor.specs
     spec = supervisor.specs["omnivoice"]
     assert spec.endpoint == "http://127.0.0.1:8194"
+    assert spec.model_path == model_path
     assert spec.model_path.is_dir()
 
 
