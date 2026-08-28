@@ -1,0 +1,32 @@
+{
+  "capability": "text_to_speech",
+  "workflow_version": "voxcpm2-saganaki-comfy-v2",
+  "provider": "voxcpm2",
+  "verified": false,
+  "node_project": "https://github.com/Saganaki22/ComfyUI-VoxCPM2",
+  "node_commit_sha": "0e52a6cd006769e030d0e1ae907ffebbbfac4f5f",
+  "checkpoint_revision": "openbmb/VoxCPM2 (local checkout under models/tts/VoxCPM/VoxCPM2)",
+  "quantization": "bf16",
+  "derived_from": "example_workflows/VoxCPM2-example.json plus the VoxCPM2_Clone schema at the pinned node commit",
+  "required_nodes": ["VoxCPM2_Clone", "LoadAudio", "SaveAudio"],
+  "required_files": [],
+  "substitutions": [
+    {"key": "prompt", "type": "str"},
+    {"key": "seed", "type": "int"},
+    {"key": "reference_audio", "type": "str", "notes": "uploaded input path relative to the ComfyUI input directory"},
+    {"key": "reference_text", "type": "str", "notes": "reference transcript; enables ultimate cloning on VoxCPM2"},
+    {"key": "voice_description", "type": "str", "notes": "style control; ignored by the node when a transcript is provided"},
+    {"key": "cfg_value", "type": "float", "default": 2.0},
+    {"key": "inference_timesteps", "type": "int", "default": 10},
+    {"key": "filename_prefix", "type": "str"}
+  ],
+  "output_node_id": "3",
+  "output_category": "audio",
+  "output_format": "wav",
+  "seed_max": 18446744073709551615,
+  "unload_after_run": false,
+  "safety": {
+    "no_auto_download": true,
+    "notes": "The node resolves models/tts/VoxCPM/VoxCPM2 before falling back to snapshot_download; the local checkout must exist so no weights are fetched. enable_asr stays false so the SenseVoice ASR model is never downloaded. force_offload=false retains the model between narration chunks; Studio releases it once after the narration job when unload_after is enabled."
+  }
+}

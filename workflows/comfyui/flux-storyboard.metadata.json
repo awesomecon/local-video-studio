@@ -1,0 +1,16 @@
+{
+  "name": "FLUX storyboard",
+  "version": "1",
+  "capability": "text_to_image",
+  "workflow_file": "flux-storyboard.workflow.json",
+  "status": "template_requires_local_checkpoint_selection",
+  "substitutions": {
+    "{{prompt}}": "positive prompt",
+    "{{negative_prompt}}": "negative prompt",
+    "{{seed}}": "integer seed",
+    "{{width}}": "output width",
+    "{{height}}": "output height",
+    "{{checkpoint}}": "local checkpoint filename supplied as a custom substitution"
+  },
+  "output_nodes": ["9"]
+}

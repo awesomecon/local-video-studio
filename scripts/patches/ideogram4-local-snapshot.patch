@@ -1,0 +1,145 @@
+diff --git a/src/ideogram4/pipeline_ideogram4.py b/src/ideogram4/pipeline_ideogram4.py
+index 0f16e12..2c94d3f 100644
+--- a/src/ideogram4/pipeline_ideogram4.py
++++ b/src/ideogram4/pipeline_ideogram4.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import json
+ import warnings
+ from dataclasses import dataclass
++from pathlib import Path
+ from posixpath import dirname as _posix_dirname, join as _posix_join
+ from typing import Optional, Sequence
+ 
+@@ -45,6 +46,26 @@ from ideogram4.scheduler import (
+ )
+ 
+ 
++def _local_or_hub_file(repo_id: str, filename: str) -> str:
++  """Resolve an installed snapshot path without a Hugging Face network lookup."""
++  local_repo = Path(repo_id)
++  if local_repo.is_dir():
++    candidate = local_repo / filename
++    if not candidate.is_file():
++      raise EntryNotFoundError(f"file is not present in local snapshot: {candidate}")
++    return str(candidate)
++  return hf_hub_download(repo_id=repo_id, filename=filename)
++
++
++def _component_source(repo_id: str, subfolder: str | None) -> tuple[str, dict]:
++  """Return a Transformers source plus kwargs for hub or installed layouts."""
++  local_repo = Path(repo_id)
++  if local_repo.is_dir():
++    source = local_repo / subfolder if subfolder else local_repo
++    return str(source), {"local_files_only": True}
++  return repo_id, ({"subfolder": subfolder} if subfolder else {})
++
++
+ def _load_subfolder_state_dict(
+   repo_id: str, subfolder: str, basename: str
+ ) -> dict[str, torch.Tensor]:
+@@ -58,9 +79,7 @@ def _load_subfolder_state_dict(
+   try:
+     return _load_sharded_state_dict(repo_id, index_filename)
+   except EntryNotFoundError:
+-    single_path = hf_hub_download(
+-      repo_id=repo_id, filename=f"{prefix}{basename}.safetensors"
+-    )
++    single_path = _local_or_hub_file(repo_id, f"{prefix}{basename}.safetensors")
+     return load_file(single_path)
+ 
+ 
+@@ -78,8 +97,9 @@ def _load_fp8_text_encoder(
+   non-persistent buffers such as rotary caches), swap the quantized Linears, and
+   load the FP8 state dict with ``assign=True``.
+   """
++  config_source, config_kwargs = _component_source(repo_id, text_encoder_subfolder)
+   config = AutoConfig.from_pretrained(
+-    repo_id, subfolder=text_encoder_subfolder, trust_remote_code=True
++    config_source, trust_remote_code=True, **config_kwargs
+   )
+   model = AutoModel.from_config(config, trust_remote_code=True)
+   state_dict = _load_subfolder_state_dict(repo_id, text_encoder_subfolder, "model")
+@@ -112,13 +132,12 @@ def _load_qwen3_vl(
+   a bitsandbytes 4-bit checkpoint), transformers handles the bnb placement via
+   ``device_map`` and we skip the explicit ``.to(device)`` move afterwards.
+   """
+-  tokenizer_kwargs = {"subfolder": tokenizer_subfolder} if tokenizer_subfolder else {}
+-  model_kwargs = {"subfolder": text_encoder_subfolder} if text_encoder_subfolder else {}
+-  tokenizer = AutoTokenizer.from_pretrained(repo_id, **tokenizer_kwargs)
++  tokenizer_source, tokenizer_kwargs = _component_source(repo_id, tokenizer_subfolder)
++  model_source, model_kwargs = _component_source(repo_id, text_encoder_subfolder)
++  tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
+ 
+-  cfg_path = hf_hub_download(
+-    repo_id=repo_id,
+-    filename=f"{text_encoder_subfolder}/config.json"
++  cfg_path = _local_or_hub_file(
++    repo_id, f"{text_encoder_subfolder}/config.json"
+     if text_encoder_subfolder
+     else "config.json",
+   )
+@@ -129,14 +148,14 @@ def _load_qwen3_vl(
+ 
+   if is_fp8:
+     model = _load_fp8_text_encoder(
+-      repo_id,
++      model_source,
+       device,
+       dtype,
+-      text_encoder_subfolder=text_encoder_subfolder or "",
++      text_encoder_subfolder="" if Path(repo_id).is_dir() else text_encoder_subfolder or "",
+     )
+   elif is_quantized:
+     model = AutoModel.from_pretrained(
+-      repo_id,
++      model_source,
+       torch_dtype=dtype,
+       trust_remote_code=True,
+       device_map={"": device},
+@@ -145,7 +164,7 @@ def _load_qwen3_vl(
+     model.eval()
+   else:
+     model = AutoModel.from_pretrained(
+-      repo_id, torch_dtype=dtype, trust_remote_code=True, **model_kwargs
++      model_source, torch_dtype=dtype, trust_remote_code=True, **model_kwargs
+     )
+     model.to(device)
+     model.eval()
+@@ -196,7 +215,7 @@ def _load_sharded_state_dict(
+   the index are interpreted relative to that index's directory, matching the
+   layout written by ``huggingface_hub.save_torch_state_dict``.
+   """
+-  index_path = hf_hub_download(repo_id=repo_id, filename=index_filename)
++  index_path = _local_or_hub_file(repo_id, index_filename)
+   with open(index_path) as f:
+     index = json.load(f)
+   weight_map: dict[str, str] = index["weight_map"]
+@@ -206,7 +225,7 @@ def _load_sharded_state_dict(
+   state_dict: dict[str, torch.Tensor] = {}
+   for shard in shard_filenames:
+     shard_repo_path = _posix_join(shard_dir, shard) if shard_dir else shard
+-    shard_path = hf_hub_download(repo_id=repo_id, filename=shard_repo_path)
++    shard_path = _local_or_hub_file(repo_id, shard_repo_path)
+     state_dict.update(load_file(shard_path))
+   return state_dict
+ 
+@@ -225,7 +244,7 @@ def _load_indexed_or_single_state_dict(
+     return _load_sharded_state_dict(repo_id, index_filename)
+   except EntryNotFoundError:
+     single_filename = index_filename.removesuffix(".index.json")
+-    single_path = hf_hub_download(repo_id=repo_id, filename=single_filename)
++    single_path = _local_or_hub_file(repo_id, single_filename)
+     return load_file(single_path)
+ 
+ 
+@@ -293,8 +312,8 @@ class Ideogram4Pipeline:
+     unconditional_state_dict = _load_indexed_or_single_state_dict(
+       config.weights_repo, config.unconditional_index_filename
+     )
+-    autoencoder_weights = hf_hub_download(
+-      repo_id=config.weights_repo, filename=config.autoencoder_filename
++    autoencoder_weights = _local_or_hub_file(
++      config.weights_repo, config.autoencoder_filename
+     )
+ 
+     conditional_transformer = _build_transformer(

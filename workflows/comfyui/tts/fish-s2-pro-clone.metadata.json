@@ -1,0 +1,33 @@
+{
+  "capability": "text_to_speech",
+  "workflow_version": "fish-s2-pro-saganaki-comfy-v3",
+  "provider": "fish_s2_pro",
+  "verified": false,
+  "node_project": "https://github.com/Saganaki22/ComfyUI-FishAudioS2",
+  "node_commit_sha": "521f33fe79c081da314dc905ce399c62edb24749",
+  "checkpoint_revision": "s2-pro (local checkout under models/fishaudioS2/s2-pro)",
+  "quantization": "bf16",
+  "derived_from": "example_workflow/fish_audio_s2_tts_example_workflow.json plus the FishS2VoiceCloneTTS schema at the pinned node commit",
+  "required_nodes": ["FishS2VoiceCloneTTS", "LoadAudio", "SaveAudio"],
+  "required_files": [],
+  "substitutions": [
+    {"key": "prompt", "type": "str"},
+    {"key": "seed", "type": "int"},
+    {"key": "language", "type": "str", "notes": "lowercase ISO code or auto; must be a member of the node's LANGUAGES combo"},
+    {"key": "reference_audio", "type": "str", "notes": "uploaded input path relative to the ComfyUI input directory"},
+    {"key": "reference_text", "type": "str", "notes": "optional transcript of the reference audio; recommended for stable cloning"},
+    {"key": "model_preset", "type": "str", "default": "s2-pro", "notes": "folder name under ComfyUI/models/fishaudioS2; never select an '(auto download)' entry"},
+    {"key": "temperature", "type": "float", "default": 0.8},
+    {"key": "filename_prefix", "type": "str"}
+  ],
+  "output_node_id": "3",
+  "output_category": "audio",
+  "output_format": "wav",
+  "seed_max": 2147483647,
+  "unload_after_run": false,
+  "safety": {
+    "no_auto_download": true,
+    "notes": "model_path is a local folder name resolved from ComfyUI/models/fishaudioS2 (symlinked to the central checkpoint); '(auto download)' variants are never selected. keep_model_loaded=true retains the model between narration chunks; Studio releases it once after the narration job when unload_after is enabled. torch.compile is enabled with a fixed 1024-token ceiling (about 47 seconds of audio) to avoid the uncompiled autoregressive path and misleading 32K-token progress estimate.",
+    "license_note": "Fish Audio S2 Pro weights use the Fish Audio Research License: research/non-commercial only for this comparison."
+  }
+}

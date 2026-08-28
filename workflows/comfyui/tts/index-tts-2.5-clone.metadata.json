@@ -1,0 +1,31 @@
+{
+  "capability": "text_to_speech",
+  "workflow_version": "index-tts-2.5-t8-comfy-v2",
+  "provider": "index_tts_2_5",
+  "verified": false,
+  "node_project": "https://github.com/T8mars/comfyui-indextts25-t8",
+  "node_commit_sha": "b3a0dcdd4c43a5fbc07e9b0e9f7880e7d4f6e094",
+  "checkpoint_revision": "IndexTTS-2.5 (local checkout, see model_path)",
+  "quantization": "auto",
+  "derived_from": "example_workflows/api/01_basic_voice_clone.json at the pinned node commit",
+  "required_nodes": ["T8_IndexTTS25_ModelLoader", "T8_IndexTTS25_Generate", "LoadAudio", "SaveAudio"],
+  "required_files": [],
+  "substitutions": [
+    {"key": "prompt", "type": "str"},
+    {"key": "seed", "type": "int"},
+    {"key": "language", "type": "str", "notes": "uppercase code, e.g. EN; unsupported values fail ComfyUI prompt validation"},
+    {"key": "reference_audio", "type": "str", "notes": "uploaded input path relative to the ComfyUI input directory"},
+    {"key": "model_path", "type": "str", "notes": "absolute local path to the central IndexTTS-2.5 checkpoint directory"},
+    {"key": "filename_prefix", "type": "str"}
+  ],
+  "output_node_id": "4",
+  "output_category": "audio",
+  "output_format": "wav",
+  "seed_max": 2147483647,
+  "unload_after_run": false,
+  "release_after_run_note": "release_after_run=false retains the model between narration chunks; Studio releases it once after the narration job when unload_after is enabled.",
+  "safety": {
+    "no_auto_download": true,
+    "notes": "The central checkpoint is passed through custom_model_path; no weights are downloaded or duplicated. acceleration_mode and use_cuda_kernel stay off for reproducibility."
+  }
+}

@@ -1,0 +1,82 @@
+/*
+ * Local Video Studio — design tokens.
+ *
+ * Dark, production-oriented workspace. Palette values are the validated dark
+ * column of the neutral reference palette (see docs for provenance): surface
+ * #1a1a19, ink #ffffff/#c3c2b7/#898781, accent blue #3987e5, and the fixed
+ * status set good/warning/serious/critical. Status colors are reserved and are
+ * always paired with an icon + text label — never color alone.
+ */
+:root {
+  color-scheme: dark;
+
+  /* --- Surfaces ------------------------------------------------------- */
+  --plane: #0d0d0d;        /* page background */
+  --surface-1: #1a1a19;    /* card / panel */
+  --surface-2: #20201e;    /* raised panel, inputs */
+  --surface-3: #282826;    /* hover wash */
+  --surface-inset: #131312;/* wells, code blocks */
+
+  /* --- Ink ------------------------------------------------------------ */
+  --text-1: #ffffff;
+  --text-2: #c3c2b7;
+  --text-3: #898781;
+
+  /* --- Lines ------------------------------------------------------------ */
+  --line: #2c2c2a;
+  --line-strong: #383835;
+  --hairline: rgba(255, 255, 255, 0.10);
+
+  /* --- Accent (restrained) -------------------------------------------- */
+  --accent: #3987e5;
+  --accent-2: #256abf;
+  --accent-ink: #081726;
+  --accent-wash: color-mix(in oklab, var(--accent) 16%, transparent);
+
+  /* --- Status (reserved: icon + label, never color alone) -------------- */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --offline: #898781;
+
+  --good-ink: color-mix(in oklab, var(--good) 14%, transparent);
+  --warning-ink: color-mix(in oklab, var(--warning) 15%, transparent);
+  --serious-ink: color-mix(in oklab, var(--serious) 15%, transparent);
+  --critical-ink: color-mix(in oklab, var(--critical) 16%, transparent);
+  --offline-ink: color-mix(in oklab, var(--offline) 16%, transparent);
+
+  /* --- Typography ------------------------------------------------------ */
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 0.72rem;
+  --text-sm: 0.82rem;
+  --text-md: 0.95rem;
+  --text-lg: 1.05rem;
+  --text-xl: 1.3rem;
+  --text-2xl: 1.7rem;
+  --leading: 1.45;
+
+  /* --- Shape / motion --------------------------------------------------- */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --focus-ring: 0 0 0 2px var(--plane), 0 0 0 4px var(--accent);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --dur: 140ms;
+  --dur-slow: 240ms;
+
+  /* --- Layout ----------------------------------------------------------- */
+  --nav-w: 232px;
+  --nav-w-collapsed: 64px;
+  --topbar-h: 52px;
+  --content-max: 1560px;
+  --gap: 16px;
+  --gap-sm: 10px;
+  --gap-lg: 24px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur: 0ms; --dur-slow: 0ms; }
+}

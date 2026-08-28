@@ -1,0 +1,37 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "{{reference_audio}}"
+    }
+  },
+  "2": {
+    "class_type": "FishS2VoiceCloneTTS",
+    "inputs": {
+      "model_path": "{{model_preset}}",
+      "text": "{{prompt}}",
+      "reference_audio": ["1", 0],
+      "language": "{{language}}",
+      "device": "auto",
+      "precision": "bfloat16",
+      "attention": "auto",
+      "max_new_tokens": 1024,
+      "chunk_length": 200,
+      "temperature": "{{temperature}}",
+      "top_p": 0.8,
+      "repetition_penalty": 1.1,
+      "seed": "{{seed}}",
+      "keep_model_loaded": true,
+      "offload_to_cpu": false,
+      "compile_model": true,
+      "reference_text": "{{reference_text}}"
+    }
+  },
+  "3": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": ["2", 0],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}

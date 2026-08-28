@@ -1,0 +1,166 @@
+paths:
+  model_root: "~/ai/models"
+  project_root: "~/ai/projects"
+  cache_root: "~/ai/cache"
+  torch_cache: "~/ai/cache/torch"
+  huggingface_cache: "~/ai/cache/huggingface"
+  huggingface_hub_cache: "~/ai/cache/huggingface/hub"
+  generation_cache_root: "~/ai/cache/generation"
+  temp_root: "~/.local/share/local-video-studio/tmp"
+  app_data: "~/.local/share/local-video-studio"
+  minimum_free_disk_gb: 50
+
+hardware:
+  preferred_device: cuda
+  max_vram_gb: 23
+  allow_cpu_offload: true
+  system_ram_budget_gb: 56
+
+gpu:
+  minimum_free_vram_gb_for_heavy_job: 20
+  wait_for_vram: false
+  serialize_heavy_jobs: true
+  # LRU cap for reused identical-prompt generation artifacts (stills, video,
+  # graphic screens). 0 disables the cap (cache grows without eviction).
+  generation_cache_max_gb: 20
+
+network:
+  bind_address: 127.0.0.1
+  allow_lan: false
+  allow_remote_backends: false
+
+ports:
+  backend: 8009
+  frontend: 3000
+  comfyui: 8188
+  # 1234 is the external local LLM; the rest are the configured service
+  # endpoints below (shared ComfyUI, Ideogram ComfyUI, Qwen3-TTS,
+  # Step-Audio-EditX, Chatterbox, OmniVoice, Breeze worker 8195 and its
+  # official-API children 8196 eager / 8197 fast) so port selection can never
+  # claim a port another configured endpoint points at.
+  reserved: [1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197]
+  auto_select_free_port: true
+  allowed_range: [8000, 8999]
+
+llm:
+  provider: openai_compatible
+  base_url: "http://127.0.0.1:1234/v1"
+  api_key_env: LOCAL_LLM_API_KEY
+  model: auto
+  timeout_seconds: 600
+  enable_completion_health_check: false
+
+llm_roles:
+  writer: auto
+  director: auto
+  prompt_engineer: auto
+  qc: auto
+
+backends:
+  comfyui:
+    enabled: true
+    endpoint: "http://127.0.0.1:8188"
+  # Ideogram 4 NF4 uses a separate ComfyUI environment because its Torch
+  # requirement must not modify the shared image/video service on port 8188.
+  ideogram4_local:
+    enabled: true
+    endpoint: "http://127.0.0.1:8190"
+    managed: true
+    startup_timeout_seconds: 120
+    provider: comfyui
+    model: nf4
+    poll_interval_seconds: 0.5
+    generation_timeout_seconds: 3600
+  h3:
+    enabled: false
+    endpoint: null
+  chatterbox:
+    enabled: true
+    endpoint: "http://127.0.0.1:8193"
+    managed: true
+    python_path: "~/ai/services/chatterbox/.venv/bin/python"
+    model_path: "~/ai/models/tts/chatterbox-v3"
+  qwen_tts:
+    enabled: true
+    endpoint: "http://127.0.0.1:8191"
+    managed: true
+    python_path: "~/ai/services/Qwen3-TTS/.venv/bin/python"
+    model_path: "~/ai/models/tts/qwen/Qwen3-TTS-12Hz-1.7B-Base"
+  step_audio_editx:
+    enabled: true
+    endpoint: "http://127.0.0.1:8192"
+    managed: true
+    python_path: "~/ai/services/Step-Audio-EditX/.venv/bin/python"
+    model_path: "~/ai/models/tts/step/Step-Audio-EditX"
+    tokenizer_path: "~/ai/models/tts/step/Step-Audio-Tokenizer"
+  ace_step:
+    enabled: true
+    provider: comfyui
+    model: xl_turbo
+    workflow_path: null
+    thinking: true
+    poll_interval_seconds: 0.5
+    generation_timeout_seconds: 1800
+  whisper:
+    enabled: true
+    # Set this to a pre-downloaded CTranslate2 Faster-Whisper large-v3-turbo directory.
+    # Caption alignment never downloads weights automatically.
+    model_path: "~/ai/models/whisper/large-v3-turbo-ct2"
+  # Optional voice-cloning comparison providers (see docs/local-tts.md).
+  # fish_s2_pro / voxcpm2 / index_tts_2_5 run as ComfyUI workflow adapters; the
+  # matching custom node must be installed first (see
+  # scripts/install_tts_nodes.sh and workflows/comfyui/tts/README.md).
+  fish_s2_pro:
+    enabled: true
+    provider: comfyui
+    model: s2-pro
+    poll_interval_seconds: 0.5
+    generation_timeout_seconds: 1800
+  voxcpm2:
+    enabled: true
+    provider: comfyui
+    poll_interval_seconds: 0.5
+    generation_timeout_seconds: 1800
+  index_tts_2_5:
+    enabled: true
+    provider: comfyui
+    model_path: "~/ai/models/tts/index/IndexTTS-2.5"
+    poll_interval_seconds: 0.5
+    generation_timeout_seconds: 1800
+  omnivoice:
+    enabled: true
+    endpoint: "http://127.0.0.1:8194"
+    managed: true
+    python_path: "~/ai/services/OmniVoice/.venv/bin/python"
+    model_path: "~/ai/models/tts/omnivoice/OmniVoice"
+    startup_timeout_seconds: 60
+  # Breeze TTS 2 (≈3.5B): managed worker that wraps the official
+  # breeze_infer.api. The worker speaks the LVS protocol on 8195 and owns
+  # exactly one official-API child at a time: 8196 (eager) or 8197 (fast,
+  # --fast-all). Non-commercial weights license; pinned checkout
+  # ca632ce6c4d05f7985da4eab29b1a5d445b43f7b.
+  breeze_tts_2:
+    enabled: true
+    endpoint: "http://127.0.0.1:8195"
+    managed: true
+    python_path: "~/ai/services/breeze-tts/.venv/bin/python"
+    model_path: "~/ai/models/tts/breeze/Breeze-TTS-2"
+    startup_timeout_seconds: 120
+
+render:
+  fps: 24
+  resolution: [1920, 1080]
+  preview_resolution: [640, 360]
+  video_codec: libx264
+  audio_codec: aac
+
+# Image-generator routing. Ideogram 4 is being tested against Qwen Image for
+# text-heavy scenes (Qwen's embedded lettering was not strong enough); Krea
+# stays the default for cinematic scenes without readable words. Flip
+# comparison_mode to true to render both Qwen and Ideogram variants for every
+# needs_embedded_text scene and review them side-by-side before replacing.
+image_generation:
+  comparison_mode: false
+  general_model: krea
+  text_model: ideogram4_local
+  fallback_text_model: qwen_image

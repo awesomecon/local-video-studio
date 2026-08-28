@@ -1,0 +1,44 @@
+{
+  "capability": "text_to_music",
+  "workflow_version": "ace-step-1.5-xl-sft-comfy-v1",
+  "source_template": "audio_ace_step1_5_xl_sft",
+  "inspected_comfyui_version": "0.33.0",
+  "required_files": [
+    {"filename": "acestep_v1.5_xl_sft_bf16.safetensors", "comfyui_folder": "diffusion_models"},
+    {"filename": "qwen_0.6b_ace15.safetensors", "comfyui_folder": "text_encoders"},
+    {"filename": "qwen_4b_ace15.safetensors", "comfyui_folder": "text_encoders"},
+    {"filename": "ace_1.5_vae.safetensors", "comfyui_folder": "vae"}
+  ],
+  "substitutions": [
+    {"key": "prompt", "type": "str"},
+    {"key": "lyrics", "type": "str"},
+    {"key": "seed", "type": "int"},
+    {"key": "duration", "type": "float", "unit": "seconds"},
+    {"key": "bpm", "type": "int"},
+    {"key": "time_signature", "type": "str", "source": "node_combo_choices"},
+    {"key": "language", "type": "str", "source": "node_combo_choices"},
+    {"key": "key_scale", "type": "str", "source": "node_combo_choices"},
+    {"key": "generate_audio_codes", "type": "bool"},
+    {"key": "model_filename", "type": "str"},
+    {"key": "filename_prefix", "type": "str"}
+  ],
+  "output_node_id": "11",
+  "output_category": "audio",
+  "output_format": "mp3",
+  "source_output_format": "mp3",
+  "canonical_output_format": "wav",
+  "sampling": {
+    "model_sampling": "ModelSamplingAuraFlow",
+    "shift": 3.0,
+    "steps": 50,
+    "cfg": 7.0,
+    "sampler_name": "euler",
+    "scheduler": "simple",
+    "denoise": 1.0
+  },
+  "duration_range": {"min": 1, "max": 1000, "unit": "seconds", "source": "installed_node_constraint_intersection"},
+  "recommended_duration_range": {"min": 10, "max": 180, "unit": "seconds"},
+  "workflow_commit_sha": "e95e3b20567bea8df16510c8390b7f897b7e6d4b",
+  "quantization": "bf16",
+  "notes": "Model files are not bundled and are not downloaded automatically. Uses qwen_4b_ace15 and the fixed sampling values from the official audio_ace_step1_5_xl_sft template. SFT is offered only when its checkpoint is ready."
+}

@@ -1,0 +1,13 @@
+# Optional machine-local overrides. Copy this file to config/local.yaml; that
+# destination is ignored by Git. Do not put passwords, tokens, or API keys here.
+
+paths:
+  model_root: "/path/to/large-data-volume/models"
+  cache_root: "/path/to/large-data-volume/cache"
+
+backends:
+  qwen_tts:
+    model_path: "/path/to/large-data-volume/models/tts/qwen/Qwen3-TTS-12Hz-1.7B-Base"
+  breeze_tts_2:
+    python_path: "/path/to/services/breeze-tts/.venv/bin/python"
+    model_path: "/path/to/large-data-volume/models/tts/breeze/Breeze-TTS-2"

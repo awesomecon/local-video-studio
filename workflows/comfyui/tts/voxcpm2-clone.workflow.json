@@ -1,0 +1,39 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "{{reference_audio}}"
+    }
+  },
+  "2": {
+    "class_type": "VoxCPM2_Clone",
+    "inputs": {
+      "model_name": "VoxCPM2",
+      "lora_name": "None",
+      "voice_description": "{{voice_description}}",
+      "text": "{{prompt}}",
+      "reference_audio": ["1", 0],
+      "prompt_text": "{{reference_text}}",
+      "cfg_value": "{{cfg_value}}",
+      "inference_timesteps": "{{inference_timesteps}}",
+      "max_tokens": 4096,
+      "normalize_text": true,
+      "enable_denoiser": false,
+      "seed": "{{seed}}",
+      "force_offload": false,
+      "dtype": "auto",
+      "device": "cuda",
+      "enable_asr": false,
+      "retry_max_attempts": 3,
+      "retry_threshold": 6.0,
+      "torch_compile": false
+    }
+  },
+  "3": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": ["2", 0],
+      "filename_prefix": "{{filename_prefix}}"
+    }
+  }
+}

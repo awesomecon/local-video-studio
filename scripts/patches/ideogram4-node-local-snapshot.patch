@@ -1,0 +1,15 @@
+diff --git a/nodes.py b/nodes.py
+index 8510b8c..95d3c63 100644
+--- a/nodes.py
++++ b/nodes.py
+@@ -538,8 +538,9 @@ class Ideogram4PipelineLoader:
+         torch.cuda.empty_cache()
+ 
+     Ideogram4Pipeline, Ideogram4PipelineConfig = _load_pipeline_classes()
++    local_weights = os.environ.get("IDEOGRAM4_WEIGHTS_PATH", "").strip()
+     config = Ideogram4PipelineConfig(
+-      weights_repo=resolved_weights_repo,
++      weights_repo=local_weights or resolved_weights_repo,
+     )
+     pbar.update_absolute(2)
+     try:

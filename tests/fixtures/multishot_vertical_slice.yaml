@@ -1,0 +1,191 @@
+# Seven-scene vertical-slice editorial fixture for the multi-shot documentary plan.
+#
+# Format: production-plan import manifest, schema_version 1 (see
+# docs/shots.md). This file pins the manifest shape and the
+# lane/overlay vocabulary exercised by the vertical slice BEFORE the Phase 5 importer lands.
+#
+# NARRATION POLICY: narration strings below are placeholders marked "<VERBATIM ...>". The
+# Phase 5 importer must substitute the supplied production outline text verbatim; it never
+# rewrites, paraphrases, or regenerates narration. A dry-run that still contains a
+# "<VERBATIM" marker must fail validation.
+schema_version: 1
+
+project:
+  title: Example Documentary — Vertical Slice
+  topic: multi-shot documentary acceptance slice
+  style: documentary
+  aspect_ratio: "16:9"
+  fps: 24
+  resolution: [1920, 1080]
+
+defaults:
+  image_lane_visual_type: krea2_still
+  h3_lane_visual_type: h3_audiovisual
+  html_lane_visual_type: graphic_screen
+  real_lane_visual_type: reused_media
+
+scenes:
+  - number: 1
+    title: Cold open
+    narration: "<VERBATIM outline scene 1>"
+    notes: black -> landscape -> archival machinery -> document, plus date overlays
+    shots:
+      - lane: html
+        visual_type: title_card
+        description: full-frame black opening card
+        duration_weight: 0.15
+      - lane: image
+        visual_type: krea2_still
+        description: distant landscape at night, slow push-in
+        duration_weight: 0.35
+        camera_instruction: slow push-in, no parallax
+        transition_in: {kind: crossfade, duration_seconds: 0.6}
+      - lane: real
+        visual_type: reused_media
+        description: archival machinery footage (source required before render)
+        duration_weight: 0.3
+        source_requirements:
+          classification: documentary_evidence
+          subject: archival machinery footage
+        transition_in: {kind: cut}
+      - lane: html
+        visual_type: graphic_screen
+        description: closing book shot with staged date overlays
+        duration_weight: 0.2
+        overlays:
+          - kind: exact_text
+            exact_text: "<VERBATIM date overlay scene 1>"
+            template: lower_third
+            start_seconds: 0.0
+            duration_seconds: 1.2
+          - kind: exact_text
+            exact_text: "<VERBATIM second overlay scene 1>"
+            template: caption_line
+            start_seconds: 1.4
+            duration_seconds: 1.0
+        transition_in: {kind: fade_through_black, duration_seconds: 0.5}
+
+  - number: 4
+    title: Observation
+    narration: "<VERBATIM outline scene 4>"
+    notes: REAL instrument recording -> generated subject portrait with waveform transition
+    shots:
+      - lane: real
+        visual_type: reused_media
+        description: instrument chart photograph or scan (source required)
+        duration_weight: 0.5
+        source_requirements:
+          classification: documentary_evidence
+          subject: instrument reading chart
+      - lane: image
+        visual_type: qwen_image_still
+        description: subject listening, integrated waveform lettering allowed but not critical
+        duration_weight: 0.5
+        transition_in: {kind: crossfade, duration_seconds: 0.8}
+
+  - number: 15
+    title: Quotation
+    narration: "<VERBATIM outline scene 15>"
+    notes: full-screen exact quotation with staged emphasis; no generative text
+    shots:
+      - lane: html
+        visual_type: graphic_screen
+        description: quotation card, emphasis sequence via timed overlays
+        duration_weight: 1.0
+        overlays:
+          - kind: exact_text
+            exact_text: "<VERBATIM quotation attribution>"
+            template: verse_reference
+            start_seconds: 0.0
+            duration_seconds: 1.0
+          - kind: exact_text
+            exact_text: "<VERBATIM quotation line>"
+            template: verse_card
+            start_seconds: 1.0
+            duration_seconds: 2.0
+
+  - number: 24
+    title: Timeline
+    narration: "<VERBATIM outline scene 24>"
+    notes: timeline/date graphic -> REAL footage
+    shots:
+      - lane: html
+        visual_type: diagram
+        description: dated timeline diagram
+        duration_weight: 0.45
+      - lane: real
+        visual_type: reused_media
+        description: period footage (source required)
+        duration_weight: 0.55
+        source_requirements:
+          classification: editorial_context
+          subject: period newsreel material
+        transition_in: {kind: dip_to_white, duration_seconds: 0.4}
+
+  - number: 47
+    title: Preparing
+    narration: "<VERBATIM outline scene 47>"
+    notes: multi-action H3/IMAGE sequence, H3 reserved for meaningful motion only
+    shots:
+      - lane: image
+        visual_type: krea2_still
+        description: keyframe, wide establishing
+        duration_weight: 0.34
+      - lane: h3
+        visual_type: h3_audiovisual
+        description: the one action where movement carries meaning
+        duration_weight: 0.33
+        motion: meaningful-action-a
+        transition_in: {kind: crossfade, duration_seconds: 0.5}
+      - lane: image
+        visual_type: krea2_still
+        description: reaction still reusing first frame continuity
+        duration_weight: 0.33
+        references:
+          - role: first_frame
+            target: previous_shot
+        transition_in: {kind: crossfade, duration_seconds: 0.5}
+
+  - number: 56
+    title: Two accounts
+    narration: "<VERBATIM outline scene 56>"
+    notes: REAL/IMAGE split-screen comparison with timed HTML labels
+    shots:
+      - lane: real
+        visual_type: reused_media
+        description: left half — documented account (source required)
+        duration_weight: 1.0
+        source_requirements:
+          classification: documentary_evidence
+          subject: account A source
+        settings:
+          layout_region: left_half
+      - lane: image
+        visual_type: krea2_still
+        description: right half — illustrative reconstruction, badged as such
+        duration_weight: 1.0
+        settings:
+          layout_region: right_half
+          illustration_badge: true
+        transition_in: {kind: cut}
+        overlays:
+          - kind: exact_text
+            exact_text: "<VERBATIM label A>"
+            template: comparison_label_left
+            start_seconds: 0.2
+            duration_seconds: 1.5
+          - kind: exact_text
+            exact_text: "<VERBATIM label B>"
+            template: comparison_label_right
+            start_seconds: 0.2
+            duration_seconds: 1.5
+
+  - number: 79
+    title: Close
+    narration: "<VERBATIM outline scene 79>"
+    notes: HTML-only final card
+    shots:
+      - lane: html
+        visual_type: graphic_screen
+        description: final card, exact text only
+        duration_weight: 1.0

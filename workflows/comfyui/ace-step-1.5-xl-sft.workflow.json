@@ -1,0 +1,28 @@
+{
+  "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "{{model_filename}}", "weight_dtype": "default"}},
+  "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": "qwen_0.6b_ace15.safetensors", "clip_name2": "qwen_4b_ace15.safetensors", "type": "ace", "device": "default"}},
+  "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ace_1.5_vae.safetensors"}},
+  "4": {
+    "class_type": "TextEncodeAceStepAudio1.5",
+    "inputs": {
+      "clip": ["2", 0], "tags": "{{prompt}}", "lyrics": "{{lyrics}}", "seed": "{{seed}}",
+      "bpm": "{{bpm}}", "duration": "{{duration}}", "timesignature": "{{time_signature}}",
+      "language": "{{language}}", "keyscale": "{{key_scale}}",
+      "generate_audio_codes": "{{generate_audio_codes}}", "cfg_scale": 2.0,
+      "temperature": 0.85, "top_p": 1.0, "top_k": 0, "min_p": 0.0
+    }
+  },
+  "5": {"class_type": "EmptyAceStep1.5LatentAudio", "inputs": {"seconds": "{{duration}}", "batch_size": 1}},
+  "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["4", 0]}},
+  "7": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3.0}},
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["7", 0], "seed": "{{seed}}", "steps": 50, "cfg": 7.0,
+      "sampler_name": "euler", "scheduler": "simple", "positive": ["4", 0],
+      "negative": ["6", 0], "latent_image": ["5", 0], "denoise": 1.0
+    }
+  },
+  "9": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+  "11": {"class_type": "SaveAudioMP3", "inputs": {"audio": ["9", 0], "filename_prefix": "{{filename_prefix}}", "quality": "V0"}}
+}
