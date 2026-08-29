@@ -37,6 +37,17 @@
  *                                state, failure restores the button with the
  *                                standard error surfaces, and live refreshes
  *                                never trigger generation.
+ *   8. Editorial plan provenance  - current plans keep the good state with a
+ *                                small Current note; stale plans warn with
+ *                                readable reasons (project / script /
+ *                                word_timings, multiple allowed); untracked
+ *                                plans get a neutral note and are never
+ *                                called stale or broken; missing/malformed
+ *                                plan_status degrades to the classic state;
+ *                                Open Preview survives every plan state, no
+ *                                Generate button appears once a plan exists,
+ *                                and rendering these states issues no
+ *                                network calls.
  */
 
 import {
@@ -649,6 +660,143 @@ await recordAsync("editorial-generate: live refresh preserves the one in-flight 
   finishPost();
   await flush();
   eq(calls.filter((c) => c.method === "POST").length, 1, "only one POST completes");
+});
+
+/* --- 8. Editorial plan provenance (staleness status) --------------------- */
+
+const CURRENT_PLAN_META = {
+  has_edit_plan: true,
+  plan_status: "current",
+  stale: false,
+  stale_reasons: [],
+  edit_plan_url: EDIT_PLAN_META.edit_plan_url,
+  generate_url: GENERATE_URL,
+  preview_url: EDIT_PLAN_META.preview_url,
+};
+
+function stalePlanMeta(reasons) {
+  return {
+    has_edit_plan: true,
+    plan_status: "stale",
+    stale: true,
+    stale_reasons: reasons,
+    edit_plan_url: EDIT_PLAN_META.edit_plan_url,
+    generate_url: GENERATE_URL,
+    preview_url: EDIT_PLAN_META.preview_url,
+  };
+}
+
+const UNTRACKED_PLAN_META = {
+  has_edit_plan: true,
+  plan_status: "untracked",
+  stale: null,
+  stale_reasons: [],
+  edit_plan_url: EDIT_PLAN_META.edit_plan_url,
+  generate_url: GENERATE_URL,
+  preview_url: EDIT_PLAN_META.preview_url,
+};
+
+record("editorial-provenance: current plan keeps the good state with a small Current note", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, CURRENT_PLAN_META));
+  assert(node, "the section renders");
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("Edit Plan available"), "good status badge kept");
+  assert(badge.classList.contains("badge-good"), "badge keeps the good tone");
+  assert(node.textContent.includes("Current"), "small Current indication present");
+  const link = node.querySelector("a");
+  assert(link && link.textContent === "Open Preview", "Open Preview kept");
+  assert(!findGenerateButton(node), "no Generate button for a current plan");
+});
+
+record("editorial-provenance: stale plan shows a warning and the project reason", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, stalePlanMeta(["project"])));
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("stale"), "warning status says stale");
+  assert(badge.classList.contains("badge-warning"), "badge uses the warning tone");
+  assert(node.textContent.includes("settings changed"), "project reason explained readably");
+  assert(!findGenerateButton(node), "no Generate button for a stale plan");
+});
+
+record("editorial-provenance: stale plan explains the script reason", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, stalePlanMeta(["script"])));
+  assert(node.textContent.includes("narration or script changed"), "script reason explained readably");
+  assert(!node.textContent.includes("word timings changed"), "no unrelated reason listed");
+});
+
+record("editorial-provenance: stale plan explains the word_timings reason", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, stalePlanMeta(["word_timings"])));
+  assert(node.textContent.includes("word timings changed"), "word_timings reason explained readably");
+});
+
+record("editorial-provenance: multiple stale reasons are all listed", () => {
+  const node = editorialPreviewSection(projectSnapshot(
+    EDITORIAL_PROJECT, stalePlanMeta(["project", "script", "word_timings"])));
+  assert(node.textContent.includes("settings changed"), "project reason listed");
+  assert(node.textContent.includes("narration or script changed"), "script reason listed");
+  assert(node.textContent.includes("word timings changed"), "word_timings reason listed");
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("stale"), "still a single stale warning");
+});
+
+record("editorial-provenance: untracked plan is neutral, never stale or broken", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, UNTRACKED_PLAN_META));
+  assert(node, "the section renders");
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("Edit Plan available"), "plan availability still shown");
+  assert(badge.classList.contains("badge-neutral"), "neutral tone for unknown freshness");
+  assert(node.textContent.includes("predat"), "explains the plan may predate tracking");
+  assert(!/stale/i.test(node.textContent), "never labeled stale");
+  assert(!/broken/i.test(node.textContent), "never labeled broken");
+});
+
+record("editorial-provenance: missing or unknown plan_status falls back to Edit Plan available", () => {
+  const legacy = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, EDIT_PLAN_META));
+  const legacyBadge = legacy.querySelector(".badge");
+  assert(legacyBadge && legacyBadge.textContent.includes("Edit Plan available"),
+    "older backend without plan_status keeps the classic state");
+  const weird = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
+    ...EDIT_PLAN_META, plan_status: "exploded", stale: "yes", stale_reasons: { project: true },
+  }));
+  const weirdBadge = weird.querySelector(".badge");
+  assert(weirdBadge && weirdBadge.textContent.includes("Edit Plan available"),
+    "unknown plan_status keeps the classic state");
+  assert(!weird.querySelector(".empty-state"), "preview never hidden by malformed metadata");
+  const nonString = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
+    ...EDIT_PLAN_META, plan_status: 42,
+  }));
+  const nonStringBadge = nonString.querySelector(".badge");
+  assert(nonStringBadge && nonStringBadge.textContent.includes("Edit Plan available"),
+    "non-string plan_status keeps the classic state");
+});
+
+record("editorial-provenance: stale and untracked plans retain Open Preview", () => {
+  for (const meta of [stalePlanMeta(["project"]), stalePlanMeta([]), UNTRACKED_PLAN_META, CURRENT_PLAN_META]) {
+    const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, meta));
+    const link = node.querySelector("a");
+    assert(link && link.textContent === "Open Preview",
+      `Open Preview kept for ${meta.plan_status}`);
+    eq(link.getAttribute("href"), EDIT_PLAN_META.preview_url, "href is preview_url");
+  }
+});
+
+record("editorial-provenance: no Generate button when has_edit_plan=true", () => {
+  for (const meta of [CURRENT_PLAN_META, stalePlanMeta(["script"]), UNTRACKED_PLAN_META, EDIT_PLAN_META]) {
+    const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, meta));
+    assert(!findGenerateButton(node),
+      `no Generate button for ${meta.plan_status || "missing plan_status"}`);
+    assert(!node.querySelector("button"), "no buttons at all once a plan exists");
+  }
+});
+
+await recordAsync("editorial-provenance: rendering plan states performs no network calls", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected call" } }));
+  const region = document.createElement("div");
+  for (const meta of [CURRENT_PLAN_META, stalePlanMeta(["script", "word_timings"]), UNTRACKED_PLAN_META]) {
+    renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, meta));
+  }
+  await flush();
+  eq(calls.length, 0, "displaying current/stale/untracked states issues no requests");
 });
 
 /* --- report -------------------------------------------------------------- */
