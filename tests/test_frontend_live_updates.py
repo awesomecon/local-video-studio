@@ -102,6 +102,43 @@ def test_export_explains_and_tracks_render_only_workflow() -> None:
     assert "Existing scripts, narration, scene graphics, music, and captions will not be regenerated." in source
 
 
+def test_export_editorial_workflow_presentation() -> None:
+    """Editorial projects show the additive rendering workflow on Export.
+
+    Classic / legacy presentation is pinned by
+    test_export_explains_and_tracks_render_only_workflow; this pins the
+    editorial variant: mode detection, the description and compact workflow
+    text, the editorial_visual chip (before timeline) and its readable stage
+    label, the Edit Plan readiness metadata handling, and the force-render
+    confirmation wording.
+    """
+    source = _js("pages/export.js")
+    # Only an explicit "editorial" video_mode opts in; everything else classic.
+    assert "export function exportVideoMode(project) {" in source
+    assert 'project?.video_mode === "editorial"' in source
+    # Description: existing Edit Plan + registered assets; no LLM/TTS/replacement generation.
+    assert "Uses the existing Edit Plan, registered assets, narration, music, and captions." in source
+    assert "It does not contact the LLM, run TTS, or generate replacement assets." in source
+    # Compact workflow text names the additive editorial canvas stage.
+    assert "Editorial canvas → timeline → preview → quality check → final MP4 → frame extraction" in source
+    # Readable label for the editorial_visual sub-stage while a render runs.
+    assert 'editorial_visual: "Rendering Editorial canvas",' in source
+    # Readiness summary: Edit Plan provenance instead of the scene-visuals count.
+    assert "export function editorialPlanSummary(snap) {" in source
+    assert '"Edit Plan"' in source
+    assert "still renderable" in source, "stale/untracked plans stay renderable"
+    assert "not generated yet" in source, "missing/malformed metadata degrades to not-generated"
+    # Force-render confirmation: rebuild the visual master and downstream outputs.
+    assert "The Editorial visual master and the downstream render outputs" in source
+    assert "The Edit Plan, registered assets, narration, music, and captions are not regenerated." in source
+    # The editorial_visual chip renders before the timeline chip.
+    assert 'labeledChip("Editorial canvas", stages.editorial_visual)' in source
+    assert (
+        source.index('labeledChip("Editorial canvas", stages.editorial_visual)')
+        < source.index('stageChip("timeline", stages.timeline)')
+    )
+
+
 def test_form_screens_do_not_full_rerender() -> None:
     # Voice and Music have long-lived editable settings forms; a full live
     # re-render would wipe in-progress edits.
