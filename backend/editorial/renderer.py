@@ -19,7 +19,7 @@ from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process
 
-from .models import EditPlan, EditorialComposition, EditorialElementType
+from .models import EditPlan, EditorialComposition, EditorialElementType, EditorialTemplate
 
 
 def _script_json(value: Any) -> str:
@@ -77,6 +77,16 @@ def _archive_markup(composition: EditorialComposition) -> str:
 
 def compile_edit_plan_html(plan: EditPlan) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML."""
+    unsupported = sorted({
+        item.template.value
+        for item in plan.compositions
+        if item.template is not EditorialTemplate.ARCHIVE_CANVAS
+    })
+    if unsupported:
+        raise ValueError(
+            "the prototype renderer currently supports only archiveCanvas; "
+            f"unsupported templates: {', '.join(unsupported)}"
+        )
     markup = "".join(_archive_markup(item) for item in plan.compositions)
     payload = _script_json(plan.model_dump(mode="json"))
     return f"""<!doctype html>

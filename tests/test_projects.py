@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.schemas import Project, ProjectPlan, Scene
+from backend.editorial import build_project_mars_prototype
+from backend.schemas import Project, ProjectPlan, Scene, VideoMode
 from backend.storage import ProjectStore, slugify
 
 
@@ -24,6 +25,32 @@ def test_portable_project_layout_and_round_trip(tmp_path: Path) -> None:
     assert store.load_plan(project.slug) == plan
     assert (directory / "scenes/001/prompt.json").is_file()
     assert (directory / "variants/archive").is_dir()
+
+
+def test_portable_editorial_edit_plan_round_trip(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    project = Project(
+        title="Project Mars", topic="History", target_duration=14,
+        slug="project-mars", video_mode=VideoMode.EDITORIAL,
+    )
+    directory = store.create_project(project)
+    plan = build_project_mars_prototype(project_id=project.id)
+
+    saved = store.save_edit_plan(project.slug, plan)
+
+    assert saved == directory / "editorial/edit-plan.json"
+    assert store.load_edit_plan(project.slug) == plan
+    assert store.edit_plan_exists(project.slug)
+
+
+def test_classic_project_refuses_editorial_edit_plan(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    project = Project(title="Classic", topic="History", target_duration=14, slug="classic")
+    store.create_project(project)
+    plan = build_project_mars_prototype(project_id=project.id)
+
+    with pytest.raises(ValueError, match="Editorial Mode"):
+        store.save_edit_plan(project.slug, plan)
 
 
 def test_create_refuses_existing_project_directory(tmp_path: Path) -> None:

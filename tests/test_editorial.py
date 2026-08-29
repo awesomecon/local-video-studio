@@ -75,3 +75,11 @@ def test_compiler_escapes_text_and_emits_seek_contract() -> None:
     assert "\\u003c/script\\u003e" in html
     # The JSON embedded in the source remains the validated plan, not authored code.
     assert json.loads(plan.model_dump_json())["compositions"][0]["events"][0]["action"] == "fade"
+
+
+def test_prototype_compiler_rejects_unimplemented_templates() -> None:
+    plan = build_project_mars_prototype()
+    plan.compositions[0].template = EditorialTemplate.DOCUMENT_REVEAL
+
+    with pytest.raises(ValueError, match="supports only archiveCanvas"):
+        compile_edit_plan_html(plan)
