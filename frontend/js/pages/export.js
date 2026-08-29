@@ -2,9 +2,13 @@
  * Export screen: render controls and final-output state for the current project.
  *
  *  - "Render final video" / "Re-render final video" call
- *    POST /api/projects/{id}/render, which queues an FFmpeg-only job (stage
- *    "render") and returns 202. Existing narration and scene visuals are
- *    inputs; this action never plans or generates content.
+ *    POST /api/projects/{id}/render and return 202. Classic projects queue an
+ *    FFmpeg-only job (stage "render"); Editorial projects additionally run a
+ *    deterministic "editorial_visual" stage first, which renders the silent
+ *    canvas master from the existing Edit Plan and registered assets.
+ *  - In both modes the render consumes what already exists: narration, music,
+ *    and captions (classic adds scene visuals). It never contacts the LLM,
+ *    runs TTS, or generates replacement content.
  *  - While a render job is active the panel shows its status, progress and a
  *    Cancel action (POST /api/jobs/{id}/cancel).
  *  - The final video path and QC file path come from the project's stage
@@ -32,6 +36,103 @@ import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute } from "../router.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
+
+/* --- Mode-specific presentation -------------------------------------------
+ * Classic / legacy projects (video_mode omitted, "classic", or unknown) keep
+ * the original wording and rows; only an explicit video_mode === "editorial"
+ * project gets the additive Editorial canvas presentation. The helpers below
+ * are pure (snapshot in, presentation out) so the frontend logic tests can
+ * pin the mode-specific presentation without a backend or network.
+ */
+
+const CLASSIC_DESCRIPTION =
+  "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.";
+const EDITORIAL_DESCRIPTION =
+  "Uses the existing Edit Plan, registered assets, narration, music, and captions. "
+  + "It does not contact the LLM, run TTS, or generate replacement assets.";
+
+const CLASSIC_WORKFLOW = "Timeline → preview → quality check → final MP4 → frame extraction";
+const EDITORIAL_WORKFLOW =
+  "Editorial canvas → timeline → preview → quality check → final MP4 → frame extraction";
+
+const CLASSIC_FORCE_MESSAGE =
+  "Timeline, preview, quality check, final MP4, and extracted frames will be rebuilt. "
+  + "Existing scripts, narration, scene graphics, music, and captions will not be regenerated.";
+const EDITORIAL_FORCE_MESSAGE =
+  "The Editorial visual master and the downstream render outputs (timeline, preview, quality check, final MP4, and extracted frames) will be rebuilt. "
+  + "The Edit Plan, registered assets, narration, music, and captions are not regenerated.";
+
+/**
+ * Only an explicit "editorial" mode opts in; omitted or unknown values
+ * (legacy projects) read as classic.
+ * @param {{video_mode?: any} | null | undefined} project
+ * @returns {"classic"|"editorial"}
+ */
+export function exportVideoMode(project) {
+  return project?.video_mode === "editorial" ? "editorial" : "classic";
+}
+
+/** @param {{video_mode?: any} | null | undefined} project */
+export function exportDescriptionText(project) {
+  return exportVideoMode(project) === "editorial" ? EDITORIAL_DESCRIPTION : CLASSIC_DESCRIPTION;
+}
+
+/** @param {{video_mode?: any} | null | undefined} project */
+export function exportWorkflowText(project) {
+  return exportVideoMode(project) === "editorial" ? EDITORIAL_WORKFLOW : CLASSIC_WORKFLOW;
+}
+
+/** @param {{video_mode?: any} | null | undefined} project */
+export function exportForceConfirmMessage(project) {
+  return exportVideoMode(project) === "editorial" ? EDITORIAL_FORCE_MESSAGE : CLASSIC_FORCE_MESSAGE;
+}
+
+/**
+ * Readable explanations for the Edit Plan staleness reasons reported by the
+ * backend (`stale_reasons`). Unrecognized entries are dropped so provenance
+ * metadata can never break the screen.
+ * @type {Record<string, string>}
+ */
+const STALE_REASON_TEXT = {
+  project: "project or editorial settings changed since the plan was generated",
+  script: "the narration or script changed since the plan was generated",
+  word_timings: "the narration word timings changed since the plan was generated",
+};
+
+/**
+ * Reduce the snapshot's optional Edit Plan provenance metadata to the state
+ * the readiness summary displays. Only the recognized plan_status values are
+ * trusted: "stale" (with a best-effort list of readable reasons), "untracked",
+ * and "current". A missing or malformed block (older backends, wrong types,
+ * unknown values) degrades to "missing" so the screen never presents broken
+ * metadata; an existing plan with an unrecognized status degrades to
+ * "unknown" and keeps the classic "available" presentation. Stale and
+ * untracked plans remain renderable and are never labeled broken.
+ *
+ * @param {import("../api.js").ProjectSnapshot | null | undefined} snap
+ * @returns {{hasPlan: boolean, status: "missing"|"current"|"stale"|"untracked"|"unknown", reasons: string[]}}
+ */
+export function editorialPlanSummary(snap) {
+  const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : null;
+  if (!editorial || !editorial.has_edit_plan) return { hasPlan: false, status: "missing", reasons: [] };
+  const planStatus = (typeof editorial.plan_status === "string") ? editorial.plan_status.trim() : null;
+  if (planStatus === "stale") {
+    const raw = Array.isArray(editorial.stale_reasons) ? editorial.stale_reasons : [];
+    const seen = new Set();
+    const reasons = [];
+    for (const entry of raw) {
+      const key = (typeof entry === "string") ? entry.trim() : "";
+      if (key && STALE_REASON_TEXT[key] && !seen.has(key)) {
+        seen.add(key);
+        reasons.push(STALE_REASON_TEXT[key]);
+      }
+    }
+    return { hasPlan: true, status: "stale", reasons };
+  }
+  if (planStatus === "untracked") return { hasPlan: true, status: "untracked", reasons: [] };
+  if (planStatus === "current") return { hasPlan: true, status: "current", reasons: [] };
+  return { hasPlan: true, status: "unknown", reasons: [] };
+}
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -114,6 +215,7 @@ function exportPanel() {
  */
 function build(snap, stages, active, last, thumbnails) {
   const project = snap.project;
+  const mode = exportVideoMode(project);
   const parts = [];
 
   const selected = (thumbnails.candidates || []).find((candidate) => candidate.selected);
@@ -185,8 +287,8 @@ function build(snap, stages, active, last, thumbnails) {
   const forceBtn = el("button", {
     class: "btn", type: "button", disabled: Boolean(active),
   }, "Re-render final video");
-  runBtn.onclick = () => doRender(false);
-  forceBtn.onclick = () => doRender(true);
+  runBtn.onclick = () => doRender(false, project);
+  forceBtn.onclick = () => doRender(true, project);
 
   const statusRegion = el("div", { class: "mt" },
     active ? jobState(active)
@@ -198,17 +300,16 @@ function build(snap, stages, active, last, thumbnails) {
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "Render controls"),
       el("div", { class: "panel-body" },
-        el("p", { class: "muted small" },
-          "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.",
-        ),
+        el("p", { class: "muted small" }, exportDescriptionText(project)),
         renderInputSummary(snap, stages),
         el("div", { class: "row" },
           runBtn,
           forceBtn,
           el("span", { class: "spacer" }),
-          el("span", { class: "muted small" }, "Timeline → preview → quality check → final MP4 → frame extraction"),
+          el("span", { class: "muted small" }, exportWorkflowText(project)),
         ),
         el("div", { class: "row mt" },
+          mode === "editorial" ? labeledChip("Editorial canvas", stages.editorial_visual) : null,
           stageChip("timeline", stages.timeline),
           stageChip("render_preview", stages.render_preview),
           stageChip("quality_control", stages.quality_control),
@@ -318,12 +419,13 @@ function lastJobNote(job) {
 
 /**
  * @param {boolean} force
+ * @param {import("../api.js").Project} project — the mode selects the confirmation wording
  */
-async function doRender(force) {
+async function doRender(force, project) {
   if (force) {
     const ok = await confirm({
       title: "Re-render final video?",
-      message: "Timeline, preview, quality check, final MP4, and extracted frames will be rebuilt. Existing scripts, narration, scene graphics, music, and captions will not be regenerated.",
+      message: exportForceConfirmMessage(project),
       confirmLabel: "Re-render final video",
     });
     if (!ok) return;
@@ -340,40 +442,105 @@ async function doRender(force) {
 /**
  * Compact, non-authoritative readiness summary. The backend performs the
  * definitive file and provenance validation before it queues a render.
+ * Classic / legacy projects count recorded scene visuals; Editorial projects
+ * show Edit Plan availability and provenance status instead (there is no
+ * scene grid to count there).
  */
-function renderInputSummary(snap, stages) {
+export function renderInputSummary(snap, stages) {
+  const editorial = exportVideoMode(snap.project) === "editorial";
   const assets = snap.assets || [];
-  const sceneIds = new Set((snap.scenes || []).map((scene) => scene.id));
-  const visualIds = new Set(assets
-    .filter((asset) => asset.scene_id && asset.settings && asset.settings.role === "visual")
-    .map((asset) => asset.scene_id));
-  const visualCount = [...sceneIds].filter((id) => visualIds.has(id)).length;
   const narrationReady = Boolean(
     stages.narration && stages.narration.status === "completed"
     || assets.some((asset) => asset.settings && asset.settings.role === "narration")
   );
   const captionsReady = Boolean(stages.subtitles && stages.subtitles.status === "completed");
   const musicReady = assets.some((asset) => asset.settings && asset.settings.role === "music");
-  return el("dl", { class: "kv" },
-    el("dt", {}, "Scene visuals"),
-    el("dd", {}, `${visualCount}/${sceneIds.size} recorded`),
+  const rows = editorial ? editPlanSummaryRow(snap) : sceneVisualsSummaryRow(snap, assets);
+  rows.push(
     el("dt", {}, "Narration"),
     el("dd", {}, narrationReady ? "recorded" : "not recorded; backend will verify the local file"),
     el("dt", {}, "Optional inputs"),
-    el("dd", {}, `${captionsReady ? "captions recorded" : "captions derived from scenes"}; ${musicReady ? "music recorded" : "no music"}`),
+    el("dd", {}, `${captionsReady ? "captions recorded"
+        : editorial ? "captions derived from narration" : "captions derived from scenes"}; ${musicReady ? "music recorded" : "no music"}`),
   );
+  return el("dl", { class: "kv" }, ...rows);
 }
 
-function renderStageLabel(stage) {
+/**
+ * Classic readiness row: how many scenes have a recorded visual asset.
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @param {import("../api.js").Asset[]} assets
+ * @returns {Array<HTMLElement>}
+ */
+function sceneVisualsSummaryRow(snap, assets) {
+  const sceneIds = new Set((snap.scenes || []).map((scene) => scene.id));
+  const visualIds = new Set(assets
+    .filter((asset) => asset.scene_id && asset.settings && asset.settings.role === "visual")
+    .map((asset) => asset.scene_id));
+  const visualCount = [...sceneIds].filter((id) => visualIds.has(id)).length;
+  return [
+    el("dt", {}, "Scene visuals"),
+    el("dd", {}, `${visualCount}/${sceneIds.size} recorded`),
+  ];
+}
+
+/**
+ * Editorial readiness row: Edit Plan availability and provenance status.
+ * Stale and untracked plans stay renderable and are never labeled broken;
+ * missing or malformed metadata degrades to the "not generated" fallback.
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @returns {Array<HTMLElement>}
+ */
+function editPlanSummaryRow(snap) {
+  const plan = editorialPlanSummary(snap);
+  const text = !plan.hasPlan
+    ? "not generated yet — an Edit Plan is required before rendering"
+    : plan.status === "current"
+      ? "current"
+      : plan.status === "stale"
+        ? `stale — ${plan.reasons.length ? plan.reasons.join("; ")
+          : "tracked inputs changed since the plan was generated"}; still renderable`
+        : plan.status === "untracked"
+          ? "available — freshness unverified (the plan may predate provenance tracking); still renderable"
+          : "available";
+  return [el("dt", {}, "Edit Plan"), el("dd", {}, text)];
+}
+
+/**
+ * Human label for a render sub-stage while a job is active; unknown values
+ * fall back to the generic "Rendering".
+ * @param {string|undefined} stage
+ * @returns {string}
+ */
+export function renderStageLabel(stage) {
   return ({
     queued: "Queued",
     validating_inputs: "Validating inputs",
+    editorial_visual: "Rendering Editorial canvas",
     timeline: "Building timeline",
     render_preview: "Rendering preview",
     quality_control: "Quality check",
     render_final: "Rendering final MP4",
     thumbnails: "Extracting frames",
   })[stage] || "Rendering";
+}
+
+/**
+ * Pipeline chip identical to ui.stageChip but with a caller-supplied label —
+ * used for the editorial_visual stage, which the shared STAGE_LABELS map does
+ * not know.
+ * @param {string} label
+ * @param {{status?: string} | null | undefined} st
+ * @returns {HTMLElement}
+ */
+function labeledChip(label, st) {
+  const status = (st && st.status) || "pending";
+  const kind = status === "completed" ? "good"
+    : status === "failed" ? "critical"
+    : status === "running" ? "accent"
+    : "neutral";
+  const statusLabel = { completed: "Completed", failed: "Failed", running: "Running", pending: "Pending" }[status] || status;
+  return badge(kind, `${label}: ${statusLabel}`);
 }
 
 /**

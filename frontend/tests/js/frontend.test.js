@@ -48,6 +48,19 @@
  *                                Generate button appears once a plan exists,
  *                                and rendering these states issues no
  *                                network calls.
+ *   9. Export mode presentation   - classic and legacy screens keep the
+ *                                original wording, readiness rows, chips,
+ *                                and confirmation text; editorial screens
+ *                                show the additive workflow (Editorial
+ *                                canvas → timeline → preview → quality check
+ *                                → final MP4 → frame extraction), an
+ *                                editorial_visual chip before timeline, a
+ *                                readable "Rendering Editorial canvas" stage
+ *                                label, and Edit Plan provenance in the
+ *                                readiness summary (stale/untracked plans
+ *                                stay usable, missing/malformed metadata
+ *                                degrades to "not generated", and rendering
+ *                                the summary issues no network requests).
  */
 
 import {
@@ -71,6 +84,16 @@ import {
   editorialPreviewSection,
   renderEditorialRegion,
 } from "../../js/pages/project.js";
+import {
+  renderExport,
+  exportVideoMode,
+  exportDescriptionText,
+  exportWorkflowText,
+  exportForceConfirmMessage,
+  editorialPlanSummary,
+  renderInputSummary,
+  renderStageLabel,
+} from "../../js/pages/export.js";
 
 const results = [];
 
@@ -798,6 +821,346 @@ await recordAsync("editorial-provenance: rendering plan states performs no netwo
   await flush();
   eq(calls.length, 0, "displaying current/stale/untracked states issues no requests");
 });
+
+/* --- 9. Export screen mode presentation ---------------------------------- */
+
+// The Export screen fetches exactly two things (project snapshot + thumbnail
+// studio state); the stub answers only those, and any other call fails loudly.
+const THUMBNAILS_EMPTY = { plan: {}, candidates: [], selection: null, legacy_frames: [], jobs: [] };
+
+const CLASSIC_EXPORT_PROJECT = { ...LEGACY_PROJECT, id: "proj-xc", video_mode: "classic" };
+const LEGACY_EXPORT_PROJECT = { ...LEGACY_PROJECT, id: "proj-xl" }; // video_mode omitted
+const EDITORIAL_EXPORT_PROJECT = { ...LEGACY_PROJECT, id: "proj-xe", video_mode: "editorial" };
+
+const CLASSIC_SCENES = [
+  { id: "sc-x1", title: "One", duration: 30 },
+  { id: "sc-x2", title: "Two", duration: 60 },
+];
+const CLASSIC_ASSETS = [
+  { id: "as-xv", scene_id: "sc-x1", created_at: "2026-01-01T00:00:00Z", settings: { role: "visual" } },
+  { id: "as-xn", scene_id: "sc-x1", created_at: "2026-01-01T00:00:00Z", settings: { role: "narration" } },
+  { id: "as-xm", scene_id: null, created_at: "2026-01-01T00:00:00Z", settings: { role: "music" } },
+];
+
+const EDIT_PLAN_CURRENT = { has_edit_plan: true, plan_status: "current" };
+const EDIT_PLAN_STALE = { has_edit_plan: true, plan_status: "stale", stale_reasons: ["project", "word_timings"] };
+const EDIT_PLAN_UNTRACKED = { has_edit_plan: true, plan_status: "untracked" };
+const EDIT_PLAN_LEGACY = { has_edit_plan: true }; // no plan_status (older backends)
+
+function exportSnapshot(project, editorial, { stages = {}, scenes = [], assets = [], jobs = [] } = {}) {
+  const snap = { project, scenes, assets, jobs, directory: "/tmp/lvs", stage_state: { version: 1, stages } };
+  if (editorial !== undefined) snap.editorial = editorial;
+  return snap;
+}
+
+async function renderExportScreen(projectId, snap) {
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}`) return { payload: snap };
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}/thumbnails`) return { payload: THUMBNAILS_EMPTY };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = projectId;
+  const screen = renderExport({ name: "export", param: null });
+  await flush();
+  return { screen, calls };
+}
+
+function renderControlsPanel(screen) {
+  const panel = [...screen.querySelectorAll(".panel")].find(
+    (p) => (p.querySelector(".panel-title")?.textContent || "") === "Render controls",
+  );
+  assert(panel, "the render controls panel rendered");
+  return panel;
+}
+
+function chipRowBadges(panel) {
+  const row = panel.querySelector(".row.mt");
+  assert(row, "the stage-chip row exists");
+  return [...row.querySelectorAll(".badge")].map((b) => b.textContent);
+}
+
+function closeModals() {
+  document.querySelectorAll("dialog.modal").forEach((d) => d.remove());
+}
+
+record("export: mode text helpers keep the classic presentation verbatim", () => {
+  for (const project of [CLASSIC_EXPORT_PROJECT, LEGACY_EXPORT_PROJECT, { video_mode: "weird" }, {}]) {
+    eq(exportVideoMode(project), "classic");
+    eq(exportDescriptionText(project),
+      "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.");
+    eq(exportWorkflowText(project), "Timeline → preview → quality check → final MP4 → frame extraction");
+    eq(exportForceConfirmMessage(project),
+      "Timeline, preview, quality check, final MP4, and extracted frames will be rebuilt. " +
+      "Existing scripts, narration, scene graphics, music, and captions will not be regenerated.");
+  }
+  eq(exportVideoMode(EDITORIAL_EXPORT_PROJECT), "editorial");
+  eq(exportDescriptionText(EDITORIAL_EXPORT_PROJECT),
+    "Uses the existing Edit Plan, registered assets, narration, music, and captions. " +
+    "It does not contact the LLM, run TTS, or generate replacement assets.");
+  eq(exportWorkflowText(EDITORIAL_EXPORT_PROJECT),
+    "Editorial canvas → timeline → preview → quality check → final MP4 → frame extraction");
+  eq(exportForceConfirmMessage(EDITORIAL_EXPORT_PROJECT),
+    "The Editorial visual master and the downstream render outputs (timeline, preview, quality check, final MP4, and extracted frames) will be rebuilt. " +
+    "The Edit Plan, registered assets, narration, music, and captions are not regenerated.");
+});
+
+record("export: editorialPlanSummary reduces current/stale/untracked metadata", () => {
+  const snap = (editorial) => exportSnapshot(EDITORIAL_EXPORT_PROJECT, editorial);
+  eq(editorialPlanSummary(snap(EDIT_PLAN_CURRENT)), { hasPlan: true, status: "current", reasons: [] });
+  eq(editorialPlanSummary(snap(EDIT_PLAN_UNTRACKED)), { hasPlan: true, status: "untracked", reasons: [] });
+  eq(editorialPlanSummary(snap({ ...EDIT_PLAN_STALE, stale_reasons: ["word_timings", "project"] })),
+    {
+      hasPlan: true, status: "stale",
+      reasons: [
+        "the narration word timings changed since the plan was generated",
+        "project or editorial settings changed since the plan was generated",
+      ],
+    }, "reasons are deduplicated and translated");
+});
+
+record("export: editorialPlanSummary degrades missing and malformed metadata", () => {
+  const snap = (editorial) => exportSnapshot(EDITORIAL_EXPORT_PROJECT, editorial);
+  eq(editorialPlanSummary(snap({ has_edit_plan: false })), { hasPlan: false, status: "missing", reasons: [] });
+  eq(editorialPlanSummary(snap(undefined)), { hasPlan: false, status: "missing", reasons: [] }, "no editorial block");
+  eq(editorialPlanSummary(snap(null)), { hasPlan: false, status: "missing", reasons: [] }, "null block");
+  eq(editorialPlanSummary(snap("corrupt")), { hasPlan: false, status: "missing", reasons: [] }, "non-object block");
+  eq(editorialPlanSummary(snap(42)), { hasPlan: false, status: "missing", reasons: [] }, "non-object number");
+  eq(editorialPlanSummary(snap({ ...EDIT_PLAN_LEGACY, plan_status: "exploded" })),
+    { hasPlan: true, status: "unknown", reasons: [] }, "unknown status keeps the plan available");
+  eq(editorialPlanSummary(snap({ ...EDIT_PLAN_LEGACY, plan_status: 42, stale: "yes", stale_reasons: { project: true } })),
+    { hasPlan: true, status: "unknown", reasons: [] }, "malformed provenance fields keep the plan available");
+  eq(editorialPlanSummary(snap({ ...EDIT_PLAN_STALE, stale_reasons: ["??", 7, null, ""] })),
+    { hasPlan: true, status: "stale", reasons: [] }, "unrecognizable reasons drop out");
+  // Classic snapshots never get the Edit Plan row, editorial block or not.
+  const classic = exportSnapshot(CLASSIC_EXPORT_PROJECT, EDIT_PLAN_CURRENT);
+  assert(renderInputSummary(classic, classic.stage_state.stages).textContent.includes("Scene visuals"),
+    "classic summary unchanged");
+});
+
+record("export: editorial_visual stage gets a readable label", () => {
+  eq(renderStageLabel("editorial_visual"), "Rendering Editorial canvas");
+  eq(renderStageLabel("timeline"), "Building timeline", "classic stages unchanged");
+  eq(renderStageLabel("render_preview"), "Rendering preview", "classic stages unchanged");
+  eq(renderStageLabel("quality_control"), "Quality check", "classic stages unchanged");
+  eq(renderStageLabel("render_final"), "Rendering final MP4", "classic stages unchanged");
+  eq(renderStageLabel("thumbnails"), "Extracting frames", "classic stages unchanged");
+  eq(renderStageLabel("queued"), "Queued", "queued unchanged");
+  eq(renderStageLabel("nope"), "Rendering", "unknown values still fall back");
+  eq(renderStageLabel(undefined), "Rendering", "undefined still falls back");
+});
+
+await recordAsync("export: classic screen keeps the unchanged presentation", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen, calls } = await renderExportScreen(CLASSIC_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  eq(panel.querySelector("p.muted.small").textContent,
+    "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.");
+  const summary = panel.querySelector("dl.kv");
+  assert(summary.textContent.includes("Scene visuals"), "scene visual count row kept");
+  assert(summary.textContent.includes("1/2 recorded"), "visual count computed as before");
+  assert(summary.textContent.includes("captions derived from scenes"), "classic caption wording kept");
+  assert(!summary.textContent.includes("Edit Plan"), "no Edit Plan row on classic screens");
+  assert(panel.textContent.includes("Timeline → preview → quality check → final MP4 → frame extraction"),
+    "classic workflow text kept");
+  eq(chipRowBadges(panel), [
+    "Timeline: Pending", "Preview render: Pending", "Quality check: Pending",
+    "Final render: Pending", "Thumbnails: Pending",
+  ], "no editorial canvas chip on classic screens");
+  eq(calls.map((c) => `${c.method} ${c.url}`),
+    ["GET /api/projects/proj-xc", "GET /api/projects/proj-xc/thumbnails"],
+    "only the snapshot and thumbnail fetches");
+});
+
+await recordAsync("export: legacy project (omitted video_mode) keeps the classic presentation", async () => {
+  const snap = exportSnapshot(LEGACY_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen } = await renderExportScreen(LEGACY_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  eq(panel.querySelector("p.muted.small").textContent,
+    "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.");
+  assert(panel.querySelector("dl.kv").textContent.includes("Scene visuals"), "scene visuals row kept");
+  assert(panel.textContent.includes("Timeline → preview → quality check → final MP4 → frame extraction"),
+    "classic workflow kept");
+  eq(chipRowBadges(panel)[0], "Timeline: Pending", "first chip is timeline, not editorial canvas");
+});
+
+await recordAsync("export: editorial screen shows the additive workflow (current plan)", async () => {
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT,
+    { stages: { editorial_visual: { status: "completed" } } });
+  const { screen, calls } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  eq(panel.querySelector("p.muted.small").textContent,
+    "Uses the existing Edit Plan, registered assets, narration, music, and captions. " +
+    "It does not contact the LLM, run TTS, or generate replacement assets.");
+  const summary = panel.querySelector("dl.kv");
+  assert(summary.textContent.includes("Edit Plan"), "Edit Plan readiness row present");
+  assert(summary.textContent.includes("current"), "current plan status shown");
+  assert(!summary.textContent.includes("Scene visuals"), "no scene visual count on editorial screens");
+  assert(summary.textContent.includes("captions derived from narration"), "editorial caption wording");
+  assert(panel.textContent.includes("Editorial canvas → timeline → preview → quality check → final MP4 → frame extraction"),
+    "compact editorial workflow");
+  eq(chipRowBadges(panel), [
+    "Editorial canvas: Completed", "Timeline: Pending", "Preview render: Pending",
+    "Quality check: Pending", "Final render: Pending", "Thumbnails: Pending",
+  ], "editorial canvas chip leads the stage row");
+  eq(calls.map((c) => `${c.method} ${c.url}`),
+    ["GET /api/projects/proj-xe", "GET /api/projects/proj-xe/thumbnails"],
+    "the page renders from the existing snapshot only (no Edit Plan fetch)");
+});
+
+await recordAsync("export: editorial stale plan remains usable (never broken)", async () => {
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_STALE);
+  const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  const text = panel.querySelector("dl.kv").textContent;
+  assert(text.includes("Edit Plan"), "Edit Plan row present");
+  assert(text.includes("stale"), "stale status surfaced");
+  assert(text.includes("project or editorial settings changed"), "project reason readable");
+  assert(text.includes("word timings changed"), "word_timings reason readable");
+  assert(text.includes("still renderable"), "stale plan stays renderable");
+  assert(!text.includes("broken"), "never labeled broken");
+  eq(chipRowBadges(panel)[0], "Editorial canvas: Pending", "plan state does not change the stage chips");
+});
+
+await recordAsync("export: editorial untracked plan remains usable", async () => {
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_UNTRACKED);
+  const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
+  const text = renderControlsPanel(screen).querySelector("dl.kv").textContent;
+  assert(text.includes("Edit Plan"), "Edit Plan row present");
+  assert(text.includes("freshness unverified"), "explains the unverifiable plan");
+  assert(text.includes("still renderable"), "untracked plan stays renderable");
+  assert(!text.toLowerCase().includes("stale"), "never labeled stale");
+  assert(!text.includes("broken"), "never labeled broken");
+});
+
+await recordAsync("export: editorial missing/malformed metadata falls back to not generated", async () => {
+  for (const editorial of [undefined, { has_edit_plan: false }, "corrupt", 42]) {
+    const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, editorial);
+    const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
+    const text = renderControlsPanel(screen).querySelector("dl.kv").textContent;
+    assert(text.includes("Edit Plan"), `Edit Plan row survives ${String(typeof editorial)}`);
+    assert(text.includes("not generated"), `missing plan stated for ${String(typeof editorial)}`);
+    assert(!text.includes("broken"), "malformed metadata never reads as broken");
+  }
+});
+
+await recordAsync("export: active editorial render shows the canvas stage label", async () => {
+  const job = {
+    id: "job-xe1", project_id: "proj-xe", scene_id: null, stage: "render", backend: "ffmpeg",
+    status: "preparing", progress: 0.12, priority: 0,
+    parameters: {
+      force: false, current_stage: "editorial_visual",
+      stages: ["editorial_visual", "timeline", "render_preview", "quality_control", "render_final", "thumbnails"],
+    },
+    attempt_count: 1, max_attempts: 3, error: null,
+    created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:01Z",
+    started_at: null, completed_at: null,
+  };
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT,
+    { stages: { editorial_visual: { status: "running" } }, jobs: [job] });
+  const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  assert(panel.textContent.includes("Rendering Editorial canvas"), "readable label for the active sub-stage");
+  assert(panel.textContent.includes("Preparing"), "job status badge present");
+  assert(panel.textContent.includes("job job-xe1"), "job id shown");
+  eq(chipRowBadges(panel)[0], "Editorial canvas: Running", "running chip status");
+});
+
+await recordAsync("export: building the readiness summary issues no network requests", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected call" } }));
+  const metas = [EDIT_PLAN_CURRENT, EDIT_PLAN_STALE, EDIT_PLAN_UNTRACKED, EDIT_PLAN_LEGACY,
+    { has_edit_plan: false }, "corrupt"];
+  for (const meta of metas) {
+    const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, meta);
+    const summary = renderInputSummary(snap, snap.stage_state.stages);
+    assert(summary.textContent.includes("Edit Plan"), `summary renders for ${typeof meta}`);
+    assert(!summary.textContent.includes("Scene visuals"), "editorial summary never counts scene visuals");
+  }
+  const classic = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const classicSummary = renderInputSummary(classic, classic.stage_state.stages);
+  assert(classicSummary.textContent.includes("Scene visuals"), "classic summary unchanged");
+  await flush();
+  eq(calls.length, 0, "summary rendering is pure: zero requests");
+});
+
+await recordAsync("export: editorial force-render confirmation explains the additive rebuild", async () => {
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT);
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-xe") return { payload: snap };
+    if (call.method === "GET" && call.url === "/api/projects/proj-xe/thumbnails") return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "POST" && call.url === "/api/projects/proj-xe/render") {
+      return { payload: {
+        id: "job-xe2", project_id: "proj-xe", scene_id: null, stage: "render", backend: "ffmpeg",
+        status: "queued", progress: 0, priority: 0,
+        parameters: { force: true, current_stage: "queued" },
+        attempt_count: 0, max_attempts: 3, error: null,
+        created_at: "2026-01-03T00:00:00Z", updated_at: "2026-01-03T00:00:00Z",
+        started_at: null, completed_at: null,
+      } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = EDITORIAL_EXPORT_PROJECT.id;
+  const screen = renderExport({ name: "export", param: null });
+  await flush();
+  const panel = renderControlsPanel(screen);
+  const forceBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Re-render final video");
+  assert(forceBtn, "force button present");
+  forceBtn.click();
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation dialog opened");
+  eq(modal.querySelector(".modal-head h2").textContent, "Re-render final video?");
+  const message = modal.querySelector(".modal-body").textContent;
+  assert(message.includes("The Editorial visual master and the downstream render outputs"), "rebuild scope explained");
+  assert(message.includes("The Edit Plan, registered assets, narration, music, and captions are not regenerated."),
+    "inputs are not regenerated");
+  const confirmBtn = [...modal.querySelectorAll(".modal-foot button")].find((b) => b.textContent === "Re-render final video");
+  assert(confirmBtn, "confirm action present");
+  confirmBtn.click();
+  await flush();
+  const posts = calls.filter((c) => c.method === "POST");
+  eq(posts.length, 1, "one render POST after confirmation");
+  eq(posts[0].url, "/api/projects/proj-xe/render", "posts to the render endpoint");
+  eq(posts[0].body, { force: true }, "force flag preserved");
+  closeModals();
+});
+
+await recordAsync("export: classic force-render confirmation is unchanged", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-xc") return { payload: snap };
+    if (call.method === "GET" && call.url === "/api/projects/proj-xc/thumbnails") return { payload: THUMBNAILS_EMPTY };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = CLASSIC_EXPORT_PROJECT.id;
+  const screen = renderExport({ name: "export", param: null });
+  await flush();
+  const panel = renderControlsPanel(screen);
+  const forceBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Re-render final video");
+  assert(forceBtn, "force button present");
+  forceBtn.click();
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation dialog opened");
+  const message = modal.querySelector(".modal-body").textContent;
+  eq(message,
+    "Timeline, preview, quality check, final MP4, and extracted frames will be rebuilt. " +
+    "Existing scripts, narration, scene graphics, music, and captions will not be regenerated.");
+  const cancelBtn = [...modal.querySelectorAll(".modal-foot button")].find((b) => b.textContent === "Cancel");
+  assert(cancelBtn, "cancel action present");
+  cancelBtn.click();
+  await flush();
+  eq(calls.filter((c) => c.method === "POST").length, 0, "canceling issues no render request");
+  closeModals();
+});
+
+// Leave shared app state the way later screens expect it.
+state.currentProjectId = null;
+closeModals();
 
 /* --- report -------------------------------------------------------------- */
 
