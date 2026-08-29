@@ -610,6 +610,47 @@ await recordAsync("editorial-generate: repeated live refreshes never trigger gen
   assert(findGenerateButton(region), "the Generate button is present but fires only on click");
 });
 
+await recordAsync("editorial-generate: live refresh preserves the one in-flight action", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let finishPost;
+  const calls = [];
+  globalThis.fetch = (url, opts) => {
+    const method = (opts && opts.method) || "GET";
+    calls.push({ url: String(url), method });
+    if (method === "GET") {
+      const withPlan = projectSnapshot(
+        EDITORIAL_PROJECT, { ...EDIT_PLAN_META, generate_url: GENERATE_URL });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify(withPlan)),
+      });
+    }
+    return new Promise((resolve) => {
+      finishPost = () => resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ version: 1 })),
+      });
+    });
+  };
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  const pendingButton = findGenerateButton(region);
+  pendingButton.click();
+  assert(pendingButton.disabled, "the original action is pending");
+
+  // A live snapshot tick with the old has_edit_plan=false state must not
+  // replace the guarded button with a fresh enabled action.
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  eq(findGenerateButton(region), pendingButton, "pending action remains mounted");
+  eq(calls.length, 1, "the refresh issues no second request");
+
+  finishPost();
+  await flush();
+  eq(calls.filter((c) => c.method === "POST").length, 1, "only one POST completes");
+});
+
 /* --- report -------------------------------------------------------------- */
 
 const passed = results.filter((r) => r[1]).length;
