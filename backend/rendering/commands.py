@@ -274,6 +274,7 @@ def build_finalize_command(
     """Build narration/music mixing, subtitle, and final MP4 mux command."""
 
     duration = timeline.duration_seconds
+    _width, _height, fps = _dimensions(timeline, options)
     argv = [
         str(require_ffmpeg(binaries)),
         "-hide_banner",
@@ -417,6 +418,11 @@ def build_finalize_command(
                 options.video_preset,
                 "-crf",
                 str(options.crf),
+                # The libass filter can otherwise make FFmpeg choose its
+                # default 25 fps output time base even when the deterministic
+                # source and project both use another frame rate.
+                "-r",
+                str(fps),
             ]
         )
     else:

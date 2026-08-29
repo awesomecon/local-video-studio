@@ -89,6 +89,7 @@ from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
 from backend.editorial.models import EditPlan, EditPlanProvenance, EditPlanSourceKind
 from backend.editorial.planner import EditorialPlanner
+from backend.editorial.renderer import EditorialRenderer, compile_edit_plan_html
 from backend.schemas import (
     Asset,
     AssetType,
@@ -240,6 +241,9 @@ class PipelineService:
             None if self.mock_mode else self.registry.get("local_llm")  # type: ignore[arg-type]
         )
         self.editorial_planner = EditorialPlanner(self.director.llm)
+        # Chromium discovery stays lazy so Classic Mode startup and tests never
+        # acquire an Editorial rendering dependency they do not use.
+        self._editorial_renderer: EditorialRenderer | None = None
         self.renderer = FFmpegRenderer(temp_root=temp_root or config.paths.temp_root)
         self.graphic_renderer = GraphicScreenRenderer()
         self.thumbnails = ThumbnailStudioService(self)
@@ -426,6 +430,10 @@ class PipelineService:
             )
             self.store.save_edit_plan(project.slug, plan)
             self.store.save_edit_plan_provenance(project.slug, provenance)
+            self._invalidate_stages(project, {
+                "editorial_visual", "timeline", "render_preview",
+                "quality_control", "render_final", "thumbnails",
+            })
             return plan
 
     def load_edit_plan(self, project_id: str) -> EditPlan:
@@ -472,6 +480,10 @@ class PipelineService:
             provenance_path = self.store.save_edit_plan_provenance(
                 project.slug, provenance,
             )
+            self._invalidate_stages(project, {
+                "editorial_visual", "timeline", "render_preview",
+                "quality_control", "render_final", "thumbnails",
+            })
             outputs = [edit_plan_path, provenance_path]
             if draft is not None:
                 draft_path = self.store.project_path(project) / "editorial" / "planner-draft.json"
@@ -1213,6 +1225,10 @@ class PipelineService:
             self._ensure_music(project, force=force)
             self._ensure_subtitles(project, force=force)
             self._check_parent_job(parent_job_id)
+            if project.video_mode is VideoMode.EDITORIAL:
+                self.ensure_edit_plan(project.id)
+                self._ensure_editorial_visual(project, force=force)
+                self._check_parent_job(parent_job_id)
             self._ensure_timeline(project, force=force)
             self._ensure_preview(project, force=force)
             self._ensure_qc(project, force=force)
@@ -1243,7 +1259,7 @@ class PipelineService:
             raise
 
     def queue_render(self, project_id: str, *, force: bool = False) -> GenerationJob:
-        self._project(project_id)  # 404 before any conflict/validation error
+        project = self._project(project_id)  # 404 before any conflict/validation error
         # One in-flight render/pipeline per project: both run_render and
         # run_project write preview.mp4/final.mp4 and race _archive_output.
         active = next(
@@ -1269,7 +1285,7 @@ class PipelineService:
             parameters={
                 "force": force,
                 "current_stage": "queued",
-                "stages": [
+                "stages": (["editorial_visual"] if project.video_mode is VideoMode.EDITORIAL else []) + [
                     "timeline",
                     "render_preview",
                     "quality_control",
@@ -1338,9 +1354,11 @@ class PipelineService:
                 self.jobs.fail(job.id, redact_secrets(exc))
             raise
 
-    def validate_render_inputs(self, project_id: str) -> Timeline:
+    def validate_render_inputs(self, project_id: str) -> Timeline | EditPlan:
         """Validate existing media without invoking any generation backend."""
         project = self._project(project_id)
+        if project.video_mode is VideoMode.EDITORIAL:
+            return self._validate_editorial_render_inputs(project)
         scenes = self.database.list_scenes(project.id)
         if not scenes:
             raise PipelineError(
@@ -1373,19 +1391,26 @@ class PipelineService:
             self._update_parent_job(parent_job_id, progress=0.08, current_stage="validating_inputs")
             self.validate_render_inputs(project_id)
             if force:
-                self._invalidate_stages(
-                    project,
-                    {
+                invalidated = {
                         "timeline",
                         "render_preview",
                         "quality_control",
                         "render_final",
                         "thumbnails",
-                    },
-                )
+                    }
+                if project.video_mode is VideoMode.EDITORIAL:
+                    invalidated.add("editorial_visual")
+                self._invalidate_stages(project, invalidated)
             self._save_project(
                 project.model_copy(update={"status": ProjectStatus.RENDERING, "updated_at": utc_now()})
             )
+
+            if project.video_mode is VideoMode.EDITORIAL:
+                self._update_parent_job(
+                    parent_job_id, progress=0.12, current_stage="editorial_visual",
+                )
+                self._ensure_editorial_visual(project, force=force)
+                self._check_parent_job(parent_job_id)
 
             self._update_parent_job(parent_job_id, progress=0.15, current_stage="timeline")
             self._ensure_timeline(project, force=force)
@@ -6780,6 +6805,69 @@ class PipelineService:
 
         return self._execute_stage(project, "timeline", operation, backend="ffmpeg")[0]
 
+    def _editorial_renderer_instance(self) -> EditorialRenderer:
+        """Create the Chromium renderer only when an Editorial export needs it."""
+        if self._editorial_renderer is None:
+            self._editorial_renderer = EditorialRenderer()
+        return self._editorial_renderer
+
+    def _validate_editorial_render_inputs(self, project: Project) -> EditPlan:
+        """Validate an existing Edit Plan and narration without generating either."""
+        try:
+            plan = self.store.load_edit_plan(project.slug)
+        except FileNotFoundError as exc:
+            raise PipelineError(
+                "Cannot render Editorial Mode because no Edit Plan exists. "
+                "Generate or save an Edit Plan first."
+            ) from exc
+        # Compilation is a cheap validation step which rejects templates that
+        # the deterministic renderer does not implement before a job is queued.
+        try:
+            compile_edit_plan_html(plan)
+        except ValueError as exc:
+            raise PipelineError(f"Cannot render this Editorial Edit Plan: {exc}") from exc
+        root = self.store.project_path(project)
+        narration = root / "narration" / "master.wav"
+        if not narration.is_file():
+            raise PipelineError("Narration audio is missing: narration/master.wav")
+        try:
+            narration_duration = wav_duration(narration)
+        except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error) as exc:
+            raise PipelineError("Narration audio is not a valid PCM WAV file.") from exc
+        if not math.isfinite(narration_duration) or narration_duration <= 0:
+            raise PipelineError("Narration audio must have a positive, finite duration.")
+        # Narration remains the master clock. A plan may intentionally leave a
+        # short visual tail, but it must never truncate spoken audio.
+        frame_tolerance = max(1.0 / plan.fps, 0.05)
+        if narration_duration > plan.duration + frame_tolerance:
+            raise PipelineError(
+                "The Editorial Edit Plan ends before narration finishes. "
+                "Regenerate or extend the plan using the current narration timings."
+            )
+        return plan
+
+    def _ensure_editorial_visual(self, project: Project, *, force: bool) -> Path:
+        """Render the deterministic, silent Editorial canvas for common FFmpeg finishing."""
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise PipelineError("Editorial visual rendering requires an Editorial Mode project.")
+        output = self.store.project_path(project) / "editorial" / "master.mp4"
+        if not force and self._stage_complete(project, "editorial_visual"):
+            return output
+
+        def operation() -> tuple[Path, list[Path]]:
+            plan = self._validate_editorial_render_inputs(project)
+            self._archive_output(project, output)
+            self._editorial_renderer_instance().render(
+                plan,
+                output,
+                asset_root=self.store.project_path(project),
+            )
+            return output, [output]
+
+        return self._execute_stage(
+            project, "editorial_visual", operation, backend="chromium",
+        )[0]
+
     def _ensure_preview(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "renders" / "preview.mp4"
         if not force and self._stage_complete(project, "render_preview"):
@@ -6929,6 +7017,8 @@ class PipelineService:
         return self._execute_stage(project, "metadata", operation, backend="mock")[0]
 
     def _build_timeline(self, project: Project) -> Timeline:
+        if project.video_mode is VideoMode.EDITORIAL:
+            return self._build_editorial_timeline(project)
         root = self.store.project_path(project)
         narration = root / "narration" / "master.wav"
         if not narration.is_file():
@@ -7070,6 +7160,41 @@ class PipelineService:
                 "scene_audio_synced": scene_audio_synced,
             }
         )
+        return timeline
+
+    def _build_editorial_timeline(self, project: Project) -> Timeline:
+        """Wrap one deterministic Editorial master in the shared audio/caption timeline."""
+        plan = self._validate_editorial_render_inputs(project)
+        root = self.store.project_path(project)
+        visual = root / "editorial" / "master.mp4"
+        if not visual.is_file() or visual.stat().st_size <= 0:
+            raise PipelineError(
+                "Editorial visual master is missing; render the Editorial composition first."
+            )
+        narration = root / "narration" / "master.wav"
+        music = root / "music" / "background.wav"
+        timeline = build_timeline(
+            [SceneTiming(
+                scene_id="editorial-master",
+                asset_path=visual,
+                duration_seconds=plan.duration,
+                media_kind="video",
+            )],
+            width=project.resolution[0],
+            height=project.resolution[1],
+            fps=project.fps,
+            narration_path=narration,
+            narration_gain_db=self.tts.active_narration_gain(project.id),
+            music_path=music if music.is_file() else None,
+            subtitles=self._subtitle_cues(project) if plan.captions_enabled else (),
+        )
+        timeline.metadata.update({
+            "workflow_version": "editorial-timeline-v1",
+            "duration_policy": "narration_clock_with_editorial_tail_v1",
+            "edit_plan_duration_seconds": plan.duration,
+            "captions_enabled": plan.captions_enabled,
+            "editorial_text_enabled": plan.editorial_text_enabled,
+        })
         return timeline
 
     @staticmethod

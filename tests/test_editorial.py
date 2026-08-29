@@ -13,7 +13,14 @@ from backend.editorial import (
     compile_edit_plan_html,
 )
 from backend.captions import CaptionWord
+from backend.core import load_config
+from backend.pipeline import PipelineService
+from backend.rendering.binaries import require_ffmpeg
+from backend.rendering.probe import probe_media
+from backend.rendering.process import run_media_process
 from backend.schemas import Asset, AssetType, Project, ProjectPlan, Scene, VideoMode
+from backend.schemas import ProjectCreate
+from backend.tts.audio import wav_duration
 
 
 def test_legacy_project_payload_defaults_to_classic_without_migration() -> None:
@@ -78,6 +85,18 @@ def test_compiler_escapes_text_and_emits_seek_contract() -> None:
     assert "\\u003c/script\\u003e" in html
     # The JSON embedded in the source remains the validated plan, not authored code.
     assert json.loads(plan.model_dump_json())["compositions"][0]["events"][0]["action"] == "fade"
+
+
+def test_compiler_can_hide_editorial_typography_without_hiding_caption_data() -> None:
+    plan = build_project_mars_prototype().model_copy(update={
+        "editorial_text_enabled": False,
+        "captions_enabled": True,
+    })
+
+    html = compile_edit_plan_html(plan)
+
+    assert '<body class="editorial-text-disabled">' in html
+    assert '"captions_enabled":true' in html
 
 
 def test_archive_renderer_binds_roles_not_prototype_element_ids() -> None:
@@ -268,3 +287,81 @@ def test_editorial_planner_mock_fallback_is_valid_and_project_owned() -> None:
     assert plan.project_id == project.id and plan.duration == 14
     assert plan.compositions[0].narration_refs == [script.scenes[0].id]
     compile_edit_plan_html(plan)
+
+
+class _SyntheticEditorialRenderer:
+    def __init__(self, ffmpeg) -> None:
+        self.ffmpeg = ffmpeg
+        self.calls: list[tuple[EditPlan, Path, Path | None]] = []
+
+    def render(
+        self, plan: EditPlan, output: Path, *, preview_html=None, asset_root=None,
+    ) -> Path:
+        self.calls.append((plan, output, asset_root))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        run_media_process([
+            str(self.ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            f"color=c=#111315:s={plan.width}x{plan.height}:r={plan.fps}:d={plan.duration}",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
+        ], timeout=60)
+        return output
+
+
+def test_editorial_render_only_uses_shared_audio_caption_and_export_pipeline(tmp_path: Path) -> None:
+    pipeline = PipelineService(
+        load_config(environ={}),
+        database_path=tmp_path / "app" / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "app" / "tmp",
+        mock_mode=True,
+    )
+    project = pipeline.create_project(ProjectCreate(
+        title="Editorial Export", topic="narration-led evidence board",
+        target_duration=1, resolution=(320, 568), fps=12,
+        video_mode=VideoMode.EDITORIAL,
+    ))
+    pipeline.ensure_plan(project.id)
+    project = pipeline._project(project.id)
+    pipeline._ensure_narration(project, force=False)
+    pipeline._ensure_music(project, force=False)
+    pipeline._ensure_subtitles(project, force=False)
+    root = pipeline.store.project_path(project)
+    duration = wav_duration(root / "narration" / "master.wav")
+    script = pipeline.store.load_plan(project.slug)
+    plan = EditPlan(
+        project_id=project.id, width=320, height=568, fps=12,
+        captions_enabled=True,
+        compositions=[EditorialComposition(
+            id="master", start=0, duration=duration,
+            template=EditorialTemplate.ARCHIVE_CANVAS,
+            elements=[EditorialElement(
+                id="headline", type=EditorialElementType.TEXT,
+                text="EVIDENCE", role="year",
+            )],
+            events=[EditorialEvent(
+                time=0, action=MotionPrimitive.FADE_UP, target="headline",
+            )],
+            narration_refs=[script.scenes[0].id],
+        )],
+    )
+    pipeline.save_edit_plan(project.id, plan)
+    synthetic = _SyntheticEditorialRenderer(require_ffmpeg(pipeline.renderer.binaries))
+    pipeline._editorial_renderer = synthetic  # type: ignore[assignment]
+
+    job = pipeline.queue_render(project.id, force=True)
+    final = pipeline.run_render(project.id, force=True, parent_job_id=job.id)
+
+    info = probe_media(final, pipeline.renderer.binaries)
+    assert info.has_video and info.has_audio
+    assert (info.width, info.height) == project.resolution
+    assert info.fps == project.fps
+    assert synthetic.calls == [(plan, root / "editorial" / "master.mp4", root)]
+    timeline = json.loads((root / "timeline.json").read_text(encoding="utf-8"))
+    assert timeline["clips"][0]["path"] == "editorial/master.mp4"
+    assert {track["kind"] for track in timeline["audio_tracks"]} == {"narration", "music"}
+    assert timeline["subtitles"]
+    stages = pipeline.project_snapshot(project.id)["stage_state"]["stages"]
+    assert stages["editorial_visual"]["outputs"] == ["editorial/master.mp4"]
+    assert stages["render_final"]["outputs"] == ["renders/final.mp4"]
+    assert pipeline.jobs.get(job.id).status.value == "completed"
