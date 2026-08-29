@@ -144,6 +144,90 @@ def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path
     assert narration_changed["stale_reasons"] == ["script"]
 
 
+def test_editorial_display_settings_are_narrow_and_selectively_invalidate(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Editorial Switches", "topic": "Independent display layers",
+        "target_duration": 14, "resolution": [1080, 1920], "fps": 24,
+        "video_mode": "editorial",
+    }).json()["project"]["id"]
+    assert client.post(f"/api/projects/{project_id}/plan", json={}).status_code == 200
+    original = client.post(f"/api/projects/{project_id}/editorial/plan").json()
+    snapshot = client.get(f"/api/projects/{project_id}").json()["editorial"]
+    assert snapshot["captions_enabled"] is True
+    assert snapshot["editorial_text_enabled"] is True
+    assert snapshot["settings_url"].endswith("/editorial/settings")
+
+    empty = client.patch(f"/api/projects/{project_id}/editorial/settings", json={})
+    assert empty.status_code == 409
+    extra = client.patch(
+        f"/api/projects/{project_id}/editorial/settings", json={"arbitrary": True},
+    )
+    assert extra.status_code == 422
+
+    service = app.state.service
+    project = service._project(project_id)
+    root = service.store.project_path(project)
+    tracked = {
+        "editorial_visual": "editorial/master.mp4",
+        "timeline": "timeline.json",
+        "render_preview": "renders/preview.mp4",
+        "quality_control": "renders/qc.json",
+        "render_final": "renders/final.mp4",
+        "thumbnails": "thumbnails/candidate-01/thumbnail.png",
+    }
+    for relative in tracked.values():
+        output = root / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"recorded")
+    service._atomic_json(root / "stage-state.json", {
+        "version": 1,
+        "stages": {
+            stage: {"status": "completed", "outputs": [relative]}
+            for stage, relative in tracked.items()
+        },
+    })
+
+    captions = client.patch(
+        f"/api/projects/{project_id}/editorial/settings",
+        json={"captions_enabled": False},
+    )
+    assert captions.status_code == 200
+    assert captions.json()["captions_enabled"] is False
+    assert captions.json()["editorial_text_enabled"] is True
+    assert captions.json()["compositions"] == original["compositions"]
+    stages = client.get(f"/api/projects/{project_id}").json()["stage_state"]["stages"]
+    assert "editorial_visual" in stages
+    assert all(stage not in stages for stage in set(tracked) - {"editorial_visual"})
+
+    service._atomic_json(root / "stage-state.json", {
+        "version": 1,
+        "stages": {
+            stage: {"status": "completed", "outputs": [relative]}
+            for stage, relative in tracked.items()
+        },
+    })
+    typography = client.patch(
+        f"/api/projects/{project_id}/editorial/settings",
+        json={"editorial_text_enabled": False},
+    )
+    assert typography.status_code == 200
+    assert typography.json()["editorial_text_enabled"] is False
+    stages = client.get(f"/api/projects/{project_id}").json()["stage_state"]["stages"]
+    assert all(stage not in stages for stage in tracked)
+    editorial = client.get(f"/api/projects/{project_id}").json()["editorial"]
+    assert editorial["captions_enabled"] is False
+    assert editorial["editorial_text_enabled"] is False
+    assert editorial["plan_status"] == "current"
+
+
 def test_legacy_editorial_plan_without_provenance_is_untracked(tmp_path: Path) -> None:
     from backend.editorial import build_project_mars_prototype
 
