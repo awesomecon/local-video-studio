@@ -141,6 +141,7 @@ import { apiUrl } from "./config.js";
  * @property {string} topic
  * @property {number} target_duration
  * @property {"fixed"|"llm"} [duration_mode] — fixed scales scenes to the target; llm ignores the target and the director sizes the runtime to its script
+ * @property {"classic"|"editorial"} [video_mode] — "classic" = the existing scene-based generator; "editorial" = motion-graphics compositions; omitted means classic
  * @property {string} aspect_ratio  — "16:9" | "9:16" | "1:1"
  * @property {number} fps
  * @property {[number, number]} resolution

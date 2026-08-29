@@ -9,6 +9,7 @@
 import { el } from "../dom.js";
 import { state, persistCurrentProject, upsertProject } from "../state.js";
 import { createProject } from "../api.js";
+import { DEFAULT_VIDEO_MODE, VIDEO_MODE_OPTIONS } from "../video-mode.js";
 import { field, setFieldError, errorPanel, toast } from "../ui.js";
 import { navigate } from "../router.js";
 
@@ -20,6 +21,10 @@ export function renderNewProject(_route) {
   /* --- inputs --------------------------------------------------------- */
   const titleInput = el("input", { id: "np-title", type: "text", maxlength: "1000", placeholder: "e.g. How Local LLMs Work" });
   const topicInput = el("input", { id: "np-topic", type: "text", placeholder: "What the video is about" });
+  const videoModeSelect = el("select", { id: "np-video-mode" },
+    ...VIDEO_MODE_OPTIONS.map((o) => el("option", { value: o.value }, o.label)),
+  );
+  videoModeSelect.value = DEFAULT_VIDEO_MODE;
   const durationInput = el("input", { id: "np-duration", type: "number", min: "1", step: "1", value: "120" });
   const durationModeSelect = el("select", { id: "np-duration-mode" },
     el("option", { value: "fixed" }, "Fixed — scenes match the target"),
@@ -43,6 +48,11 @@ export function renderNewProject(_route) {
   /* --- field wrappers (kept for setFieldError) ------------------------ */
   const fTitle = field({ label: "Title", input: titleInput, hint: "Required, up to 1000 characters. The slug is generated from this." });
   const fTopic = field({ label: "Topic", input: topicInput, hint: "Required." });
+  const fVideoMode = field({
+    label: "Video Style",
+    input: videoModeSelect,
+    hint: "Classic uses the existing scene-based generator; Editorial builds motion-graphics compositions.",
+  });
   const fDuration = field({ label: "Target duration (seconds)", input: durationInput, hint: "Greater than 0." });
   const fDurationMode = field({
     label: "Duration control",
@@ -114,6 +124,7 @@ export function renderNewProject(_route) {
     const body = {
       title: titleInput.value.trim(),
       topic: topicInput.value.trim(),
+      video_mode: videoModeSelect.value,
       target_duration: Number(durationInput.value),
       duration_mode: durationModeSelect.value,
       aspect_ratio: aspectSelect.value,
@@ -149,6 +160,7 @@ export function renderNewProject(_route) {
 
   const form = el("form", { onsubmit: onSubmit },
     el("div", { class: "grid-2" }, fTitle, fTopic),
+    fVideoMode,
     el("div", { class: "grid-2" }, fDuration, fAspect),
     fDurationMode,
     el("div", { class: "grid-2" }, fFps, fResolution),
