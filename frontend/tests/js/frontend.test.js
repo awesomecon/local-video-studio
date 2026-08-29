@@ -18,6 +18,12 @@
  *   4. Selected-shot navigation  - sceneEditorHash()/parseRoute() round-trip
  *                                the /shot/{id} deep link (including
  *                                hyphenated implicit ids).
+ *   5. Video style (video_mode)  - the New Project form defaults the selector
+ *                                to classic and POSTs the selected mode; an
+ *                                omitted/unknown mode on an existing project
+ *                                reads as classic; a changed mode is PATCHed
+ *                                and an unchanged one is not; reset restores
+ *                                the saved mode.
  */
 
 import {
@@ -30,6 +36,15 @@ import {
   sceneHasExplicitShots,
 } from "../../js/shots.js";
 import { parseRoute, sceneEditorHash } from "../../js/router.js";
+import { renderNewProject } from "../../js/pages/new-project.js";
+import { state } from "../../js/state.js";
+import { effectiveVideoMode } from "../../js/video-mode.js";
+import {
+  readProjectFields,
+  diffFields,
+  buildPatchBody,
+  setInputs,
+} from "../../js/project-fields.js";
 
 const results = [];
 
@@ -50,6 +65,45 @@ function eq(actual, expected, msg) {
   const a = JSON.stringify(actual);
   const b = JSON.stringify(expected);
   if (a !== b) throw new Error(`${msg || "eq"}: got ${a}, want ${b}`);
+}
+
+// Async twin of record(): for tests that drive a real submit + a stubbed
+// fetch. Resolves via the microtask queue, which --virtual-time-budget flushes.
+async function recordAsync(name, fn) {
+  try {
+    await fn();
+    results.push([name, true, ""]);
+  } catch (err) {
+    results.push([name, false, String(err && err.message ? err.message : err)]);
+  }
+}
+
+// Flush the microtask queue a handful of turns (enough for the app's
+// createProject -> request -> fetch -> res.text() -> JSON.parse chain).
+async function flush(turns = 30) {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
+// Stub globalThis.fetch, recording each call and answering via handler(call).
+function stubFetch(handler) {
+  const calls = [];
+  globalThis.fetch = (url, opts) => {
+    const call = {
+      url: String(url),
+      method: (opts && opts.method) || "GET",
+      body: (opts && opts.body != null) ? JSON.parse(opts.body) : null,
+    };
+    calls.push(call);
+    const outcome = (handler && handler(call)) || {};
+    const status = outcome.status || 200;
+    const payload = outcome.payload !== undefined ? outcome.payload : {};
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      text: () => Promise.resolve(JSON.stringify(payload)),
+    });
+  };
+  return calls;
 }
 
 /* --- 1. Materialized scenes -------------------------------------------- */
@@ -236,6 +290,97 @@ record("implicit projection keeps ids stable for deep links", () => {
   eq(implicit.id, "sc-42-implicit");
   eq(implicit.status, "ready");
   eq(sceneHasExplicitShots({ shots: [implicit] }), false);
+});
+
+/* --- 5. Video style (video_mode) ---------------------------------------- */
+
+// A legacy project payload that omits `video_mode` entirely.
+const LEGACY_PROJECT = {
+  id: "proj-1", slug: "legacy", title: "T", topic: "P",
+  target_duration: 120, duration_mode: "fixed", aspect_ratio: "16:9",
+  fps: 24, resolution: [1920, 1080], style: "documentary", audience: "general",
+  narrator_preference: null, visual_quality: "balanced", instructions: "",
+};
+
+record("video-mode: omitted/unknown mode on an existing project means classic", () => {
+  eq(effectiveVideoMode(LEGACY_PROJECT), "classic", "omitted -> classic");
+  eq(effectiveVideoMode({}), "classic", "empty payload -> classic");
+  eq(effectiveVideoMode(null), "classic", "null -> classic");
+  eq(effectiveVideoMode({ video_mode: "classic" }), "classic", "explicit classic");
+  eq(effectiveVideoMode({ video_mode: "editorial" }), "editorial", "explicit editorial preserved");
+  eq(effectiveVideoMode({ video_mode: "weird" }), "classic", "unknown value falls back to classic");
+});
+
+record("video-mode: baseline readProjectFields is classic when the field is missing", () => {
+  eq(readProjectFields(LEGACY_PROJECT).video_mode, "classic", "missing -> classic baseline");
+  eq(readProjectFields({ ...LEGACY_PROJECT, video_mode: "editorial" }).video_mode, "editorial", "saved editorial preserved in baseline");
+});
+
+record("video-mode: a changed mode is PATCHed; an unchanged one is omitted", () => {
+  const baseline = readProjectFields(LEGACY_PROJECT); // classic
+  const edited = { ...baseline, video_mode: "editorial" };
+  const d = diffFields(baseline, edited);
+  assert(d.changed.has("video_mode"), "change detected");
+  const body = buildPatchBody(d.changed, edited);
+  eq(body.video_mode, "editorial", "PATCH carries the new mode");
+  eq(Object.keys(body).length, 1, "only the changed field is sent");
+
+  const dSame = diffFields(baseline, { ...baseline });
+  eq(buildPatchBody(dSame.changed, { ...baseline }), {}, "no change -> empty PATCH body");
+});
+
+record("video-mode: reset restores the saved mode", () => {
+  const sel = document.createElement("select");
+  sel.append(new Option("Classic", "classic"), new Option("Editorial", "editorial"));
+  sel.value = "editorial"; // an unsaved edit
+  const inputs = { video_mode: { input: sel, kind: "select" } };
+  setInputs(inputs, { video_mode: "classic" });
+  eq(sel.value, "classic", "reset back to the saved classic");
+});
+
+record("video-mode: New Project form defaults the selector to classic", () => {
+  const node = renderNewProject({ name: "new-project", param: null });
+  const sel = node.querySelector("#np-video-mode");
+  assert(sel, "the Video Style selector is present");
+  eq(sel.value, "classic", "defaults to classic");
+  eq([...sel.options].map((o) => o.value), ["classic", "editorial"], "option order");
+});
+
+await recordAsync("video-mode: New Project POST carries the selected video_mode", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "POST" && call.url.endsWith("/api/projects")) {
+      return {
+        payload: {
+          project: { ...LEGACY_PROJECT, id: "new-1", title: call.body.title, video_mode: call.body.video_mode },
+          scenes: [], assets: [], jobs: [], directory: "/tmp/lvs", stage_state: {},
+        },
+      };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+
+  // (a) leaving the selector at its default posts classic
+  let node = renderNewProject({ name: "new-project", param: null });
+  node.querySelector("#np-title").value = "How Local LLMs Work";
+  node.querySelector("#np-topic").value = "Local LLMs";
+  node.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await flush();
+  let post = calls.find((c) => c.method === "POST");
+  assert(post, "POST /api/projects was issued");
+  eq(post.body.video_mode, "classic", "default posts classic");
+  node.remove();
+
+  // (b) choosing editorial posts editorial
+  node = renderNewProject({ name: "new-project", param: null });
+  node.querySelector("#np-title").value = "Editorial piece";
+  node.querySelector("#np-topic").value = "Motion graphics";
+  node.querySelector("#np-video-mode").value = "editorial";
+  node.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await flush();
+  post = calls.filter((c) => c.method === "POST").pop();
+  eq(post.body.video_mode, "editorial", "selected mode is posted");
+  node.remove();
 });
 
 /* --- report -------------------------------------------------------------- */

@@ -4,8 +4,11 @@
  * invalidation warnings.
  *
  *  - Editable fields mirror the backend `ProjectEdit` contract (extra="forbid"):
- *    title, topic, target_duration, aspect_ratio, fps, resolution, style,
- *    audience, narrator_preference, visual_quality, instructions.
+ *    title, topic, video_mode, duration_mode, target_duration, aspect_ratio,
+ *    fps, resolution, style, audience, narrator_preference, visual_quality,
+ *    instructions. `video_mode` ("Video Style") omitted on old projects is
+ *    classic; a mode change is a brief-level change and is only PATCHed when
+ *    it differs from the saved value.
  *  - Read-only provenance: status, directory, selected script model, created /
  *    updated timestamps, and stage-state chips.
  *  - Editing a brief / narrator field, or a dimension field after planning,
@@ -22,6 +25,14 @@ import {
   upsertProject,
 } from "../state.js";
 import { getProject, editProject } from "../api.js";
+import { VIDEO_MODE_OPTIONS, effectiveVideoMode } from "../video-mode.js";
+import {
+  buildPatchBody,
+  diffFields,
+  readInputs,
+  readProjectFields,
+  setInputs,
+} from "../project-fields.js";
 import {
   field,
   setFieldError,
@@ -54,13 +65,6 @@ const NUMBER_FIELDS = [
 ];
 const ASPECT_OPTIONS = ["16:9", "9:16", "1:1"];
 const DURATION_MODE_OPTIONS = ["fixed", "llm"];
-const BRIEF_FIELDS = new Set([
-  "title", "topic", "style", "audience", "visual_quality", "instructions",
-  "duration_mode",
-]);
-const DIMENSION_FIELDS = new Set([
-  "target_duration", "aspect_ratio", "fps", "resolution",
-]);
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -168,6 +172,10 @@ function buildForm(snap, projectId) {
   const inputs = {};
   const fTitle = textField(inputs, "title", p.title, { required: true, max: 1000, hint: "Required, up to 1000 characters." });
   const fTopic = textField(inputs, "topic", p.topic, { required: true, max: 500, hint: "Required, up to 500 characters." });
+  const fVideoMode = selectField(inputs, "video_mode", effectiveVideoMode(p), VIDEO_MODE_OPTIONS, {
+    label: "Video Style",
+    hint: "Classic: the existing scene-based generator. Editorial: motion-graphics compositions.",
+  });
   const fDuration = numberField(inputs, "target_duration", p.target_duration, { min: 0.0001, step: "any", hint: "Greater than 0." });
   const fDurationMode = selectField(inputs, "duration_mode", p.duration_mode || "fixed", DURATION_MODE_OPTIONS, {
     hint: "fixed: scenes match the target. llm: the AI decides the runtime from its script (target is ignored).",
@@ -189,6 +197,7 @@ function buildForm(snap, projectId) {
 
   const form = el("form", { novalidate: true, onsubmit: (ev) => { ev.preventDefault(); doSave(); } },
     el("div", { class: "grid-2" }, fTitle, fTopic),
+    fVideoMode,
     el("div", { class: "grid-2" }, fDuration, fAspect),
     el("div", { class: "grid-2" }, fFps, fResolution),
     fDurationMode,
@@ -277,8 +286,7 @@ function buildForm(snap, projectId) {
     saveBtn.textContent = "Saving…";
     // Build the PATCH body only from the changed fields (changed is a Set of
     // keys; read the new values from the validated inputs).
-    const body = {};
-    for (const key of changed) body[key] = values[key];
+    const body = buildPatchBody(changed, values);
     if (markStale) body.mark_scenes_stale = true;
     try {
       const result = await editProject(state.config, projectId, body);
@@ -341,11 +349,14 @@ function numberField(inputs, key, value, opts = {}) {
 }
 
 function selectField(inputs, key, value, options, opts = {}) {
+  // Options may be plain strings (label = value) or {value, label} pairs, so a
+  // select can show descriptive copy for each raw value.
+  const norm = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
   const input = el("select", { id: `pd-${key}` },
-    ...options.map((o) => el("option", { value: o }, o)),
+    ...norm.map((o) => el("option", { value: o.value }, o.label)),
   );
   input.value = value;
-  const f = field({ label: humanize(key), input, hint: opts.hint });
+  const f = field({ label: opts.label ?? humanize(key), input, hint: opts.hint });
   inputs[key] = { input, wrap: f, kind: "select" };
   return f;
 }
@@ -359,84 +370,11 @@ function resolutionField(inputs, value, opts = {}) {
   return f;
 }
 
-/* --- Value reading / diffing ---------------------------------------------- */
-
-/** @param {any} p */
-function readProjectFields(p) {
-  return {
-    title: p.title,
-    topic: p.topic,
-    target_duration: p.target_duration,
-    duration_mode: p.duration_mode || "fixed",
-    aspect_ratio: p.aspect_ratio,
-    fps: p.fps,
-    resolution: p.resolution,
-    style: p.style,
-    audience: p.audience,
-    narrator_preference: p.narrator_preference,
-    visual_quality: p.visual_quality,
-    instructions: p.instructions,
-  };
-}
-
-/** @param {Record<string, any>} inputs */
-function readInputs(inputs) {
-  const out = {};
-  for (const key of Object.keys(inputs)) {
-    const spec = inputs[key];
-    if (spec.kind === "resolution") {
-      out.resolution = [Number(spec.input.w.value), Number(spec.input.h.value)];
-    } else if (spec.kind === "number") {
-      out[key] = Number(spec.input.value);
-    } else if (spec.kind === "text" || spec.kind === "textarea") {
-      const raw = spec.input.value;
-      out[key] = spec.nullable ? (raw.trim() ? raw : null) : raw;
-    } else {
-      out[key] = spec.input.value;
-    }
-  }
-  return out;
-}
-
-/** @param {Record<string, any>} inputs @param {Record<string, any>} values */
-function setInputs(inputs, values) {
-  for (const key of Object.keys(inputs)) {
-    const spec = inputs[key];
-    const v = values[key];
-    if (spec.kind === "resolution") {
-      spec.input.w.value = String(v[0]);
-      spec.input.h.value = String(v[1]);
-    } else if (spec.kind === "select") {
-      spec.input.value = v;
-    } else if (spec.kind === "text" || spec.kind === "textarea") {
-      spec.input.value = v == null ? "" : v;
-    } else {
-      spec.input.value = String(v);
-    }
-  }
-}
-
-/**
- * @param {Record<string, any>} baseline
- * @param {Record<string, any>} values
+/*
+ * Value reading / diffing / PATCH body construction live in
+ * `../project-fields.js` (pure, so the headless logic tests can import them
+ * without booting the app shell) and are imported above.
  */
-function diffFields(baseline, values) {
-  const changed = new Set();
-  for (const key of Object.keys(values)) {
-    if (!fieldsEqual(baseline[key], values[key])) changed.add(key);
-  }
-  return {
-    changed,
-    briefChanged: [...changed].some((k) => BRIEF_FIELDS.has(k)),
-    dimensionChanged: [...changed].some((k) => DIMENSION_FIELDS.has(k)),
-    narratorChanged: changed.has("narrator_preference"),
-  };
-}
-
-function fieldsEqual(a, b) {
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => x === b[i]);
-  return a === b;
-}
 
 /**
  * @param {{briefChanged: boolean, dimensionChanged: boolean, narratorChanged: boolean}} d
