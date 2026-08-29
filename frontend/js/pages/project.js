@@ -112,7 +112,11 @@ function buildScreen(projectId) {
     el("div", { class: "row" },
       el("span", { class: "panel-title" }, "Brief"),
       el("span", { class: "spacer" }),
-      el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => load(body, provenance, projectId) }, "Refresh"),
+      el("button", {
+        class: "btn btn-ghost btn-sm",
+        type: "button",
+        onclick: () => load(body, provenance, editorialRegion, projectId),
+      }, "Refresh"),
     ),
     body,
   );
@@ -607,14 +611,20 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
     pending = true;
     button.disabled = true;
     button.textContent = GENERATE_PLAN_PENDING_LABEL;
+    button.dataset.editorialGeneratePending = "true";
     errors.replaceChildren();
     try {
       await generateEditPlan(state.config, generateUrl);
+      pending = false;
+      button.disabled = false;
+      button.textContent = GENERATE_PLAN_LABEL;
+      button.dataset.editorialGeneratePending = "false";
       if (onGenerated) await onGenerated();
     } catch (err) {
       pending = false;
       button.disabled = false;
       button.textContent = GENERATE_PLAN_LABEL;
+      button.dataset.editorialGeneratePending = "false";
       errors.replaceChildren(errorPanel(err));
       toastError(err, "Edit Plan generation failed");
     }
@@ -672,6 +682,10 @@ export function editorialPreviewSection(snap, onGenerated = null) {
  * @param {(() => any) | null} [onGenerated]
  */
 export function renderEditorialRegion(region, snap, onGenerated = null) {
+  // A planner call can legitimately outlive several live-feed ticks. Keep the
+  // mounted pending action in place so a refresh cannot expose a second,
+  // enabled button for the same in-flight POST.
+  if (region.querySelector('[data-editorial-generate-pending="true"]')) return;
   const hook = onGenerated || (() => reloadEditorialRegion(region, snap));
   const section = editorialPreviewSection(snap, hook);
   region.replaceChildren(...(section ? [section] : []));
