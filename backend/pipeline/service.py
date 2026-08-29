@@ -88,6 +88,7 @@ from backend.rendering.process import (
 from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
 from backend.editorial.models import EditPlan
+from backend.editorial.planner import EditorialPlanner
 from backend.schemas import (
     Asset,
     AssetType,
@@ -238,6 +239,7 @@ class PipelineService:
         self.director = DirectorEngine(
             None if self.mock_mode else self.registry.get("local_llm")  # type: ignore[arg-type]
         )
+        self.editorial_planner = EditorialPlanner(self.director.llm)
         self.renderer = FFmpegRenderer(temp_root=temp_root or config.paths.temp_root)
         self.graphic_renderer = GraphicScreenRenderer()
         self.thumbnails = ThumbnailStudioService(self)
@@ -404,6 +406,7 @@ class PipelineService:
             snapshot["editorial"] = {
                 "has_edit_plan": self.store.edit_plan_exists(project.slug),
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
+                "generate_url": f"/api/projects/{project.id}/editorial/plan",
                 "preview_url": f"/api/projects/{project.id}/editorial/preview",
             }
         if recovery:
@@ -422,6 +425,68 @@ class PipelineService:
         if project.video_mode is not VideoMode.EDITORIAL:
             raise ValueError("project is not in Editorial Mode")
         return self.store.load_edit_plan(project.slug)
+
+    def ensure_edit_plan(self, project_id: str) -> EditPlan:
+        """Generate the first Edit Plan from the stored script and narration clock."""
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise PipelineError("project is not in Editorial Mode")
+        if self.store.edit_plan_exists(project.slug):
+            return self.store.load_edit_plan(project.slug)
+        try:
+            script = self.store.load_plan(project.slug)
+        except FileNotFoundError as exc:
+            raise PipelineError(
+                "Generate the project script before generating an Editorial Edit Plan."
+            ) from exc
+        self._require_selected_llm_model(project)
+        assets = self.database.list_assets(project.id)
+        words = self._editorial_word_timings(project)
+
+        def operation() -> tuple[EditPlan, list[Path]]:
+            # Keep the planner tied to the same externally managed local model
+            # object even when tests or runtime configuration replace it.
+            self.editorial_planner.llm = self.director.llm
+            edit_plan, draft = self.editorial_planner.plan_with_draft(
+                project,
+                script,
+                assets=assets,
+                word_timings=words,
+                mock_mode=self.mock_mode,
+            )
+            edit_plan_path = self.store.save_edit_plan(project.slug, edit_plan)
+            outputs = [edit_plan_path]
+            if draft is not None:
+                draft_path = self.store.project_path(project) / "editorial" / "planner-draft.json"
+                self._atomic_json(draft_path, draft.model_dump(mode="json"))
+                outputs.append(draft_path)
+            return edit_plan, outputs
+
+        return self._execute_stage(
+            project,
+            "editorial_plan",
+            operation,
+            backend="mock" if self.mock_mode else "local_llm",
+        )[0]
+
+    def _editorial_word_timings(self, project: Project) -> list[CaptionWord]:
+        path = self.store.project_path(project) / "subtitles" / "word-timings.json"
+        if not path.is_file():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return [
+                CaptionWord(
+                    start_seconds=float(item["start_seconds"]),
+                    end_seconds=float(item["end_seconds"]),
+                    text=str(item["text"]),
+                )
+                for item in payload["words"]
+            ]
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PipelineError(
+                "Stored narration word timings are invalid; regenerate caption alignment."
+            ) from exc
 
     def list_projects(self) -> tuple[list[Project], list[dict[str, Any]]]:
         """List projects reconciling the SQLite index with on-disk directories.

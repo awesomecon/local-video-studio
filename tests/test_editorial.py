@@ -8,10 +8,12 @@ from pydantic import ValidationError
 from backend.editorial import (
     EditorialAsset, EditorialAssetType,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
-    EditorialTemplate, EditPlan, MotionPrimitive, build_project_mars_prototype,
+    EditorialPlanner, EditorialTemplate, EditPlan, MotionPrimitive,
+    build_project_mars_prototype,
     compile_edit_plan_html,
 )
-from backend.schemas import Project, VideoMode
+from backend.captions import CaptionWord
+from backend.schemas import Asset, AssetType, Project, ProjectPlan, Scene, VideoMode
 
 
 def test_legacy_project_payload_defaults_to_classic_without_migration() -> None:
@@ -147,3 +149,122 @@ def test_prototype_compiler_rejects_unimplemented_templates() -> None:
 
     with pytest.raises(ValueError, match="supports only archiveCanvas"):
         compile_edit_plan_html(plan)
+
+
+class _PlannerLLM:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls: list[dict] = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        return kwargs["validator"](self.payload)
+
+
+def _editorial_script(project: Project) -> ProjectPlan:
+    return ProjectPlan(
+        project_id=project.id, title=project.title, outline=["Opening"],
+        target_duration=14,
+        scenes=[Scene(
+            project_id=project.id, index=0, title="Opening", duration=14,
+            narration="In 1949, one document imagined a government on Mars.",
+        )],
+    )
+
+
+def _planner_payload(scene_id: str, *, asset_id: str | None = None) -> dict:
+    assets = []
+    elements = [
+        {"id": "date", "type": "text", "text": "1949", "role": "year"},
+        {"id": "name", "type": "text", "text": "ELON", "role": "reveal"},
+    ]
+    if asset_id:
+        assets.append({
+            "id": "photo-asset", "type": "historical_photo",
+            "asset_id": asset_id, "evidence_class": "evidence", "locked": True,
+        })
+        elements.append({
+            "id": "photo", "type": "image", "asset_id": "photo-asset",
+            "role": "archive-photo",
+        })
+    return {"compositions": [{
+        "id": "opening", "start": 0, "duration": 14,
+        "template": "archiveCanvas", "assets": assets, "elements": elements,
+        "events": [
+            {"time": 0, "action": "fadeUp", "target": "date"},
+            {"time": 12.5, "action": "fadeUp", "target": "name"},
+        ],
+        "narration_refs": [scene_id],
+    }]}
+
+
+def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars",
+        video_mode=VideoMode.EDITORIAL, resolution=(1080, 1920), fps=24,
+    )
+    script = _editorial_script(project)
+    llm = _PlannerLLM(_planner_payload(script.scenes[0].id))
+    words = [CaptionWord(0, 0.4, "In"), CaptionWord(0.5, 14.0, "Mars.")]
+
+    plan = EditorialPlanner(llm).plan(project, script, word_timings=words)
+
+    assert plan.project_id == project.id
+    assert plan.duration == 14 and (plan.width, plan.height, plan.fps) == (1080, 1920, 24)
+    assert llm.calls[0]["structured"] is True
+    assert llm.calls[0]["thinking_budget_tokens"] == 16_384
+    assert "HTML, CSS, JavaScript" in llm.calls[0]["messages"][0]["content"]
+    context = json.loads(llm.calls[0]["messages"][1]["content"])
+    assert context["word_timestamps"][-1]["end_seconds"] == 14.0
+    assert context["approved_templates"] == ["archiveCanvas"]
+
+
+def test_editorial_planner_resolves_verified_asset_without_trusting_llm_source() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars-assets",
+        video_mode=VideoMode.EDITORIAL,
+    )
+    script = _editorial_script(project)
+    asset = Asset(
+        id="verified", project_id=project.id, scene_id=script.scenes[0].id,
+        type=AssetType.IMAGE, filepath="scenes/001/imports/photo.png",
+        backend="imported_local", model="user-supplied", seed=0,
+    )
+    plan = EditorialPlanner(_PlannerLLM(
+        _planner_payload(script.scenes[0].id, asset_id=asset.id)
+    )).plan(project, script, assets=[asset])
+
+    planned_asset = plan.compositions[0].assets[0]
+    assert planned_asset.source == "scenes/001/imports/photo.png"
+    assert planned_asset.evidence_class.value == "evidence" and planned_asset.locked
+
+
+def test_editorial_planner_rejects_model_authored_sources_and_unknown_refs() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars-reject",
+        video_mode=VideoMode.EDITORIAL,
+    )
+    script = _editorial_script(project)
+    with pytest.raises(ValueError, match="unknown narration"):
+        EditorialPlanner(_PlannerLLM(_planner_payload("unknown-scene"))).plan(project, script)
+
+    payload = _planner_payload(script.scenes[0].id)
+    payload["compositions"][0]["assets"] = [{
+        "id": "remote", "type": "historical_photo", "source": "https://example.com/a.jpg",
+    }]
+    with pytest.raises(ValueError, match="cannot author asset source"):
+        EditorialPlanner(_PlannerLLM(payload)).plan(project, script)
+
+
+def test_editorial_planner_mock_fallback_is_valid_and_project_owned() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars-mock",
+        video_mode=VideoMode.EDITORIAL,
+    )
+    script = _editorial_script(project)
+
+    plan = EditorialPlanner().plan(project, script, mock_mode=True)
+
+    assert plan.project_id == project.id and plan.duration == 14
+    assert plan.compositions[0].narration_refs == [script.scenes[0].id]
+    compile_edit_plan_html(plan)

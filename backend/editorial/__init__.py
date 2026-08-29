@@ -13,11 +13,13 @@ from .models import (
     MotionPrimitive,
 )
 from .prototype import build_project_mars_prototype
+from .planner import EditorialPlanDraft, EditorialPlanner
 from .renderer import EditorialRenderer, compile_edit_plan_html
 
 __all__ = [
     "EditorialAsset", "EditorialAssetType", "EditorialComposition",
     "EditorialElement", "EditorialElementType", "EditorialEvent",
-    "EditorialRenderer", "EditorialTemplate", "EditPlan", "EvidenceClass",
+    "EditorialPlanDraft", "EditorialPlanner", "EditorialRenderer",
+    "EditorialTemplate", "EditPlan", "EvidenceClass",
     "MotionPrimitive", "build_project_mars_prototype", "compile_edit_plan_html",
 ]
