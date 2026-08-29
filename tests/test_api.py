@@ -45,6 +45,58 @@ def test_project_plan_and_status_api(tmp_path: Path) -> None:
     assert client.get("/api/jobs").status_code == 200
 
 
+def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    created = client.post("/api/projects", json={
+        "title": "Editorial Mars", "topic": "Project Mars", "target_duration": 14,
+        "resolution": [1080, 1920], "fps": 24, "video_mode": "editorial",
+    })
+    project_id = created.json()["project"]["id"]
+
+    missing_script = client.post(f"/api/projects/{project_id}/editorial/plan")
+    assert missing_script.status_code == 409
+    assert "script" in missing_script.json()["detail"]
+
+    assert client.post(f"/api/projects/{project_id}/plan", json={}).status_code == 200
+    generated = client.post(f"/api/projects/{project_id}/editorial/plan")
+    assert generated.status_code == 200
+    assert generated.json()["project_id"] == project_id
+    assert generated.json()["compositions"][0]["template"] == "archiveCanvas"
+
+    snapshot = client.get(f"/api/projects/{project_id}").json()
+    assert snapshot["editorial"]["has_edit_plan"] is True
+    assert snapshot["editorial"]["generate_url"].endswith("/editorial/plan")
+    assert client.get(f"/api/projects/{project_id}/editorial/edit-plan").json() == generated.json()
+    # The idempotent endpoint returns the existing plan rather than replacing it.
+    assert client.post(f"/api/projects/{project_id}/editorial/plan").json() == generated.json()
+
+
+def test_editorial_plan_api_rejects_classic_projects(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Classic", "topic": "Classic workflow", "target_duration": 5,
+    }).json()["project"]["id"]
+
+    response = client.post(f"/api/projects/{project_id}/editorial/plan")
+
+    assert response.status_code == 409
+    assert "not in Editorial Mode" in response.json()["detail"]
+
+
 def test_unload_ideogram_releases_cache_and_stops_only_owned_worker(
     tmp_path: Path, monkeypatch
 ) -> None:
