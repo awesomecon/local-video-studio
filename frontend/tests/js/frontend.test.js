@@ -38,13 +38,13 @@ import {
 import { parseRoute, sceneEditorHash } from "../../js/router.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { state } from "../../js/state.js";
-import { effectiveVideoMode } from "../../js/video-mode.js";
 import {
+  effectiveVideoMode,
   readProjectFields,
   diffFields,
   buildPatchBody,
   setInputs,
-} from "../../js/project-fields.js";
+} from "../../js/pages/project.js";
 
 const results = [];
 

@@ -9,9 +9,13 @@
 import { el } from "../dom.js";
 import { state, persistCurrentProject, upsertProject } from "../state.js";
 import { createProject } from "../api.js";
-import { DEFAULT_VIDEO_MODE, VIDEO_MODE_OPTIONS } from "../video-mode.js";
 import { field, setFieldError, errorPanel, toast } from "../ui.js";
 import { navigate } from "../router.js";
+
+const VIDEO_MODE_OPTIONS = [
+  { value: "classic", label: "Classic — Existing scene-based generator" },
+  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
+];
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -24,7 +28,7 @@ export function renderNewProject(_route) {
   const videoModeSelect = el("select", { id: "np-video-mode" },
     ...VIDEO_MODE_OPTIONS.map((o) => el("option", { value: o.value }, o.label)),
   );
-  videoModeSelect.value = DEFAULT_VIDEO_MODE;
+  videoModeSelect.value = "classic";
   const durationInput = el("input", { id: "np-duration", type: "number", min: "1", step: "1", value: "120" });
   const durationModeSelect = el("select", { id: "np-duration-mode" },
     el("option", { value: "fixed" }, "Fixed — scenes match the target"),
