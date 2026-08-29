@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.editorial import (
+    EditorialAsset, EditorialAssetType,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
     EditorialTemplate, EditPlan, MotionPrimitive, build_project_mars_prototype,
     compile_edit_plan_html,
@@ -64,7 +65,7 @@ def test_compiler_escapes_text_and_emits_seek_contract() -> None:
         elements=[
             EditorialElement(
                 id="year", type=EditorialElementType.TEXT,
-                text='</script><script>alert("bad")</script>',
+                text='</script><script>alert("bad")</script>', role="year",
             ),
         ],
         events=[EditorialEvent(time=0, action=MotionPrimitive.FADE, target="year")],
@@ -75,6 +76,69 @@ def test_compiler_escapes_text_and_emits_seek_contract() -> None:
     assert "\\u003c/script\\u003e" in html
     # The JSON embedded in the source remains the validated plan, not authored code.
     assert json.loads(plan.model_dump_json())["compositions"][0]["events"][0]["action"] == "fade"
+
+
+def test_archive_renderer_binds_roles_not_prototype_element_ids() -> None:
+    plan = EditPlan(project_id="p", compositions=[EditorialComposition(
+        id="c", start=0, duration=2, template=EditorialTemplate.ARCHIVE_CANVAS,
+        assets=[EditorialAsset(
+            id="registered-photo", type=EditorialAssetType.EXISTING_ASSET,
+            asset_id="database-asset-id",
+        )],
+        elements=[
+            EditorialElement(
+                id="llm-authored-year-id", type=EditorialElementType.TEXT,
+                text="1969", role="year",
+            ),
+            EditorialElement(
+                id="llm-authored-photo-id", type=EditorialElementType.IMAGE,
+                asset_id="registered-photo", role="archive-photo",
+            ),
+            EditorialElement(
+                id="llm-authored-reveal-id", type=EditorialElementType.TEXT,
+                text="MOON", role="reveal",
+            ),
+        ],
+        events=[
+            EditorialEvent(
+                time=0, action=MotionPrimitive.FADE_UP,
+                target="llm-authored-year-id",
+            ),
+        ],
+    )])
+
+    html = compile_edit_plan_html(
+        plan,
+        asset_url_resolver=lambda asset: f"/assets/{asset.asset_id}",
+    )
+
+    assert 'id="llm-authored-year-id"' in html
+    assert 'id="llm-authored-photo-id"' in html
+    assert 'id="llm-authored-reveal-id"' in html
+    assert ">1969<" in html and ">MOON<" in html
+    assert 'src="/assets/database-asset-id"' in html
+
+
+def test_archive_template_rejects_unapproved_roles_and_generated_evidence() -> None:
+    with pytest.raises(ValidationError, match="does not define element role"):
+        EditorialComposition(
+            id="c", start=0, duration=2,
+            template=EditorialTemplate.ARCHIVE_CANVAS,
+            elements=[EditorialElement(
+                id="wild", type=EditorialElementType.TEXT,
+                text="No arbitrary slots", role="invented-slot",
+            )],
+        )
+    with pytest.raises(ValidationError, match="generated assets cannot"):
+        EditorialAsset(
+            id="fake-evidence", type=EditorialAssetType.GENERATED_IMAGE,
+            evidence_class="evidence", locked=True,
+        )
+    with pytest.raises(ValidationError, match="must be locked"):
+        EditorialAsset(
+            id="unlocked-evidence", type=EditorialAssetType.HISTORICAL_PHOTO,
+            evidence_class="evidence", locked=False,
+        )
 
 
 def test_prototype_compiler_rejects_unimplemented_templates() -> None:

@@ -91,6 +91,17 @@ class EditorialAsset(DomainModel):
             raise ValueError("editorial asset source must be project-relative or an explicit URL")
         return value
 
+    @model_validator(mode="after")
+    def protect_evidence(self) -> "EditorialAsset":
+        if self.type in {
+            EditorialAssetType.GENERATED_IMAGE,
+            EditorialAssetType.GENERATED_VIDEO,
+        } and self.evidence_class is EvidenceClass.EVIDENCE:
+            raise ValueError("generated assets cannot be classified as factual evidence")
+        if self.evidence_class is EvidenceClass.EVIDENCE and not self.locked:
+            raise ValueError("evidence assets must be locked against ordinary regeneration")
+        return self
+
 
 class EditorialElement(DomainModel):
     id: str = Field(min_length=1, max_length=120)
@@ -147,6 +158,28 @@ class EditorialComposition(DomainModel):
             raise ValueError("asset ids must be unique within a composition")
         if len(element_ids) != len(set(element_ids)):
             raise ValueError("element ids must be unique within a composition")
+        roles = [element.role for element in self.elements if element.role]
+        if len(roles) != len(set(roles)):
+            raise ValueError("element roles must be unique within a composition")
+        if self.template is EditorialTemplate.ARCHIVE_CANVAS:
+            archive_slots = {
+                "year": EditorialElementType.TEXT,
+                "archive-photo": EditorialElementType.IMAGE,
+                "paper": EditorialElementType.DOCUMENT,
+                "document-mark": EditorialElementType.UNDERLINE,
+                "ruler-grid": EditorialElementType.RULER_NODES,
+                "reveal": EditorialElementType.TEXT,
+            }
+            for element in self.elements:
+                expected = archive_slots.get(element.role)
+                if expected is None:
+                    raise ValueError(
+                        f"archiveCanvas does not define element role {element.role!r}"
+                    )
+                if element.type is not expected:
+                    raise ValueError(
+                        f"archiveCanvas role {element.role!r} requires type {expected.value}"
+                    )
         known_assets = set(asset_ids)
         for element in self.elements:
             if element.asset_id and element.asset_id not in known_assets:

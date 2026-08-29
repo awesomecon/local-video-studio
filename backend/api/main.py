@@ -818,7 +818,14 @@ def create_app(
     )
     def preview_editorial_project(project_id: str) -> HTMLResponse:
         try:
-            html = compile_edit_plan_html(service.load_edit_plan(project_id))
+            plan = service.load_edit_plan(project_id)
+            html = compile_edit_plan_html(
+                plan,
+                asset_url_resolver=lambda asset: (
+                    f"/api/projects/{project_id}/assets/{asset.asset_id}/file"
+                    if asset.asset_id else None
+                ),
+            )
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:

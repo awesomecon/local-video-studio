@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 import tempfile
 import time
 import urllib.request
+from collections.abc import Callable
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,13 @@ from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process
 
-from .models import EditPlan, EditorialComposition, EditorialElementType, EditorialTemplate
+from .models import (
+    EditPlan, EditorialAsset, EditorialComposition, EditorialElement,
+    EditorialTemplate,
+)
+
+
+AssetURLResolver = Callable[[EditorialAsset], str | None]
 
 
 def _script_json(value: Any) -> str:
@@ -34,14 +42,56 @@ def _script_json(value: Any) -> str:
     )
 
 
-def _element(composition: EditorialComposition, element_id: str):
-    return next((item for item in composition.elements if item.id == element_id), None)
+def _element(composition: EditorialComposition, role: str) -> EditorialElement | None:
+    """Resolve a deterministic template slot without prescribing LLM-authored ids."""
+    return next(
+        (item for item in composition.elements if item.role == role),
+        next((item for item in composition.elements if item.id == role), None),
+    )
 
 
-def _archive_markup(composition: EditorialComposition) -> str:
+def _asset(composition: EditorialComposition, element: EditorialElement | None) -> EditorialAsset | None:
+    if element is None or element.asset_id is None:
+        return None
+    return next((item for item in composition.assets if item.id == element.asset_id), None)
+
+
+def _asset_image(
+    composition: EditorialComposition,
+    element: EditorialElement | None,
+    resolver: AssetURLResolver | None,
+    *,
+    class_name: str,
+) -> str:
+    asset = _asset(composition, element)
+    source = resolver(asset) if asset is not None and resolver is not None else None
+    if not source:
+        return ""
+    return (
+        f'<img class="asset-image {escape(class_name)}" '
+        f'src="{escape(source, quote=True)}" alt="">'
+    )
+
+
+def _archive_markup(
+    composition: EditorialComposition,
+    resolver: AssetURLResolver | None,
+) -> str:
     year = _element(composition, "year")
-    elon = _element(composition, "elon")
-    rulers = _element(composition, "rulers")
+    photo = _element(composition, "archive-photo")
+    document = _element(composition, "paper")
+    passage = _element(composition, "document-mark")
+    rulers = _element(composition, "ruler-grid")
+    reveal = _element(composition, "reveal")
+    photo_asset = _asset(composition, photo)
+    document_asset = _asset(composition, document)
+    photo_label = photo_asset.label if photo_asset and photo_asset.label else "ARCHIVE PHOTOGRAPH"
+    photo_class = photo_asset.evidence_class.value.upper() if photo_asset else "ILLUSTRATION"
+    document_copy = (
+        document_asset.label
+        if document_asset and document_asset.label
+        else "Documentary source material arranged on the editorial canvas."
+    )
     ruler_count = rulers.count if rulers else 10
     nodes = "".join(
         f'<div class="ruler-node" data-ruler="{index}"><span>{index + 1:02d}</span></div>'
@@ -52,30 +102,36 @@ def _archive_markup(composition: EditorialComposition) -> str:
         <div class="grain"></div>
         <div class="research-layer">
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
-          <div id="year" class="year editorial-element">{escape(year.text if year else "")}</div>
-          <div id="photo" class="archive-photo editorial-element">
+          <div id="{escape(year.id if year else 'year', quote=True)}" class="year editorial-element">{escape(year.text if year else "")}</div>
+          <div id="{escape(photo.id if photo else 'photo', quote=True)}" class="archive-photo editorial-element">
+            {_asset_image(composition, photo, resolver, class_name="archive-photo-image")}
             <div class="photo-art"><div class="portrait-head"></div><div class="portrait-body"></div></div>
-            <div class="asset-tag">ARCHIVE PHOTOGRAPH · EVIDENCE</div>
+            <div class="asset-tag">{escape(photo_label.upper())} · {escape(photo_class)}</div>
           </div>
-          <div id="document" class="document editorial-element">
-            <div class="paper-index">ARCHIVE 1949 / FILE 07</div>
-            <h2>THE MARS PROJECT</h2>
-            <p>A TECHNICAL TALE</p>
+          <div id="{escape(document.id if document else 'document', quote=True)}" class="document editorial-element">
+            {_asset_image(composition, document, resolver, class_name="document-image")}
+            <div class="paper-index">ARCHIVE / SOURCE DOCUMENT</div>
+            <h2>{escape(document.text if document and document.text else "DOCUMENT")}</h2>
+            <p>DOCUMENT EXCERPT</p>
             <div class="rule"></div>
-            <p class="document-copy">A study of an expedition to Mars and the systems imagined to govern a distant settlement.</p>
-            <div id="passage" class="passage editorial-element"></div>
-            <div class="paper-stamp">PROJECT MARS</div>
+            <p class="document-copy">{escape(document_copy)}</p>
+            <div id="{escape(passage.id if passage else 'passage', quote=True)}" class="passage editorial-element"></div>
+            <div class="paper-stamp">SOURCE</div>
           </div>
-          <div id="rulers" class="ruler-grid editorial-element">{nodes}</div>
-          <div class="draft-label">FIG. 01 · AUTHORITY STRUCTURE</div>
+          <div id="{escape(rulers.id if rulers else 'rulers', quote=True)}" class="ruler-grid editorial-element">{nodes}</div>
+          <div class="draft-label">FIG. 01 · EVIDENCE MAP</div>
         </div>
         <div id="blackout" class="blackout"></div>
-        <div id="elon" class="elon editorial-element">{escape(elon.text if elon else "")}</div>
+        <div id="{escape(reveal.id if reveal else 'reveal', quote=True)}" class="elon editorial-element">{escape(reveal.text if reveal else "")}</div>
       </section>
     """
 
 
-def compile_edit_plan_html(plan: EditPlan) -> str:
+def compile_edit_plan_html(
+    plan: EditPlan,
+    *,
+    asset_url_resolver: AssetURLResolver | None = None,
+) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML."""
     unsupported = sorted({
         item.template.value
@@ -87,7 +143,9 @@ def compile_edit_plan_html(plan: EditPlan) -> str:
             "the prototype renderer currently supports only archiveCanvas; "
             f"unsupported templates: {', '.join(unsupported)}"
         )
-    markup = "".join(_archive_markup(item) for item in plan.compositions)
+    markup = "".join(
+        _archive_markup(item, asset_url_resolver) for item in plan.compositions
+    )
     payload = _script_json(plan.model_dump(mode="json"))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -104,10 +162,13 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .year{{position:absolute;left:72px;top:105px;font-size:250px;font-weight:900;line-height:.84;letter-spacing:-10px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
 .archive-photo{{position:absolute;left:76px;top:420px;width:610px;height:610px;padding:18px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-2.4deg)}}
 .photo-art{{position:relative;width:100%;height:520px;overflow:hidden;background:radial-gradient(circle at 50% 27%,#a59c88 0 12%,transparent 13%),linear-gradient(145deg,#625f57,#b3aa97 46%,#494943)}}
+.asset-image{{display:block;object-fit:cover}} .archive-photo-image{{position:absolute;inset:18px 18px 72px;width:calc(100% - 36px);height:520px;z-index:2;filter:grayscale(.76) sepia(.22) contrast(1.04)}}
+.archive-photo:has(.archive-photo-image) .photo-art{{visibility:hidden}}
 .portrait-head{{position:absolute;left:220px;top:100px;width:130px;height:165px;border-radius:48% 48% 42% 42%;background:#353735;box-shadow:24px 5px 0 #77756c}}
 .portrait-body{{position:absolute;left:120px;top:245px;width:360px;height:340px;border-radius:48% 48% 0 0;background:#292c2c}}
 .asset-tag{{padding-top:18px;color:#3b3731;font-size:22px;letter-spacing:3px}}
 .document{{position:absolute;right:54px;top:630px;width:590px;height:760px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(2deg)}}
+.document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}} .document>*:not(.document-image){{position:relative;z-index:2}}
 .paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "DejaVu Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "DejaVu Serif",serif;letter-spacing:3px}}
 .document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "DejaVu Serif",serif;letter-spacing:0}}
 .passage{{position:absolute;left:54px;right:54px;top:508px;height:22px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
@@ -200,12 +261,25 @@ class EditorialRenderer:
     def __init__(self, chromium: Path | None = None) -> None:
         self.chromium = chromium or discover_chromium()
 
-    def render(self, plan: EditPlan, output: Path, *, preview_html: Path | None = None) -> Path:
+    def render(
+        self,
+        plan: EditPlan,
+        output: Path,
+        *,
+        preview_html: Path | None = None,
+        asset_root: Path | None = None,
+    ) -> Path:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
         output = output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        html = compile_edit_plan_html(plan)
+        html = compile_edit_plan_html(
+            plan,
+            asset_url_resolver=(
+                lambda asset: self._data_asset_url(asset_root, asset)
+                if asset_root is not None else None
+            ),
+        )
         if preview_html is not None:
             preview_html.parent.mkdir(parents=True, exist_ok=True)
             preview_html.write_text(html, encoding="utf-8")
@@ -228,6 +302,17 @@ class EditorialRenderer:
             shutil.copyfile(temporary, publish)
             os.replace(publish, output)
         return output
+
+    @staticmethod
+    def _data_asset_url(asset_root: Path, asset: EditorialAsset) -> str | None:
+        if not asset.source or asset.source.startswith(("http://", "https://")):
+            return None
+        root = asset_root.resolve()
+        path = (root / asset.source).resolve()
+        if root not in path.parents or not path.is_file():
+            return None
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
     def _capture_frames(self, plan: EditPlan, document: Path, frames: Path, profile: Path) -> None:
         profile.mkdir(parents=True)
