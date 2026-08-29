@@ -24,6 +24,11 @@
  *                                reads as classic; a changed mode is PATCHed
  *                                and an unchanged one is not; reset restores
  *                                the saved mode.
+ *   6. Editorial Preview section - only editorial snapshots render the panel;
+ *                                no plan shows the empty state, a plan shows
+ *                                the status and an Open Preview link that
+ *                                opens preview_url in a new tab with
+ *                                rel="noopener".
  */
 
 import {
@@ -44,6 +49,7 @@ import {
   diffFields,
   buildPatchBody,
   setInputs,
+  editorialPreviewSection,
 } from "../../js/pages/project.js";
 
 const results = [];
@@ -381,6 +387,78 @@ await recordAsync("video-mode: New Project POST carries the selected video_mode"
   post = calls.filter((c) => c.method === "POST").pop();
   eq(post.body.video_mode, "editorial", "selected mode is posted");
   node.remove();
+});
+
+/* --- 6. Editorial Preview section ----------------------------------------- */
+
+// Snapshot fixtures shaped like GET /api/projects/{id} responses.
+function projectSnapshot(project, editorial) {
+  const snap = {
+    project, scenes: [], assets: [], jobs: [],
+    directory: "/tmp/lvs", stage_state: {},
+  };
+  if (editorial !== undefined) snap.editorial = editorial;
+  return snap;
+}
+const EDITORIAL_PROJECT = { ...LEGACY_PROJECT, id: "proj-ed", video_mode: "editorial" };
+const EDIT_PLAN_META = {
+  has_edit_plan: true,
+  edit_plan_url: "/api/projects/proj-ed/editorial/edit-plan",
+  preview_url: "/api/projects/proj-ed/editorial/preview",
+};
+
+record("editorial-preview: classic project shows no Editorial Preview", () => {
+  const classic = { ...LEGACY_PROJECT, video_mode: "classic" };
+  eq(editorialPreviewSection(projectSnapshot(classic, EDIT_PLAN_META)), null,
+    "classic snapshot renders nothing even with a plan block");
+  eq(editorialPreviewSection(projectSnapshot(classic)), null);
+});
+
+record("editorial-preview: legacy project without video_mode shows no Editorial Preview", () => {
+  eq(editorialPreviewSection(projectSnapshot(LEGACY_PROJECT)), null,
+    "omitted video_mode reads as classic -> no section");
+  eq(editorialPreviewSection(projectSnapshot({ ...LEGACY_PROJECT, video_mode: "weird" })), null,
+    "unknown video_mode also stays classic");
+});
+
+record("editorial-preview: editorial project without a plan shows the empty state", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
+    has_edit_plan: false,
+    edit_plan_url: EDIT_PLAN_META.edit_plan_url,
+    preview_url: EDIT_PLAN_META.preview_url,
+  }));
+  assert(node, "the section renders for editorial projects");
+  eq(node.querySelector(".panel-title").textContent, "Editorial Preview");
+  assert(node.querySelector(".empty-state"), "empty state is shown");
+  assert(!node.querySelector("a"), "no Open Preview link without a plan");
+  assert(node.textContent.includes("Edit Plan"), "explains the missing Edit Plan");
+});
+
+record("editorial-preview: editorial project with a plan shows status + Open Preview", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, EDIT_PLAN_META));
+  assert(node, "the section renders");
+  eq(node.querySelector(".panel-title").textContent, "Editorial Preview");
+  assert(!node.querySelector(".empty-state"), "no empty state once the plan exists");
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("Edit Plan available"), "status badge present");
+  const link = node.querySelector("a");
+  assert(link && link.textContent === "Open Preview", "Open Preview link present");
+});
+
+record("editorial-preview: Open Preview uses preview_url, _blank, and noopener", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, EDIT_PLAN_META));
+  const link = node.querySelector("a");
+  eq(link.getAttribute("href"), EDIT_PLAN_META.preview_url, "href is preview_url");
+  eq(link.getAttribute("target"), "_blank", "opens in a new tab");
+  assert((link.getAttribute("rel") || "").split(/\s+/).includes("noopener"),
+    `rel contains noopener (got ${JSON.stringify(link.getAttribute("rel"))})`);
+});
+
+record("editorial-preview: missing editorial snapshot degrades to the empty state", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT)); // no editorial block
+  assert(node, "editorial projects still render the panel defensively");
+  assert(node.querySelector(".empty-state"), "missing snapshot counts as has_edit_plan=false");
+  assert(!node.querySelector("a"), "no link without a plan");
 });
 
 /* --- report -------------------------------------------------------------- */

@@ -15,7 +15,12 @@
  *    explains the invalidation BEFORE save; dimension edits after a plan also
  *    require an explicit "mark scenes stale" decision (no silent rewrite).
  *  - The form is built once; the live job-feed hook refreshes only the
- *    provenance / stage chips, never the input values, so edits survive ticks.
+ *    provenance / stage chips (and the editorial status region), never the
+ *    input values, so edits survive ticks.
+ *  - Editorial projects (video_mode === "editorial") get an extra
+ *    "Editorial Preview" panel driven by the snapshot's `editorial` block
+ *    ({ has_edit_plan, edit_plan_url, preview_url }); classic and legacy
+ *    projects never see it.
  */
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
@@ -36,6 +41,8 @@ import {
   toast,
   toastError,
   stageChip,
+  badge,
+  emptyState,
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
@@ -111,26 +118,31 @@ function buildScreen(projectId) {
     el("div", { class: "panel-title" }, "Provenance (read-only)"),
     provenance,
   );
+  // Editorial-only region: filled for editorial projects, kept empty
+  // (renderless) for classic / legacy ones.
+  const editorialRegion = el("div", {});
 
-  load(body, provenance, projectId);
+  load(body, provenance, editorialRegion, projectId);
 
-  registerLiveUpdate(() => refreshProvenance(provenance, projectId));
+  registerLiveUpdate(() => refreshProvenance(provenance, editorialRegion, projectId));
   return el("div", {},
     panel,
+    editorialRegion,
     provenancePanel,
   );
 
-  /** @param {HTMLElement} region @param {HTMLElement} prov @param {string} id */
-  async function load(region, prov, id) {
+  /** @param {HTMLElement} region @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
+  async function load(region, prov, editorial, id) {
     region.replaceChildren(loadingState(4));
     prov.replaceChildren(loadingState(2));
+    editorial.replaceChildren();
     /** @type {import("../api.js").ProjectSnapshot|null} */
     let snap;
     try {
       snap = await getProject(state.config, id);
     } catch (err) {
       region.replaceChildren(errorPanel(err,
-        el("button", { class: "btn", type: "button", onclick: () => load(region, prov, id) }, "Retry"),
+        el("button", { class: "btn", type: "button", onclick: () => load(region, prov, editorial, id) }, "Retry"),
       ));
       return;
     }
@@ -147,13 +159,15 @@ function buildScreen(projectId) {
     }
     region.replaceChildren(...content);
     renderProvenance(prov, snap);
+    renderEditorialRegion(editorial, snap);
   }
 
-  /** @param {HTMLElement} prov @param {string} id */
-  async function refreshProvenance(prov, id) {
+  /** @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
+  async function refreshProvenance(prov, editorial, id) {
     try {
       const snap = await getProject(state.config, id);
       renderProvenance(prov, snap);
+      renderEditorialRegion(editorial, snap);
     } catch {
       /* keep last-known provenance; the next tick retries */
     }
@@ -553,6 +567,54 @@ function renderProvenance(prov, snap) {
         ...Object.entries(stages).map(([name, st]) => stageChip(name, st)))
       : el("div", { class: "muted small mt" }, "No pipeline stages have run yet — run planning from the Script screen."),
   );
+}
+
+/* --- Editorial Preview ----------------------------------------------------- */
+
+/**
+ * Editorial Preview panel for editorial projects; classic / legacy projects
+ * get null so the region stays empty and the rest of the page is untouched.
+ * A missing or malformed `editorial` snapshot is treated defensively as
+ * has_edit_plan=false.
+ *
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @returns {HTMLElement | null}
+ */
+export function editorialPreviewSection(snap) {
+  if (effectiveVideoMode(snap && snap.project) !== "editorial") return null;
+  const editorial = (snap && snap.editorial) || null;
+  const hasPlan = !!(editorial && editorial.has_edit_plan);
+  const previewUrl = (hasPlan && typeof editorial.preview_url === "string" && editorial.preview_url)
+    ? editorial.preview_url
+    : null;
+  const body = el("div", { class: "panel-body" });
+  if (!hasPlan) {
+    body.append(emptyState(
+      "No Edit Plan yet",
+      "This editorial project has no Edit Plan generated yet. Once one exists, a deterministic HTML preview becomes available here.",
+    ));
+  } else {
+    body.append(el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
+      badge("good", "Edit Plan available"),
+      previewUrl
+        ? el("a", { class: "btn btn-primary btn-sm", href: previewUrl, target: "_blank", rel: "noopener" }, "Open Preview")
+        : null,
+    ));
+  }
+  return el("section", { class: "panel" },
+    el("div", { class: "panel-title" }, "Editorial Preview"),
+    body,
+  );
+}
+
+/**
+ * Mount (or clear) the Editorial Preview panel for the current snapshot.
+ * @param {HTMLElement} region
+ * @param {import("../api.js").ProjectSnapshot} snap
+ */
+function renderEditorialRegion(region, snap) {
+  const section = editorialPreviewSection(snap);
+  region.replaceChildren(...(section ? [section] : []));
 }
 
 /* --- Small helpers -------------------------------------------------------- */
