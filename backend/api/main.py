@@ -40,6 +40,14 @@ class RenderRequest(BaseModel):
     force: bool = False
 
 
+class EditorialSettingsEdit(BaseModel):
+    """Narrow Edit Plan switches exposed without accepting arbitrary plan JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+    captions_enabled: bool | None = None
+    editorial_text_enabled: bool | None = None
+
+
 class ApproveRequest(BaseModel):
     lock: bool = False
 
@@ -827,6 +835,25 @@ def create_app(
                 else status.HTTP_502_BAD_GATEWAY
             )
             raise HTTPException(status_code=status_code, detail=exc.as_dict()) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.patch("/api/projects/{project_id}/editorial/settings")
+    def update_editorial_settings(
+        project_id: str, request: EditorialSettingsEdit,
+    ) -> dict[str, Any]:
+        try:
+            return service.update_edit_plan_settings(
+                project_id,
+                captions_enabled=request.captions_enabled,
+                editorial_text_enabled=request.editorial_text_enabled,
+            ).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 

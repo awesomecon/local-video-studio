@@ -408,6 +408,12 @@ class PipelineService:
         }
         if project.video_mode is VideoMode.EDITORIAL:
             plan_status = self._editorial_plan_status(project)
+            edit_plan: EditPlan | None = None
+            if plan_status["has_edit_plan"]:
+                try:
+                    edit_plan = self.store.load_edit_plan(project.slug)
+                except (OSError, ValueError):
+                    edit_plan = None
             snapshot["editorial"] = {
                 "has_edit_plan": plan_status["has_edit_plan"],
                 "plan_status": plan_status["plan_status"],
@@ -416,6 +422,13 @@ class PipelineService:
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
                 "generate_url": f"/api/projects/{project.id}/editorial/plan",
                 "preview_url": f"/api/projects/{project.id}/editorial/preview",
+                "settings_url": f"/api/projects/{project.id}/editorial/settings",
+                "captions_enabled": (
+                    edit_plan.captions_enabled if edit_plan is not None else None
+                ),
+                "editorial_text_enabled": (
+                    edit_plan.editorial_text_enabled if edit_plan is not None else None
+                ),
             }
         if recovery:
             snapshot["recovery"] = recovery
@@ -441,6 +454,48 @@ class PipelineService:
         if project.video_mode is not VideoMode.EDITORIAL:
             raise ValueError("project is not in Editorial Mode")
         return self.store.load_edit_plan(project.slug)
+
+    def update_edit_plan_settings(
+        self,
+        project_id: str,
+        *,
+        captions_enabled: bool | None = None,
+        editorial_text_enabled: bool | None = None,
+    ) -> EditPlan:
+        """Update only independent caption/editorial-text switches on an existing plan."""
+        if captions_enabled is None and editorial_text_enabled is None:
+            raise PipelineError("At least one Editorial setting must be provided.")
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            plan = self.store.load_edit_plan(project.slug)
+            updates: dict[str, bool] = {}
+            if captions_enabled is not None and captions_enabled != plan.captions_enabled:
+                updates["captions_enabled"] = captions_enabled
+            if (
+                editorial_text_enabled is not None
+                and editorial_text_enabled != plan.editorial_text_enabled
+            ):
+                updates["editorial_text_enabled"] = editorial_text_enabled
+            if not updates:
+                return plan
+            updated = plan.model_copy(update=updates)
+            self.store.save_edit_plan(project.slug, updated)
+            self.store.save_edit_plan_provenance(
+                project.slug,
+                self._editorial_plan_provenance(
+                    project, source_kind=EditPlanSourceKind.MANUAL,
+                ),
+            )
+            invalidated = {
+                "timeline", "render_preview", "quality_control",
+                "render_final", "thumbnails",
+            }
+            if "editorial_text_enabled" in updates:
+                invalidated.add("editorial_visual")
+            self._invalidate_stages(project, invalidated)
+            return updated
 
     def ensure_edit_plan(self, project_id: str) -> EditPlan:
         """Generate the first Edit Plan from the stored script and narration clock."""
