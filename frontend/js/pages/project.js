@@ -19,8 +19,15 @@
  *    input values, so edits survive ticks.
  *  - Editorial projects (video_mode === "editorial") get an extra
  *    "Editorial Preview" panel driven by the snapshot's `editorial` block
- *    ({ has_edit_plan, edit_plan_url, generate_url, preview_url }); classic
- *    and legacy projects never see it. Without a plan the panel offers a
+ *    ({ has_edit_plan, plan_status, stale, stale_reasons, edit_plan_url,
+ *    generate_url, preview_url }); classic and legacy projects never see it.
+ *    Optional provenance metadata degrades safely: a missing/malformed
+ *    plan_status keeps the classic "Edit Plan available" presentation, a
+ *    stale plan shows a warning naming the changed inputs (project /
+ *    script / word_timings), and an untracked plan (which may predate
+ *    provenance tracking) shows a neutral note. Both stale and untracked
+ *    plans keep their Open Preview link, and displaying any plan state
+ *    issues no requests. Without a plan the panel offers a
  *    "Generate Edit Plan" button (only when generate_url is a non-empty
  *    string) that POSTs exactly once with no body, shows a pending label,
  *    and refreshes the panel on success; failures restore the button and
@@ -584,6 +591,50 @@ const GENERATE_PLAN_LABEL = "Generate Edit Plan";
 const GENERATE_PLAN_PENDING_LABEL = "Generating…";
 
 /**
+ * Human-readable explanations for the Edit Plan staleness reasons reported
+ * by the backend (`stale_reasons`). Unrecognized entries are dropped so
+ * provenance metadata can never break the panel.
+ * @type {Record<string, string>}
+ */
+const STALE_REASON_TEXT = {
+  project: "project or editorial settings changed since the plan was generated",
+  script: "the narration or script changed since the plan was generated",
+  word_timings: "the narration word timings changed since the plan was generated",
+};
+
+/**
+ * Reduce the snapshot's optional provenance metadata to a panel state.
+ * Only the recognized plan_status values are trusted: "stale" (with a
+ * best-effort list of readable reasons), "untracked", and "current". A
+ * missing or malformed plan_status (older backends, unknown values, wrong
+ * types) degrades to "unknown" so the classic "Edit Plan available"
+ * presentation is preserved.
+ * @param {Object | null} editorial — the snapshot's editorial block
+ * @returns {{kind: "stale"|"untracked"|"current"|"unknown", reasons: string[]}}
+ */
+function editorialPlanState(editorial) {
+  const planStatus = (editorial && typeof editorial.plan_status === "string")
+    ? editorial.plan_status.trim()
+    : null;
+  if (planStatus === "stale") {
+    const raw = (editorial && Array.isArray(editorial.stale_reasons)) ? editorial.stale_reasons : [];
+    const seen = new Set();
+    const reasons = [];
+    for (const entry of raw) {
+      const key = (typeof entry === "string") ? entry.trim() : "";
+      if (key && STALE_REASON_TEXT[key] && !seen.has(key)) {
+        seen.add(key);
+        reasons.push(STALE_REASON_TEXT[key]);
+      }
+    }
+    return { kind: "stale", reasons };
+  }
+  if (planStatus === "untracked") return { kind: "untracked", reasons: [] };
+  if (planStatus === "current") return { kind: "current", reasons: [] };
+  return { kind: "unknown", reasons: [] };
+}
+
+/**
  * Non-empty backend-provided string or null; malformed values (numbers,
  * whitespace, objects) never produce a request URL.
  * @param {unknown} value
@@ -637,7 +688,13 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
  * get null so the region stays empty and the rest of the page is untouched.
  * A missing or malformed `editorial` snapshot is treated defensively as
  * has_edit_plan=false, and a missing/malformed generate_url simply omits
- * the Generate button. The generate endpoint is never called during render.
+ * the Generate button. Once a plan exists the panel keeps the
+ * "Edit Plan available" presentation and the Open Preview link, and layers
+ * provenance status on top: "stale" shows a warning naming the changed
+ * inputs, "untracked" a neutral note for plans that may predate tracking,
+ * and missing/malformed plan_status degrades to the classic presentation.
+ * The generate endpoint is never called during render, and displaying any
+ * plan state issues no requests.
  *
  * @param {import("../api.js").ProjectSnapshot} snap
  * @param {(() => any) | null} [onGenerated] — refresh hook after a successful generation
@@ -658,12 +715,33 @@ export function editorialPreviewSection(snap, onGenerated = null) {
       generateUrl ? [buildGeneratePlanButton(generateUrl, errors, onGenerated)] : [],
     ));
   } else {
-    body.append(el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
-      badge("good", "Edit Plan available"),
+    const planState = editorialPlanState(editorial);
+    const row = el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
+      planState.kind === "stale"
+        ? badge("warning", "Edit Plan is stale")
+        : planState.kind === "untracked"
+          ? badge("neutral", "Edit Plan available")
+          : badge("good", "Edit Plan available"),
+      planState.kind === "current" ? el("span", { class: "muted small" }, "Current") : null,
       previewUrl
         ? el("a", { class: "btn btn-primary btn-sm", href: previewUrl, target: "_blank", rel: "noopener" }, "Open Preview")
         : null,
-    ));
+    );
+    body.append(row);
+    if (planState.kind === "stale") {
+      body.append(el("div", { class: "mt" }, banner(
+        el("div", {},
+          el("div", {}, planState.reasons.length
+            ? "The plan was generated before recent changes:"
+            : "Tracked inputs changed since this plan was generated:"),
+          ...planState.reasons.map((reason) => el("div", { class: "muted small" }, reason)),
+          el("div", { class: "muted small" }, "Stale plans are preserved on purpose — Open Preview still shows the last generated plan."),
+        ),
+      )));
+    } else if (planState.kind === "untracked") {
+      body.append(el("div", { class: "muted small mt" },
+        "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — Open Preview shows it as-is."));
+    }
   }
   body.append(errors);
   return el("section", { class: "panel" },
