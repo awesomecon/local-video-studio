@@ -1,0 +1,192 @@
+"""Strict, renderer-independent contracts for Editorial Mode edit plans."""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime
+from enum import StrEnum
+from pathlib import PurePosixPath
+from typing import Any
+
+from pydantic import Field, field_validator, model_validator
+
+from backend.schemas.models import DomainModel, new_id, utc_now
+
+
+class EditorialTemplate(StrEnum):
+    ARCHIVE_CANVAS = "archiveCanvas"
+    DOCUMENT_REVEAL = "documentReveal"
+    COMPARISON_CANVAS = "comparisonCanvas"
+    ILLUSTRATION_CANVAS = "illustrationCanvas"
+    BIG_TEXT_REVEAL = "bigTextReveal"
+
+
+class MotionPrimitive(StrEnum):
+    FADE = "fade"
+    FADE_UP = "fadeUp"
+    SLIDE_IN_LEFT = "slideInLeft"
+    SLIDE_IN_RIGHT = "slideInRight"
+    SCALE_IN = "scaleIn"
+    SLOW_PUSH = "slowPush"
+    PAPER_SLIDE = "paperSlide"
+    UNDERLINE = "underline"
+    HIGHLIGHT = "highlight"
+    DRAW_LINE = "drawLine"
+    STAGGER_IN = "staggerIn"
+    DIM_OTHERS = "dimOthers"
+    FOCUS_ONE = "focusOne"
+    COLLAPSE_TO_BLACK = "collapseToBlack"
+    HARD_CUT = "hardCut"
+
+
+class EditorialAssetType(StrEnum):
+    HISTORICAL_PHOTO = "historical_photo"
+    HISTORICAL_VIDEO = "historical_video"
+    DOCUMENT = "document"
+    USER_UPLOADED_IMAGE = "user_uploaded_image"
+    GENERATED_IMAGE = "generated_image"
+    GENERATED_VIDEO = "generated_video"
+    DIAGRAM = "diagram"
+    TYPOGRAPHY = "typography"
+    MAP = "map"
+    SCRIPTURE_TEXT = "scripture_text"
+    COMPARISON = "comparison"
+    TIMELINE = "timeline"
+    BLACK_SCREEN = "black_screen"
+    EXISTING_ASSET = "existing_asset"
+
+
+class EvidenceClass(StrEnum):
+    EVIDENCE = "evidence"
+    ILLUSTRATION = "illustration"
+
+
+class EditorialElementType(StrEnum):
+    TEXT = "text"
+    IMAGE = "image"
+    DOCUMENT = "document"
+    UNDERLINE = "underline"
+    RULER_NODES = "ruler_nodes"
+    LINE = "line"
+    BLACK_SCREEN = "black_screen"
+
+
+class EditorialAsset(DomainModel):
+    id: str = Field(default_factory=new_id, min_length=1, max_length=120)
+    type: EditorialAssetType
+    evidence_class: EvidenceClass = EvidenceClass.ILLUSTRATION
+    asset_id: str | None = Field(default=None, min_length=1, max_length=120)
+    source: str | None = Field(default=None, max_length=4000)
+    locked: bool = False
+    label: str = Field(default="", max_length=500)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("source")
+    @classmethod
+    def portable_source(cls, value: str | None) -> str | None:
+        if value is None or value.startswith(("http://", "https://")):
+            return value
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("editorial asset source must be project-relative or an explicit URL")
+        return value
+
+
+class EditorialElement(DomainModel):
+    id: str = Field(min_length=1, max_length=120)
+    type: EditorialElementType
+    text: str = Field(default="", max_length=4000)
+    asset_id: str | None = Field(default=None, min_length=1, max_length=120)
+    role: str = Field(default="", max_length=120)
+    count: int = Field(default=1, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def require_content(self) -> "EditorialElement":
+        if self.type is EditorialElementType.TEXT and not self.text.strip():
+            raise ValueError("text elements require non-empty text")
+        if self.type is EditorialElementType.IMAGE and not self.asset_id:
+            raise ValueError("image elements require asset_id")
+        return self
+
+
+class EditorialEvent(DomainModel):
+    time: float = Field(ge=0)
+    action: MotionPrimitive
+    target: str = Field(min_length=1, max_length=120)
+    duration: float = Field(default=0.6, ge=0, le=30)
+    value: float | str | int | None = None
+
+    @model_validator(mode="after")
+    def finite_numbers(self) -> "EditorialEvent":
+        if not math.isfinite(self.time) or not math.isfinite(self.duration):
+            raise ValueError("event timing must be finite")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("event value must be finite")
+        return self
+
+
+class EditorialComposition(DomainModel):
+    id: str = Field(default_factory=new_id, min_length=1, max_length=120)
+    start: float = Field(ge=0)
+    duration: float = Field(gt=0, le=120)
+    template: EditorialTemplate
+    assets: list[EditorialAsset] = Field(default_factory=list, max_length=80)
+    elements: list[EditorialElement] = Field(default_factory=list, max_length=200)
+    events: list[EditorialEvent] = Field(default_factory=list, max_length=500)
+    transition_out: MotionPrimitive | None = None
+    narration_refs: list[str] = Field(default_factory=list, max_length=200)
+    caption_refs: list[str] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> "EditorialComposition":
+        if not math.isfinite(self.start) or not math.isfinite(self.duration):
+            raise ValueError("composition timing must be finite")
+        asset_ids = [asset.id for asset in self.assets]
+        element_ids = [element.id for element in self.elements]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise ValueError("asset ids must be unique within a composition")
+        if len(element_ids) != len(set(element_ids)):
+            raise ValueError("element ids must be unique within a composition")
+        known_assets = set(asset_ids)
+        for element in self.elements:
+            if element.asset_id and element.asset_id not in known_assets:
+                raise ValueError(f"element {element.id!r} references an unknown asset")
+        known_targets = set(element_ids) | {"canvas"}
+        previous = -1.0
+        for event in self.events:
+            if event.target not in known_targets:
+                raise ValueError(f"event references unknown target {event.target!r}")
+            if event.time > self.duration:
+                raise ValueError("event starts after the composition ends")
+            if event.time < previous:
+                raise ValueError("events must be ordered by time")
+            previous = event.time
+        return self
+
+
+class EditPlan(DomainModel):
+    schema_version: int = Field(default=1, ge=1, le=1)
+    project_id: str = Field(min_length=1, max_length=120)
+    width: int = Field(default=1080, ge=320, le=7680)
+    height: int = Field(default=1920, ge=320, le=7680)
+    fps: int = Field(default=24, ge=1, le=120)
+    compositions: list[EditorialComposition] = Field(min_length=1, max_length=200)
+    editorial_text_enabled: bool = True
+    captions_enabled: bool = True
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def duration(self) -> float:
+        return max(item.start + item.duration for item in self.compositions)
+
+    @model_validator(mode="after")
+    def validate_timeline(self) -> "EditPlan":
+        ids = [item.id for item in self.compositions]
+        if len(ids) != len(set(ids)):
+            raise ValueError("composition ids must be unique")
+        previous_end = 0.0
+        for index, item in enumerate(self.compositions):
+            if index and item.start < previous_end:
+                raise ValueError("editorial compositions cannot overlap")
+            previous_end = item.start + item.duration
+        return self

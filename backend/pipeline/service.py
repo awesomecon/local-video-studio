@@ -606,7 +606,7 @@ class PipelineService:
         brief_fields = {
             "title", "topic", "style", "audience", "visual_quality", "instructions",
             # Switching who owns the runtime changes how the director plans.
-            "duration_mode",
+            "duration_mode", "video_mode",
         }
         dimension_fields = {"target_duration", "aspect_ratio", "fps", "resolution"}
         changed_fields = {
