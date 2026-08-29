@@ -40,7 +40,10 @@ def build_project_mars_prototype(*, project_id: str = "editorial-prototype") -> 
             elements=[
                 EditorialElement(id="year", type=EditorialElementType.TEXT, text="1949", role="year"),
                 EditorialElement(id="photo", type=EditorialElementType.IMAGE, asset_id="von-braun-photo", role="archive-photo"),
-                EditorialElement(id="document", type=EditorialElementType.DOCUMENT, asset_id="project-mars-document", role="paper"),
+                EditorialElement(
+                    id="document", type=EditorialElementType.DOCUMENT,
+                    text="THE MARS PROJECT", asset_id="project-mars-document", role="paper",
+                ),
                 EditorialElement(id="passage", type=EditorialElementType.UNDERLINE, role="document-mark"),
                 EditorialElement(id="rulers", type=EditorialElementType.RULER_NODES, count=10, role="ruler-grid"),
                 EditorialElement(id="elon", type=EditorialElementType.TEXT, text="ELON", role="reveal"),
