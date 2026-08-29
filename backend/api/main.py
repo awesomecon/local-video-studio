@@ -28,7 +28,7 @@ from backend.pipeline import PipelineService
 from backend.pipeline.service import LaneResolutionRejected, PipelineError
 from backend.schemas import (
     AspectRatio, DurationMode, GenerationJob, JobStatus, ProjectCreate,
-    ThumbnailCandidateRequest, ThumbnailPlan, VisualType,
+    ThumbnailCandidateRequest, ThumbnailPlan, VideoMode, VisualType,
 )
 from backend.tts import NarrationRequest, NoNarrationTextError
 from backend.storage.jobs import InvalidJobTransition
@@ -341,6 +341,7 @@ class ProjectEdit(BaseModel):
     aspect_ratio: AspectRatio | None = None
     fps: int | None = Field(default=None, ge=1, le=240)
     resolution: tuple[int, int] | None = None
+    video_mode: VideoMode | None = None
     narrator_preference: str | None = Field(default=None, max_length=300)
     style: str | None = Field(default=None, min_length=1, max_length=100)
     audience: str | None = Field(default=None, min_length=1, max_length=100)

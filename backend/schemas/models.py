@@ -100,6 +100,18 @@ class AspectRatio(StrEnum):
     SQUARE = "1:1"
 
 
+class VideoMode(StrEnum):
+    """Top-level generation/rendering workflow selected for a project.
+
+    The default is intentionally Classic so portable projects written before
+    this field existed retain their original behavior without an eager
+    migration or rewrite.
+    """
+
+    CLASSIC = "classic"
+    EDITORIAL = "editorial"
+
+
 class ProjectCreate(DomainModel):
     title: str = Field(min_length=1, max_length=1000)
     topic: str = Field(min_length=1)
@@ -111,6 +123,7 @@ class ProjectCreate(DomainModel):
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
     fps: int = Field(default=24, ge=1, le=240)
     resolution: tuple[int, int] = (1920, 1080)
+    video_mode: VideoMode = VideoMode.CLASSIC
     style: str = "documentary"
     audience: str = "general"
     narrator_preference: str | None = None

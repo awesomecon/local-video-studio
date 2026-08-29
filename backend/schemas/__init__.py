@@ -10,7 +10,7 @@ from .h3_continuity import (
 from .models import (
     AspectRatio, Asset, AssetType, DurationMode, GenerationAttempt, GenerationJob,
     JobStatus, PROJECT_SCHEMA_VERSION, Project, ProjectCreate, ProjectPlan,
-    ProjectStatus, Scene, SceneStatus, VisualType, utc_now,
+    ProjectStatus, Scene, SceneStatus, VideoMode, VisualType, utc_now,
 )
 from .shots import (
     AudioCue, AudioCueKind, AudioMixPolicy, CompiledShot, IMPLICIT_SHOT_SUFFIX,
@@ -31,7 +31,7 @@ from .thumbnails import (
 __all__ = [
     "AspectRatio", "Asset", "AssetType", "DurationMode", "GenerationAttempt",
     "GenerationJob", "JobStatus", "PROJECT_SCHEMA_VERSION", "Project", "ProjectCreate",
-    "ProjectPlan", "ProjectStatus", "Scene", "SceneStatus", "VisualType", "utc_now",
+    "ProjectPlan", "ProjectStatus", "Scene", "SceneStatus", "VideoMode", "VisualType", "utc_now",
     "ThumbnailCandidate", "ThumbnailCandidateId", "ThumbnailCandidateRequest",
     "ThumbnailConcept", "ThumbnailFontPreset", "ThumbnailImageModel",
     "ThumbnailLayoutPreset", "ThumbnailPalette", "ThumbnailPlan", "ThumbnailSelection",
