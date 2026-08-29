@@ -114,7 +114,9 @@ const STALE_REASON_TEXT = {
  */
 export function editorialPlanSummary(snap) {
   const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : null;
-  if (!editorial || !editorial.has_edit_plan) return { hasPlan: false, status: "missing", reasons: [] };
+  if (!editorial || editorial.has_edit_plan !== true) {
+    return { hasPlan: false, status: "missing", reasons: [] };
+  }
   const planStatus = (typeof editorial.plan_status === "string") ? editorial.plan_status.trim() : null;
   if (planStatus === "stale") {
     const raw = Array.isArray(editorial.stale_reasons) ? editorial.stale_reasons : [];
