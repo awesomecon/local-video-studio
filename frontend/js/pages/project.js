@@ -25,14 +25,6 @@ import {
   upsertProject,
 } from "../state.js";
 import { getProject, editProject } from "../api.js";
-import { VIDEO_MODE_OPTIONS, effectiveVideoMode } from "../video-mode.js";
-import {
-  buildPatchBody,
-  diffFields,
-  readInputs,
-  readProjectFields,
-  setInputs,
-} from "../project-fields.js";
 import {
   field,
   setFieldError,
@@ -65,6 +57,17 @@ const NUMBER_FIELDS = [
 ];
 const ASPECT_OPTIONS = ["16:9", "9:16", "1:1"];
 const DURATION_MODE_OPTIONS = ["fixed", "llm"];
+const VIDEO_MODE_OPTIONS = [
+  { value: "classic", label: "Classic — Existing scene-based generator" },
+  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
+];
+const BRIEF_FIELDS = new Set([
+  "title", "topic", "style", "audience", "visual_quality", "instructions",
+  "duration_mode", "video_mode",
+]);
+const DIMENSION_FIELDS = new Set([
+  "target_duration", "aspect_ratio", "fps", "resolution",
+]);
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -370,11 +373,101 @@ function resolutionField(inputs, value, opts = {}) {
   return f;
 }
 
-/*
- * Value reading / diffing / PATCH body construction live in
- * `../project-fields.js` (pure, so the headless logic tests can import them
- * without booting the app shell) and are imported above.
+/* --- Value reading / diffing ---------------------------------------------- */
+
+/**
+ * Existing projects may omit video_mode; only an explicit editorial value
+ * opts into the new generator.
+ * @param {{video_mode?: any} | null | undefined} project
  */
+export function effectiveVideoMode(project) {
+  return project?.video_mode === "editorial" ? "editorial" : "classic";
+}
+
+/** @param {any} p */
+export function readProjectFields(p) {
+  return {
+    title: p.title,
+    topic: p.topic,
+    target_duration: p.target_duration,
+    duration_mode: p.duration_mode || "fixed",
+    video_mode: effectiveVideoMode(p),
+    aspect_ratio: p.aspect_ratio,
+    fps: p.fps,
+    resolution: p.resolution,
+    style: p.style,
+    audience: p.audience,
+    narrator_preference: p.narrator_preference,
+    visual_quality: p.visual_quality,
+    instructions: p.instructions,
+  };
+}
+
+/** @param {Record<string, any>} inputs */
+export function readInputs(inputs) {
+  const out = {};
+  for (const key of Object.keys(inputs)) {
+    const spec = inputs[key];
+    if (spec.kind === "resolution") {
+      out.resolution = [Number(spec.input.w.value), Number(spec.input.h.value)];
+    } else if (spec.kind === "number") {
+      out[key] = Number(spec.input.value);
+    } else if (spec.kind === "text" || spec.kind === "textarea") {
+      const raw = spec.input.value;
+      out[key] = spec.nullable ? (raw.trim() ? raw : null) : raw;
+    } else {
+      out[key] = spec.input.value;
+    }
+  }
+  return out;
+}
+
+/** @param {Record<string, any>} inputs @param {Record<string, any>} values */
+export function setInputs(inputs, values) {
+  for (const key of Object.keys(inputs)) {
+    const spec = inputs[key];
+    const v = values[key];
+    if (spec.kind === "resolution") {
+      spec.input.w.value = String(v[0]);
+      spec.input.h.value = String(v[1]);
+    } else if (spec.kind === "select") {
+      spec.input.value = v;
+    } else if (spec.kind === "text" || spec.kind === "textarea") {
+      spec.input.value = v == null ? "" : v;
+    } else {
+      spec.input.value = String(v);
+    }
+  }
+}
+
+/**
+ * @param {Record<string, any>} baseline
+ * @param {Record<string, any>} values
+ */
+export function diffFields(baseline, values) {
+  const changed = new Set();
+  for (const key of Object.keys(values)) {
+    if (!fieldsEqual(baseline[key], values[key])) changed.add(key);
+  }
+  return {
+    changed,
+    briefChanged: [...changed].some((k) => BRIEF_FIELDS.has(k)),
+    dimensionChanged: [...changed].some((k) => DIMENSION_FIELDS.has(k)),
+    narratorChanged: changed.has("narrator_preference"),
+  };
+}
+
+/** @param {Set<string>} changed @param {Record<string, any>} values */
+export function buildPatchBody(changed, values) {
+  const body = {};
+  for (const key of changed) body[key] = values[key];
+  return body;
+}
+
+function fieldsEqual(a, b) {
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => x === b[i]);
+  return a === b;
+}
 
 /**
  * @param {{briefChanged: boolean, dimensionChanged: boolean, narratorChanged: boolean}} d
