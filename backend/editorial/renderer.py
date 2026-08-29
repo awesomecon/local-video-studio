@@ -180,7 +180,12 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .draft-label{{position:absolute;left:80px;bottom:64px;font:18px monospace;letter-spacing:3px;color:#6f91a6}}
 .blackout{{position:absolute;inset:0;z-index:100;background:#050505;opacity:0}}
 .elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;font-size:210px;font-weight:900;letter-spacing:8px;color:var(--ivory);opacity:0}}
-</style></head><body><main id="stage">{markup}</main>
+.editorial-text-disabled .year,.editorial-text-disabled .elon,
+.editorial-text-disabled .asset-tag,.editorial-text-disabled .paper-index,
+.editorial-text-disabled .document h2,.editorial-text-disabled .document>p,
+.editorial-text-disabled .paper-stamp,.editorial-text-disabled .ruler-node span,
+.editorial-text-disabled .draft-label{{visibility:hidden}}
+</style></head><body class="{'editorial-text-enabled' if plan.editorial_text_enabled else 'editorial-text-disabled'}"><main id="stage">{markup}</main>
 <script>
 "use strict";
 const PLAN={payload};

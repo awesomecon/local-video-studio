@@ -157,6 +157,31 @@ def test_finalize_can_disable_narration_processing_and_output_limiter(
     assert "alimiter" not in filters
 
 
+def test_finalize_preserves_requested_fps_when_burning_subtitles(
+    tmp_path: Path, binaries,
+) -> None:
+    silent = tmp_path / "silent.mp4"
+    silent.touch()
+    timeline = Timeline(
+        clips=[TimelineClip("scene", tmp_path / "clip.mp4", 0.0, 1.0)],
+        width=320,
+        height=568,
+        fps=12,
+        subtitles=[SubtitleCue(0.0, 1.0, "Exact caption")],
+    )
+
+    argv = build_finalize_command(
+        silent,
+        timeline,
+        tmp_path / "out.mp4",
+        RenderOptions(burn_subtitles=True, fps=12),
+        binaries,
+        subtitle_path=tmp_path / "captions.ass",
+    )
+
+    assert argv[argv.index("-r") + 1] == "12"
+
+
 def test_command_keeps_asset_path_as_single_argv_item(tmp_path: Path, binaries) -> None:
     asset = tmp_path / "scene; not-a-command.mp4"
     asset.touch()

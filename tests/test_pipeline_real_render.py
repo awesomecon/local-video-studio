@@ -170,6 +170,7 @@ def test_render_only_never_calls_content_generation_even_when_forced(
         "_ensure_music",
         "_ensure_subtitles",
         "_ensure_metadata",
+        "_ensure_editorial_visual",
     ):
         monkeypatch.setattr(pipeline, method, unexpected_generation)
 
