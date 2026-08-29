@@ -72,10 +72,103 @@ def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Pa
 
     snapshot = client.get(f"/api/projects/{project_id}").json()
     assert snapshot["editorial"]["has_edit_plan"] is True
+    assert snapshot["editorial"]["plan_status"] == "current"
+    assert snapshot["editorial"]["stale"] is False
+    assert snapshot["editorial"]["stale_reasons"] == []
     assert snapshot["editorial"]["generate_url"].endswith("/editorial/plan")
     assert client.get(f"/api/projects/{project_id}/editorial/edit-plan").json() == generated.json()
     # The idempotent endpoint returns the existing plan rather than replacing it.
     assert client.post(f"/api/projects/{project_id}/editorial/plan").json() == generated.json()
+
+
+def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    created = client.post("/api/projects", json={
+        "title": "Editorial Clock", "topic": "Narration", "target_duration": 14,
+        "resolution": [1080, 1920], "fps": 24, "video_mode": "editorial",
+    }).json()
+    project_id = created["project"]["id"]
+    assert client.post(f"/api/projects/{project_id}/plan", json={}).status_code == 200
+    generated = client.post(f"/api/projects/{project_id}/editorial/plan").json()
+
+    project = app.state.service.database.get_project(project_id)
+    root = app.state.service.store.project_path(project)
+    timings = root / "subtitles" / "word-timings.json"
+    timings.parent.mkdir(parents=True, exist_ok=True)
+    timings.write_text(json.dumps({
+        "words": [{"start_seconds": 0, "end_seconds": 1, "text": "Narration"}],
+    }), encoding="utf-8")
+
+    stale = client.get(f"/api/projects/{project_id}").json()["editorial"]
+    assert stale["plan_status"] == "stale"
+    assert stale["stale"] is True
+    assert stale["stale_reasons"] == ["word_timings"]
+    # Staleness never deletes or silently replaces the user's plan.
+    assert client.get(f"/api/projects/{project_id}/editorial/edit-plan").json() == generated
+
+    # Explicitly saving the plan records the current clock without changing it.
+    saved = client.put(
+        f"/api/projects/{project_id}/editorial/edit-plan", json=generated,
+    )
+    assert saved.status_code == 200
+    current = client.get(f"/api/projects/{project_id}").json()["editorial"]
+    assert current["plan_status"] == "current"
+    assert current["stale"] is False
+
+    assert client.patch(
+        f"/api/projects/{project_id}", json={"style": "restrained archival"},
+    ).status_code == 200
+    changed = client.get(f"/api/projects/{project_id}").json()["editorial"]
+    assert changed["plan_status"] == "stale"
+    assert changed["stale_reasons"] == ["project"]
+
+    assert client.put(
+        f"/api/projects/{project_id}/editorial/edit-plan", json=generated,
+    ).status_code == 200
+    script = app.state.service.store.load_plan(project.slug)
+    first = script.scenes[0].model_copy(update={"narration": "Revised narration."})
+    app.state.service.store.save_plan(
+        project.slug, script.model_copy(update={"scenes": [first, *script.scenes[1:]]}),
+    )
+    narration_changed = client.get(
+        f"/api/projects/{project_id}"
+    ).json()["editorial"]
+    assert narration_changed["plan_status"] == "stale"
+    assert narration_changed["stale_reasons"] == ["script"]
+
+
+def test_legacy_editorial_plan_without_provenance_is_untracked(tmp_path: Path) -> None:
+    from backend.editorial import build_project_mars_prototype
+
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project = client.post("/api/projects", json={
+        "title": "Existing Editorial", "topic": "Compatibility",
+        "target_duration": 14, "video_mode": "editorial",
+    }).json()["project"]
+    # Simulate a plan saved by the earlier release, before provenance existed.
+    app.state.service.store.save_edit_plan(
+        project["slug"], build_project_mars_prototype(project_id=project["id"]),
+    )
+
+    editorial = client.get(f"/api/projects/{project['id']}").json()["editorial"]
+    assert editorial["has_edit_plan"] is True
+    assert editorial["plan_status"] == "untracked"
+    assert editorial["stale"] is None
+    assert editorial["stale_reasons"] == []
 
 
 def test_editorial_plan_api_rejects_classic_projects(tmp_path: Path) -> None:

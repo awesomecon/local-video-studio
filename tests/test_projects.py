@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from backend.editorial import build_project_mars_prototype
+from backend.editorial import (
+    EditPlanProvenance,
+    EditPlanSourceKind,
+    build_project_mars_prototype,
+)
 from backend.schemas import Project, ProjectPlan, Scene, VideoMode
 from backend.storage import ProjectStore, slugify
 
@@ -41,6 +45,17 @@ def test_portable_editorial_edit_plan_round_trip(tmp_path: Path) -> None:
     assert saved == directory / "editorial/edit-plan.json"
     assert store.load_edit_plan(project.slug) == plan
     assert store.edit_plan_exists(project.slug)
+
+    provenance = EditPlanProvenance(
+        project_id=project.id,
+        source_kind=EditPlanSourceKind.PLANNER,
+        project_sha256="1" * 64,
+        script_sha256="2" * 64,
+        word_timings_sha256=None,
+    )
+    provenance_path = store.save_edit_plan_provenance(project.slug, provenance)
+    assert provenance_path == directory / "editorial/plan-provenance.json"
+    assert store.load_edit_plan_provenance(project.slug) == provenance
 
 
 def test_classic_project_refuses_editorial_edit_plan(tmp_path: Path) -> None:

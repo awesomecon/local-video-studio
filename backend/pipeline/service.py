@@ -87,7 +87,7 @@ from backend.rendering.process import (
 )
 from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
-from backend.editorial.models import EditPlan
+from backend.editorial.models import EditPlan, EditPlanProvenance, EditPlanSourceKind
 from backend.editorial.planner import EditorialPlanner
 from backend.schemas import (
     Asset,
@@ -403,8 +403,12 @@ class PipelineService:
             "stage_state": self._read_stage_state(project),
         }
         if project.video_mode is VideoMode.EDITORIAL:
+            plan_status = self._editorial_plan_status(project)
             snapshot["editorial"] = {
-                "has_edit_plan": self.store.edit_plan_exists(project.slug),
+                "has_edit_plan": plan_status["has_edit_plan"],
+                "plan_status": plan_status["plan_status"],
+                "stale": plan_status["stale"],
+                "stale_reasons": plan_status["stale_reasons"],
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
                 "generate_url": f"/api/projects/{project.id}/editorial/plan",
                 "preview_url": f"/api/projects/{project.id}/editorial/preview",
@@ -417,7 +421,11 @@ class PipelineService:
         """Validate project ownership/mode and atomically publish an edit plan."""
         with self._lock:
             project = self._project(project_id)
+            provenance = self._editorial_plan_provenance(
+                project, source_kind=EditPlanSourceKind.MANUAL,
+            )
             self.store.save_edit_plan(project.slug, plan)
+            self.store.save_edit_plan_provenance(project.slug, provenance)
             return plan
 
     def load_edit_plan(self, project_id: str) -> EditPlan:
@@ -455,7 +463,16 @@ class PipelineService:
                 mock_mode=self.mock_mode,
             )
             edit_plan_path = self.store.save_edit_plan(project.slug, edit_plan)
-            outputs = [edit_plan_path]
+            provenance = self._editorial_plan_provenance(
+                project,
+                source_kind=EditPlanSourceKind.PLANNER,
+                script=script,
+                word_timings=words,
+            )
+            provenance_path = self.store.save_edit_plan_provenance(
+                project.slug, provenance,
+            )
+            outputs = [edit_plan_path, provenance_path]
             if draft is not None:
                 draft_path = self.store.project_path(project) / "editorial" / "planner-draft.json"
                 self._atomic_json(draft_path, draft.model_dump(mode="json"))
@@ -468,6 +485,105 @@ class PipelineService:
             operation,
             backend="mock" if self.mock_mode else "local_llm",
         )[0]
+
+    @staticmethod
+    def _editorial_hash(payload: Any) -> str:
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _editorial_plan_provenance(
+        self,
+        project: Project,
+        *,
+        source_kind: EditPlanSourceKind,
+        script: ProjectPlan | None = None,
+        word_timings: list[CaptionWord] | None = None,
+    ) -> EditPlanProvenance:
+        if script is None:
+            try:
+                script = self.store.load_plan(project.slug)
+            except (FileNotFoundError, ValueError):
+                script = None
+        if word_timings is None:
+            try:
+                word_timings = self._editorial_word_timings(project)
+            except PipelineError:
+                word_timings = None
+
+        project_payload = {
+            "title": project.title,
+            "topic": project.topic,
+            "style": project.style,
+            "audience": project.audience,
+            "instructions": project.instructions,
+            "resolution": list(project.resolution),
+            "fps": project.fps,
+        }
+        script_payload = None if script is None else {
+            "project_id": script.project_id,
+            "scenes": [
+                {
+                    "id": scene.id,
+                    "index": scene.index,
+                    "duration": scene.duration,
+                    "narration": scene.narration,
+                }
+                for scene in script.scenes
+            ],
+        }
+        timing_payload = None if word_timings is None else [
+            word.to_dict() for word in word_timings
+        ]
+        return EditPlanProvenance(
+            project_id=project.id,
+            source_kind=source_kind,
+            project_sha256=self._editorial_hash(project_payload),
+            script_sha256=(
+                self._editorial_hash(script_payload) if script_payload is not None else None
+            ),
+            word_timings_sha256=(
+                self._editorial_hash(timing_payload) if timing_payload is not None else None
+            ),
+        )
+
+    def _editorial_plan_status(self, project: Project) -> dict[str, Any]:
+        if not self.store.edit_plan_exists(project.slug):
+            return {
+                "has_edit_plan": False,
+                "plan_status": "missing",
+                "stale": None,
+                "stale_reasons": [],
+            }
+        try:
+            recorded = self.store.load_edit_plan_provenance(project.slug)
+        except (FileNotFoundError, OSError, ValueError):
+            # Plans created before provenance tracking stay valid and usable;
+            # the application does not infer that they are stale.
+            return {
+                "has_edit_plan": True,
+                "plan_status": "untracked",
+                "stale": None,
+                "stale_reasons": [],
+            }
+        current = self._editorial_plan_provenance(
+            project, source_kind=recorded.source_kind,
+        )
+        comparisons = {
+            "project": (recorded.project_sha256, current.project_sha256),
+            "script": (recorded.script_sha256, current.script_sha256),
+            "word_timings": (
+                recorded.word_timings_sha256, current.word_timings_sha256,
+            ),
+        }
+        reasons = [name for name, pair in comparisons.items() if pair[0] != pair[1]]
+        return {
+            "has_edit_plan": True,
+            "plan_status": "stale" if reasons else "current",
+            "stale": bool(reasons),
+            "stale_reasons": reasons,
+        }
 
     def _editorial_word_timings(self, project: Project) -> list[CaptionWord]:
         path = self.store.project_path(project) / "subtitles" / "word-timings.json"
