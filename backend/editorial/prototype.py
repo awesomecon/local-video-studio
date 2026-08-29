@@ -9,10 +9,10 @@ from .models import (
 )
 
 
-def build_project_mars_prototype() -> EditPlan:
+def build_project_mars_prototype(*, project_id: str = "editorial-prototype") -> EditPlan:
     """Return the 1949 → Project Mars → ten rulers → ELON sequence."""
     return EditPlan(
-        project_id="editorial-prototype",
+        project_id=project_id,
         width=1080,
         height=1920,
         fps=24,

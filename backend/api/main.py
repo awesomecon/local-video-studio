@@ -14,13 +14,14 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.core import AppConfig, inspect_environment, load_config
 from backend.core.h3_policy import h3_policy_payload
 from backend.core.ports import select_application_port
+from backend.editorial import EditPlan, compile_edit_plan_html
 from backend.models import LocalLLMBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
@@ -792,6 +793,47 @@ def create_app(
             return service.project_snapshot(project_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @application.get("/api/projects/{project_id}/editorial/edit-plan")
+    def get_editorial_edit_plan(project_id: str) -> dict[str, Any]:
+        try:
+            return service.load_edit_plan(project_id).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @application.put("/api/projects/{project_id}/editorial/edit-plan")
+    def put_editorial_edit_plan(project_id: str, request: EditPlan) -> dict[str, Any]:
+        try:
+            return service.save_edit_plan(project_id, request).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @application.get(
+        "/api/projects/{project_id}/editorial/preview",
+        response_class=HTMLResponse,
+    )
+    def preview_editorial_project(project_id: str) -> HTMLResponse:
+        try:
+            html = compile_edit_plan_html(service.load_edit_plan(project_id))
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return HTMLResponse(
+            html,
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; img-src 'self' data: blob:; "
+                    "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                    "font-src 'self' data:"
+                ),
+                "Cache-Control": "no-store",
+            },
+        )
 
     @application.get("/api/projects/{project_id}/tts/voices")
     def list_voice_profiles(project_id: str) -> dict[str, Any]:

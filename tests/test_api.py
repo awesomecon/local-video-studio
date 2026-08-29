@@ -802,6 +802,56 @@ def test_project_edit_accepts_every_editable_field(tmp_path: Path) -> None:
     assert p["instructions"] == "be concise"
 
 
+def test_editorial_edit_plan_persists_and_previews(tmp_path: Path) -> None:
+    from backend.editorial import build_project_mars_prototype
+
+    client = TestClient(_make_app(tmp_path))
+    project = _create_project(
+        client, title="Project Mars", video_mode="editorial",
+        resolution=[1080, 1920], fps=24,
+    )
+    plan = build_project_mars_prototype(project_id=project["id"])
+    payload = plan.model_dump(mode="json")
+
+    saved = client.put(
+        f"/api/projects/{project['id']}/editorial/edit-plan", json=payload,
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json() == payload
+    snapshot = client.get(f"/api/projects/{project['id']}").json()
+    assert snapshot["editorial"]["has_edit_plan"] is True
+
+    restarted = TestClient(_make_app(tmp_path))
+    loaded = restarted.get(
+        f"/api/projects/{project['id']}/editorial/edit-plan"
+    )
+    assert loaded.status_code == 200
+    assert loaded.json() == payload
+
+    preview = restarted.get(f"/api/projects/{project['id']}/editorial/preview")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("text/html")
+    assert preview.headers["cache-control"] == "no-store"
+    assert "default-src 'none'" in preview.headers["content-security-policy"]
+    assert "window.renderAt" in preview.text
+    assert "1949" in preview.text
+
+
+def test_classic_project_rejects_editorial_plan(tmp_path: Path) -> None:
+    from backend.editorial import build_project_mars_prototype
+
+    client = TestClient(_make_app(tmp_path))
+    project = _create_project(client)
+    plan = build_project_mars_prototype(project_id=project["id"])
+
+    response = client.put(
+        f"/api/projects/{project['id']}/editorial/edit-plan",
+        json=plan.model_dump(mode="json"),
+    )
+    assert response.status_code == 409
+    assert "Editorial Mode" in response.json()["detail"]
+
+
 def test_project_edit_persists_across_restart(tmp_path: Path) -> None:
     client = TestClient(_make_app(tmp_path))
     pid = _create_project(client, title="Before Restart")["id"]

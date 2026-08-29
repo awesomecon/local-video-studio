@@ -13,7 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from backend.schemas import Project, ProjectPlan, Scene, Shot, ThumbnailPlan, ThumbnailSelection
+from backend.editorial.models import EditPlan
+from backend.schemas import (
+    Project, ProjectPlan, Scene, Shot, ThumbnailPlan, ThumbnailSelection, VideoMode,
+)
 
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -28,7 +31,7 @@ class ProjectStore:
     DIRECTORY_NAMES = (
         "script", "references", "narration", "music", "scenes", "subtitles",
         "thumbnails", "renders", "variants/archive", "voices", "audio/qwen",
-        "audio/step", "audio/chatterbox", "benchmark",
+        "audio/step", "audio/chatterbox", "benchmark", "editorial/compositions",
     )
 
     def __init__(self, root: str | Path):
@@ -132,6 +135,29 @@ class ProjectStore:
         return ProjectPlan.model_validate_json(
             (self.project_path(slug) / "plan.json").read_text(encoding="utf-8")
         )
+
+    def save_edit_plan(self, slug: str, plan: EditPlan) -> Path:
+        """Persist one validated, portable Editorial Mode plan atomically."""
+        project = self.load_project(slug)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise ValueError("edit plans can only be saved for Editorial Mode projects")
+        if plan.project_id != project.id:
+            raise ValueError("edit plan does not belong to this project")
+        directory = self.project_path(slug) / "editorial"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "edit-plan.json"
+        self._atomic_json(path, plan.model_dump(mode="json"))
+        return path
+
+    def load_edit_plan(self, slug: str) -> EditPlan:
+        return EditPlan.model_validate_json(
+            (self.project_path(slug) / "editorial" / "edit-plan.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def edit_plan_exists(self, slug: str) -> bool:
+        return (self.project_path(slug) / "editorial" / "edit-plan.json").is_file()
 
     def save_thumbnail_plan(self, slug: str, plan: ThumbnailPlan) -> Path:
         project = self.load_project(slug)

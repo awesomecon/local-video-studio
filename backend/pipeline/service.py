@@ -87,6 +87,7 @@ from backend.rendering.process import (
 )
 from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
+from backend.editorial.models import EditPlan
 from backend.schemas import (
     Asset,
     AssetType,
@@ -97,6 +98,7 @@ from backend.schemas import (
     ProjectCreate,
     ProjectPlan,
     ProjectStatus,
+    VideoMode,
     Scene,
     SceneStatus,
     Shot,
@@ -398,9 +400,28 @@ class PipelineService:
             "directory": str(self.store.project_path(project)),
             "stage_state": self._read_stage_state(project),
         }
+        if project.video_mode is VideoMode.EDITORIAL:
+            snapshot["editorial"] = {
+                "has_edit_plan": self.store.edit_plan_exists(project.slug),
+                "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
+                "preview_url": f"/api/projects/{project.id}/editorial/preview",
+            }
         if recovery:
             snapshot["recovery"] = recovery
         return snapshot
+
+    def save_edit_plan(self, project_id: str, plan: EditPlan) -> EditPlan:
+        """Validate project ownership/mode and atomically publish an edit plan."""
+        with self._lock:
+            project = self._project(project_id)
+            self.store.save_edit_plan(project.slug, plan)
+            return plan
+
+    def load_edit_plan(self, project_id: str) -> EditPlan:
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise ValueError("project is not in Editorial Mode")
+        return self.store.load_edit_plan(project.slug)
 
     def list_projects(self) -> tuple[list[Project], list[dict[str, Any]]]:
         """List projects reconciling the SQLite index with on-disk directories.
