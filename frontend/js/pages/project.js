@@ -19,8 +19,13 @@
  *    input values, so edits survive ticks.
  *  - Editorial projects (video_mode === "editorial") get an extra
  *    "Editorial Preview" panel driven by the snapshot's `editorial` block
- *    ({ has_edit_plan, edit_plan_url, preview_url }); classic and legacy
- *    projects never see it.
+ *    ({ has_edit_plan, edit_plan_url, generate_url, preview_url }); classic
+ *    and legacy projects never see it. Without a plan the panel offers a
+ *    "Generate Edit Plan" button (only when generate_url is a non-empty
+ *    string) that POSTs exactly once with no body, shows a pending label,
+ *    and refreshes the panel on success; failures restore the button and
+ *    follow the standard error/toast conventions. Generation never happens
+ *    automatically on load or live refresh.
  */
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
@@ -29,7 +34,7 @@ import {
   needsProject,
   upsertProject,
 } from "../state.js";
-import { getProject, editProject } from "../api.js";
+import { getProject, editProject, generateEditPlan } from "../api.js";
 import {
   field,
   setFieldError,
@@ -159,7 +164,7 @@ function buildScreen(projectId) {
     }
     region.replaceChildren(...content);
     renderProvenance(prov, snap);
-    renderEditorialRegion(editorial, snap);
+    renderEditorialRegion(editorial, snap, () => refreshProvenance(prov, editorial, id));
   }
 
   /** @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
@@ -571,27 +576,76 @@ function renderProvenance(prov, snap) {
 
 /* --- Editorial Preview ----------------------------------------------------- */
 
+const GENERATE_PLAN_LABEL = "Generate Edit Plan";
+const GENERATE_PLAN_PENDING_LABEL = "Generating…";
+
+/**
+ * Non-empty backend-provided string or null; malformed values (numbers,
+ * whitespace, objects) never produce a request URL.
+ * @param {unknown} value
+ */
+function usableUrl(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Primary "Generate Edit Plan" action. One click issues exactly one bodyless
+ * POST to the snapshot-provided generate URL (no force flag); the button is
+ * disabled with a pending label while the request runs and is restored with
+ * the standard error surfaces if it fails. On success the panel is refreshed
+ * through `onGenerated` so it re-renders as "Edit Plan available".
+ * @param {string} generateUrl
+ * @param {HTMLElement} errors — region for the inline failure panel
+ * @param {(() => any) | null} [onGenerated]
+ * @returns {HTMLElement}
+ */
+function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
+  const button = el("button", { class: "btn btn-primary", type: "button" }, GENERATE_PLAN_LABEL);
+  let pending = false;
+  button.addEventListener("click", async () => {
+    if (pending) return;
+    pending = true;
+    button.disabled = true;
+    button.textContent = GENERATE_PLAN_PENDING_LABEL;
+    errors.replaceChildren();
+    try {
+      await generateEditPlan(state.config, generateUrl);
+      if (onGenerated) await onGenerated();
+    } catch (err) {
+      pending = false;
+      button.disabled = false;
+      button.textContent = GENERATE_PLAN_LABEL;
+      errors.replaceChildren(errorPanel(err));
+      toastError(err, "Edit Plan generation failed");
+    }
+  });
+  return button;
+}
+
 /**
  * Editorial Preview panel for editorial projects; classic / legacy projects
  * get null so the region stays empty and the rest of the page is untouched.
  * A missing or malformed `editorial` snapshot is treated defensively as
- * has_edit_plan=false.
+ * has_edit_plan=false, and a missing/malformed generate_url simply omits
+ * the Generate button. The generate endpoint is never called during render.
  *
  * @param {import("../api.js").ProjectSnapshot} snap
+ * @param {(() => any) | null} [onGenerated] — refresh hook after a successful generation
  * @returns {HTMLElement | null}
  */
-export function editorialPreviewSection(snap) {
+export function editorialPreviewSection(snap, onGenerated = null) {
   if (effectiveVideoMode(snap && snap.project) !== "editorial") return null;
-  const editorial = (snap && snap.editorial) || null;
+  const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : null;
   const hasPlan = !!(editorial && editorial.has_edit_plan);
-  const previewUrl = (hasPlan && typeof editorial.preview_url === "string" && editorial.preview_url)
-    ? editorial.preview_url
-    : null;
+  const previewUrl = hasPlan ? usableUrl(editorial.preview_url) : null;
+  const generateUrl = hasPlan ? null : usableUrl(editorial && editorial.generate_url);
   const body = el("div", { class: "panel-body" });
+  const errors = el("div", { class: "mt" });
   if (!hasPlan) {
     body.append(emptyState(
       "No Edit Plan yet",
       "This editorial project has no Edit Plan generated yet. Once one exists, a deterministic HTML preview becomes available here.",
+      generateUrl ? [buildGeneratePlanButton(generateUrl, errors, onGenerated)] : [],
     ));
   } else {
     body.append(el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
@@ -601,6 +655,7 @@ export function editorialPreviewSection(snap) {
         : null,
     ));
   }
+  body.append(errors);
   return el("section", { class: "panel" },
     el("div", { class: "panel-title" }, "Editorial Preview"),
     body,
@@ -609,12 +664,29 @@ export function editorialPreviewSection(snap) {
 
 /**
  * Mount (or clear) the Editorial Preview panel for the current snapshot.
+ * Pure rendering: no request is issued here. After a successful generation
+ * the default hook re-fetches the snapshot so the panel switches to
+ * "Edit Plan available" + "Open Preview".
+ * @param {HTMLElement} region
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @param {(() => any) | null} [onGenerated]
+ */
+export function renderEditorialRegion(region, snap, onGenerated = null) {
+  const hook = onGenerated || (() => reloadEditorialRegion(region, snap));
+  const section = editorialPreviewSection(snap, hook);
+  region.replaceChildren(...(section ? [section] : []));
+}
+
+/**
+ * Re-read the project snapshot and re-render only the Editorial Preview
+ * region (the form inputs and provenance of the mounted screen are refreshed
+ * by the caller's own hook when present).
  * @param {HTMLElement} region
  * @param {import("../api.js").ProjectSnapshot} snap
  */
-function renderEditorialRegion(region, snap) {
-  const section = editorialPreviewSection(snap);
-  region.replaceChildren(...(section ? [section] : []));
+async function reloadEditorialRegion(region, snap) {
+  const fresh = await getProject(state.config, snap.project.id);
+  renderEditorialRegion(region, fresh);
 }
 
 /* --- Small helpers -------------------------------------------------------- */

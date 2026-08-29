@@ -257,6 +257,9 @@ import { apiUrl } from "./config.js";
  * @property {string} directory
  * @property {{version?: number, stages?: Record<string, {status?:string, job_id?:string|null, completed_at?:string, outputs?:string[]}>}} stage_state
  * @property {Array<{type: string, slug?: string, project_id?: string, detail: string}>=} recovery
+ * @property {{has_edit_plan?: boolean, edit_plan_url?: string|null, generate_url?: string|null, preview_url?: string|null}=} [editorial]
+ *   — present only on editorial project snapshots; may be missing/malformed on
+ *   older backends and must be treated defensively.
  */
 
 /**
@@ -968,6 +971,22 @@ export function scriptProject(config, id, body = {}, opts = {}) {
   return request(config, `/api/projects/${encodeURIComponent(id)}/script`, {
     method: "POST", body, timeoutMs: 600000, ...opts,
   });
+}
+
+/**
+ * POST the snapshot-provided editorial generate URL
+ * (`snap.editorial.generate_url`, e.g. "/api/projects/{id}/editorial/plan") —
+ * generate and validate the project's Edit Plan. The endpoint takes no request
+ * body, so none is sent; the synchronous planner can run for a long time, so
+ * the timeout mirrors plan generation. Non-idempotent: never auto-retried, and
+ * only issued on an explicit user action.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} generateUrl — backend-provided path from the snapshot
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the generated validated Edit Plan JSON
+ */
+export function generateEditPlan(config, generateUrl, opts = {}) {
+  return request(config, generateUrl, { method: "POST", timeoutMs: 600000, ...opts });
 }
 
 /** GET /api/music/models */

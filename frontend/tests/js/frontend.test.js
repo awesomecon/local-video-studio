@@ -29,6 +29,14 @@
  *                                the status and an Open Preview link that
  *                                opens preview_url in a new tab with
  *                                rel="noopener".
+ *   7. Editorial Generate Edit Plan - the button appears only for an
+ *                                editorial project without a plan and a valid
+ *                                generate_url, one click issues exactly one
+ *                                bodyless POST with a disabled pending label,
+ *                                success refreshes the panel to the plan
+ *                                state, failure restores the button with the
+ *                                standard error surfaces, and live refreshes
+ *                                never trigger generation.
  */
 
 import {
@@ -50,6 +58,7 @@ import {
   buildPatchBody,
   setInputs,
   editorialPreviewSection,
+  renderEditorialRegion,
 } from "../../js/pages/project.js";
 
 const results = [];
@@ -459,6 +468,146 @@ record("editorial-preview: missing editorial snapshot degrades to the empty stat
   assert(node, "editorial projects still render the panel defensively");
   assert(node.querySelector(".empty-state"), "missing snapshot counts as has_edit_plan=false");
   assert(!node.querySelector("a"), "no link without a plan");
+});
+
+/* --- 7. Editorial Generate Edit Plan --------------------------------------- */
+
+const GENERATE_URL = "/api/projects/proj-ed/editorial/plan";
+const NO_PLAN_META = {
+  has_edit_plan: false,
+  edit_plan_url: EDIT_PLAN_META.edit_plan_url,
+  generate_url: GENERATE_URL,
+  preview_url: EDIT_PLAN_META.preview_url,
+};
+
+// Matches the button in either its idle or pending label (the pending state
+// rewrites the text in place, so class-based lookup stays stable).
+function findGenerateButton(node) {
+  return [...node.querySelectorAll("button")].find(
+    (b) => b.textContent === "Generate Edit Plan" || b.textContent === "Generating…",
+  ) || null;
+}
+
+record("editorial-generate: classic project shows no Editorial section or Generate button", () => {
+  const classic = { ...LEGACY_PROJECT, video_mode: "classic" };
+  eq(editorialPreviewSection(projectSnapshot(classic, NO_PLAN_META)), null,
+    "classic snapshot renders nothing even with a usable generate_url");
+});
+
+record("editorial-generate: editorial project without a plan shows the Generate button", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  assert(node, "the section renders for editorial projects");
+  assert(node.querySelector(".empty-state"), "empty state explanation remains");
+  const btn = findGenerateButton(node);
+  assert(btn, "Generate Edit Plan button is present");
+  eq(btn.textContent, "Generate Edit Plan", "button label");
+  eq(btn.disabled, false, "button starts enabled");
+  assert(!node.querySelector("a"), "no Open Preview link without a plan");
+});
+
+record("editorial-generate: missing or malformed generate_url omits the button defensively", () => {
+  const noUrl = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, { has_edit_plan: false }));
+  assert(noUrl.querySelector(".empty-state"), "empty state still rendered");
+  assert(!findGenerateButton(noUrl), "no button without generate_url");
+
+  const emptyUrl = editorialPreviewSection(
+    projectSnapshot(EDITORIAL_PROJECT, { ...NO_PLAN_META, generate_url: "" }));
+  assert(!findGenerateButton(emptyUrl), "no button for an empty-string generate_url");
+
+  const badUrl = editorialPreviewSection(
+    projectSnapshot(EDITORIAL_PROJECT, { ...NO_PLAN_META, generate_url: 42 }));
+  assert(!findGenerateButton(badUrl), "no button for a non-string generate_url");
+
+  const garbage = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, "not-an-object"));
+  assert(garbage.querySelector(".empty-state"), "malformed editorial block degrades to the empty state");
+  assert(!findGenerateButton(garbage), "malformed editorial block shows no broken button");
+});
+
+record("editorial-generate: editorial project with a plan keeps the preview link and hides Generate", () => {
+  const node = editorialPreviewSection(
+    projectSnapshot(EDITORIAL_PROJECT, { ...EDIT_PLAN_META, generate_url: GENERATE_URL }));
+  assert(node, "the section renders");
+  const badge = node.querySelector(".badge");
+  assert(badge && badge.textContent.includes("Edit Plan available"), "status badge remains");
+  const link = node.querySelector("a");
+  assert(link && link.textContent === "Open Preview", "Open Preview link remains");
+  assert(!findGenerateButton(node), "no Generate button once a plan exists");
+});
+
+await recordAsync("editorial-generate: one click issues exactly one bodyless POST to generate_url", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "POST" && call.url === GENERATE_URL) return { payload: { version: 1 } };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  const btn = findGenerateButton(node);
+  btn.click();
+  // The pending state is observable synchronously, before the stubbed fetch resolves.
+  eq(btn.disabled, true, "button disabled while pending");
+  eq(btn.textContent, "Generating…", "pending label shown");
+  btn.click(); // a second click while pending must be ignored
+  await flush();
+  const posts = calls.filter((c) => c.method === "POST");
+  eq(posts.length, 1, "exactly one POST issued");
+  eq(posts[0].url, GENERATE_URL, "POSTs the exact snapshot generate_url");
+  eq(posts[0].body, null, "no request body and no force flag");
+});
+
+await recordAsync("editorial-generate: success refreshes the panel to Edit Plan available", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const withPlan = projectSnapshot(
+    EDITORIAL_PROJECT, { ...EDIT_PLAN_META, generate_url: GENERATE_URL });
+  const calls = stubFetch((call) => {
+    if (call.method === "POST" && call.url === GENERATE_URL) return { payload: { version: 1 } };
+    if (call.method === "GET" && call.url === "/api/projects/proj-ed") return { payload: withPlan };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  const btn = findGenerateButton(region);
+  assert(btn, "Generate button present before the click");
+  btn.click();
+  await flush();
+  assert(region.textContent.includes("Edit Plan available"), "plan badge after refresh");
+  const link = region.querySelector("a");
+  assert(link && link.textContent === "Open Preview", "Open Preview after refresh");
+  assert(!findGenerateButton(region), "Generate button gone after refresh");
+  eq(calls.filter((c) => c.method === "POST").length, 1, "still exactly one POST");
+  const gets = calls.filter((c) => c.method === "GET");
+  eq(gets.length, 1, "panel refreshed by one snapshot re-read");
+  eq(gets[0].url, "/api/projects/proj-ed", "re-read the project snapshot");
+});
+
+await recordAsync("editorial-generate: failure restores the button and surfaces the error", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "POST" && call.url === GENERATE_URL) {
+      return { status: 502, payload: { detail: "planner exploded" } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  const btn = findGenerateButton(node);
+  btn.click();
+  await flush();
+  eq(btn.disabled, false, "button re-enabled after failure");
+  eq(btn.textContent, "Generate Edit Plan", "original label restored");
+  assert(node.textContent.includes("planner exploded"), "inline error panel shows the backend message");
+  assert(document.querySelectorAll("#toasts .toast").length >= 1, "error toast surfaced");
+  eq(calls.filter((c) => c.method === "POST").length, 1, "failure never auto-retries the POST");
+});
+
+await recordAsync("editorial-generate: repeated live refreshes never trigger generation", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected call" } }));
+  const region = document.createElement("div");
+  for (let i = 0; i < 4; i++) {
+    renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, NO_PLAN_META));
+  }
+  await flush();
+  eq(calls.length, 0, "mounting and refreshing the panel issues no requests at all");
+  assert(findGenerateButton(region), "the Generate button is present but fires only on click");
 });
 
 /* --- report -------------------------------------------------------------- */
