@@ -926,6 +926,8 @@ record("export: editorialPlanSummary degrades missing and malformed metadata", (
   eq(editorialPlanSummary(snap(null)), { hasPlan: false, status: "missing", reasons: [] }, "null block");
   eq(editorialPlanSummary(snap("corrupt")), { hasPlan: false, status: "missing", reasons: [] }, "non-object block");
   eq(editorialPlanSummary(snap(42)), { hasPlan: false, status: "missing", reasons: [] }, "non-object number");
+  eq(editorialPlanSummary(snap({ has_edit_plan: "yes", plan_status: "current" })),
+    { hasPlan: false, status: "missing", reasons: [] }, "malformed truthy availability is not trusted");
   eq(editorialPlanSummary(snap({ ...EDIT_PLAN_LEGACY, plan_status: "exploded" })),
     { hasPlan: true, status: "unknown", reasons: [] }, "unknown status keeps the plan available");
   eq(editorialPlanSummary(snap({ ...EDIT_PLAN_LEGACY, plan_status: 42, stale: "yes", stale_reasons: { project: true } })),
