@@ -61,6 +61,11 @@ class EvidenceClass(StrEnum):
     ILLUSTRATION = "illustration"
 
 
+class EditPlanSourceKind(StrEnum):
+    PLANNER = "planner"
+    MANUAL = "manual"
+
+
 class EditorialElementType(StrEnum):
     TEXT = "text"
     IMAGE = "image"
@@ -223,3 +228,15 @@ class EditPlan(DomainModel):
                 raise ValueError("editorial compositions cannot overlap")
             previous_end = item.start + item.duration
         return self
+
+
+class EditPlanProvenance(DomainModel):
+    """Portable fingerprints of the inputs an Edit Plan was authored against."""
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    project_id: str = Field(min_length=1, max_length=120)
+    source_kind: EditPlanSourceKind
+    project_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    script_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    word_timings_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    recorded_at: datetime = Field(default_factory=utc_now)

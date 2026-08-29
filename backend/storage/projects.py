@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from backend.editorial.models import EditPlan
+from backend.editorial.models import EditPlan, EditPlanProvenance
 from backend.schemas import (
     Project, ProjectPlan, Scene, Shot, ThumbnailPlan, ThumbnailSelection, VideoMode,
 )
@@ -158,6 +158,23 @@ class ProjectStore:
 
     def edit_plan_exists(self, slug: str) -> bool:
         return (self.project_path(slug) / "editorial" / "edit-plan.json").is_file()
+
+    def save_edit_plan_provenance(
+        self, slug: str, provenance: EditPlanProvenance,
+    ) -> Path:
+        project = self.load_project(slug)
+        if provenance.project_id != project.id:
+            raise ValueError("edit plan provenance does not belong to this project")
+        path = self.project_path(slug) / "editorial" / "plan-provenance.json"
+        self._atomic_json(path, provenance.model_dump(mode="json"))
+        return path
+
+    def load_edit_plan_provenance(self, slug: str) -> EditPlanProvenance:
+        return EditPlanProvenance.model_validate_json(
+            (self.project_path(slug) / "editorial" / "plan-provenance.json").read_text(
+                encoding="utf-8"
+            )
+        )
 
     def save_thumbnail_plan(self, slug: str, plan: ThumbnailPlan) -> Path:
         project = self.load_project(slug)

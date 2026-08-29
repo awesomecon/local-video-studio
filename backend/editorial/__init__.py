@@ -9,6 +9,8 @@ from .models import (
     EditorialEvent,
     EditorialTemplate,
     EditPlan,
+    EditPlanProvenance,
+    EditPlanSourceKind,
     EvidenceClass,
     MotionPrimitive,
 )
@@ -20,6 +22,6 @@ __all__ = [
     "EditorialAsset", "EditorialAssetType", "EditorialComposition",
     "EditorialElement", "EditorialElementType", "EditorialEvent",
     "EditorialPlanDraft", "EditorialPlanner", "EditorialRenderer",
-    "EditorialTemplate", "EditPlan", "EvidenceClass",
+    "EditorialTemplate", "EditPlan", "EditPlanProvenance", "EditPlanSourceKind", "EvidenceClass",
     "MotionPrimitive", "build_project_mars_prototype", "compile_edit_plan_html",
 ]
