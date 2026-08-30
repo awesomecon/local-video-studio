@@ -682,9 +682,9 @@ class PipelineService:
     ) -> EditPlan:
         """Apply narrow deterministic edits without accepting arbitrary Edit Plan JSON."""
         if duration is None and template is None and not text_updates and not event_actions:
-            raise PipelineError("At least one Editorial composition edit must be provided.")
+            raise ValueError("At least one Editorial composition edit must be provided.")
         if template is not None and event_actions:
-            raise PipelineError("Change the template before editing its animation presets.")
+            raise ValueError("Change the template before editing its animation presets.")
         with self._lock:
             project = self._project(project_id)
             if project.video_mode is not VideoMode.EDITORIAL:
@@ -960,11 +960,11 @@ class PipelineService:
             raise PipelineError("project is not in Editorial Mode")
         try:
             script = self.store.load_plan(project.slug)
-            original = self.store.load_edit_plan(project.slug)
         except FileNotFoundError as exc:
             raise PipelineError(
-                "Generate the script and Editorial Edit Plan before regenerating a composition."
+                "Generate the script before regenerating an Editorial composition."
             ) from exc
+        original = self.store.load_edit_plan(project.slug)
         if not any(item.id == composition_id for item in original.compositions):
             raise KeyError(f"unknown Editorial composition {composition_id!r}")
         self._require_selected_llm_model(project)

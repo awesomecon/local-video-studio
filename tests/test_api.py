@@ -253,7 +253,7 @@ def test_editorial_composition_narrow_edits_retime_followers_and_retarget_templa
     assert first["elements"][0]["text"] == "REVISED"
     assert client.patch(url, json={"template": "illustrationCanvas"}).status_code == 409
     assert client.patch(url, json={"duration": 120}).status_code == 409
-    assert client.patch(url, json={}).status_code == 409
+    assert client.patch(url, json={}).status_code == 422
 
 
 def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path) -> None:
