@@ -271,8 +271,16 @@ class EditPlan(DomainModel):
             raise ValueError("composition ids must be unique")
         previous_end = 0.0
         for index, item in enumerate(self.compositions):
-            if index and item.start < previous_end:
-                raise ValueError("editorial compositions cannot overlap")
+            start_frame = round(item.start * self.fps)
+            end_frame = round((item.start + item.duration) * self.fps)
+            if end_frame <= start_frame:
+                raise ValueError("each Editorial composition must occupy at least one frame")
+            if index == 0 and start_frame != 0:
+                raise ValueError("the first Editorial composition must start at zero")
+            if index and round(previous_end * self.fps) != start_frame:
+                raise ValueError(
+                    "editorial compositions must be contiguous; use an explicit black composition"
+                )
             previous_end = item.start + item.duration
         return self
 
