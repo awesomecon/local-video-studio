@@ -257,7 +257,7 @@ import { apiUrl } from "./config.js";
  * @property {string} directory
  * @property {{version?: number, stages?: Record<string, {status?:string, job_id?:string|null, completed_at?:string, outputs?:string[]}>}} stage_state
  * @property {Array<{type: string, slug?: string, project_id?: string, detail: string}>=} recovery
- * @property {{has_edit_plan?: boolean, plan_status?: "missing"|"current"|"stale"|"untracked", stale?: boolean|null, stale_reasons?: string[], edit_plan_url?: string|null, generate_url?: string|null, preview_url?: string|null, settings_url?: string|null, captions_enabled?: boolean, editorial_text_enabled?: boolean}=} [editorial]
+ * @property {{has_edit_plan?: boolean, plan_status?: "missing"|"current"|"stale"|"untracked", stale?: boolean|null, stale_reasons?: string[], edit_plan_url?: string|null, generate_url?: string|null, preview_url?: string|null, settings_url?: string|null, captions_enabled?: boolean, editorial_text_enabled?: boolean, caption_style?: ("editorialPhrase"|"quietDocumentary"|"oneLine"|"oneWord"|"standard")|null}=} [editorial]
  *   — present only on editorial project snapshots. The provenance fields
  *   (plan_status, stale, stale_reasons) are optional and may be missing or
  *   malformed on older backends; treat them defensively and fall back to the
@@ -995,9 +995,10 @@ export function generateEditPlan(config, generateUrl, opts = {}) {
 /**
  * PATCH the snapshot-provided editorial settings URL
  * (`snap.editorial.settings_url`, e.g. "/api/projects/{id}/editorial/settings")
- * with the single display switch the user just changed. The body carries
- * exactly one of `captions_enabled` / `editorial_text_enabled`; the backend
- * rejects anything else, so callers never batch or guess extra fields.
+ * with the single display setting the user just changed. The body carries
+ * exactly one of `captions_enabled` / `editorial_text_enabled` /
+ * `caption_style`; the backend rejects anything else, so callers never batch
+ * or guess extra fields.
  *
  * This is a mutation: `request()` never retries on its own and callers must
  * not wrap it in a retry loop either (a repeated toggle is a new explicit
@@ -1007,7 +1008,7 @@ export function generateEditPlan(config, generateUrl, opts = {}) {
  * entirely when the snapshot URL is malformed.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} settingsUrl — backend-provided path from the snapshot
- * @param {{captions_enabled?: boolean, editorial_text_enabled?: boolean}} body
+ * @param {{captions_enabled?: boolean, editorial_text_enabled?: boolean, caption_style?: string}} body
  * @param {{signal?: AbortSignal}} [opts]
  * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
  */
@@ -1062,6 +1063,38 @@ export function regenerateEditorialComposition(config, projectId, compositionId,
   return request(config, `${editorialCompositionPath(projectId, compositionId)}/regenerate`, {
     method: "POST", timeoutMs: 600000, ...opts,
   });
+}
+
+/**
+ * Generate an unapplied, validated AI revision proposal. The optional
+ * composition id scopes the request to one existing composition; omission
+ * allows a sequence-level revision that may add/split compositions. This is
+ * non-idempotent and intentionally never retried.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} instruction
+ * @param {string|null} compositionId
+ * @param {{signal?: AbortSignal}} [opts]
+ */
+export function createEditorialRevision(
+  config, projectId, instruction, compositionId = null, opts = {},
+) {
+  const body = { instruction };
+  if (compositionId != null) body.composition_id = compositionId;
+  return request(
+    config,
+    `/api/projects/${encodeURIComponent(projectId)}/editorial/revisions`,
+    { method: "POST", body, timeoutMs: 600000, ...opts },
+  );
+}
+
+/** Apply one server-stored proposal after its optimistic-concurrency checks. */
+export function applyEditorialRevision(config, projectId, revisionId, opts = {}) {
+  return request(
+    config,
+    `/api/projects/${encodeURIComponent(projectId)}/editorial/revisions/${encodeURIComponent(revisionId)}/apply`,
+    { method: "POST", timeoutMs: 15000, ...opts },
+  );
 }
 
 /**

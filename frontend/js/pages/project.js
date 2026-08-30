@@ -92,6 +92,7 @@ import {
   getProject, editProject, generateEditPlan,
   patchEditorialSettings, getEditPlan,
   regenerateEditorialComposition, editEditorialComposition,
+  createEditorialRevision, applyEditorialRevision,
   setEditorialAssetLock, generateEditorialAsset, replaceEditorialAsset,
 } from "../api.js";
 import {
@@ -876,16 +877,18 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl =
 /**
  * Independent Captions / Editorial text switches for the Edit Plan's display
  * settings, driven by the snapshot's `settings_url` + `captions_enabled` +
- * `editorial_text_enabled`. A control is omitted when its snapshot value is
- * not a strict boolean, and both are omitted when `settings_url` is not a
- * usable project-local path (malformed metadata must never produce a
- * request). A change is an explicit user action only (checkbox `change`):
- * it PATCHes exactly the one field that changed to `settings_url`, allows
- * one mutation in flight at a time (shared with the Generate Edit Plan
- * action), disables both controls while saving, and never reads or writes
- * the full Edit Plan. On success the region re-renders from a fresh project
- * snapshot through the refresh hook; on failure the checkbox is restored to
- * its previous value and the standard error panel + toast are shown.
+ * `editorial_text_enabled` (+ `caption_style` when present). A control is
+ * omitted when its snapshot value has the wrong type, and the row is omitted
+ * entirely when `settings_url` is not a usable project-local path (malformed
+ * metadata must never produce a request). A change is an explicit user action
+ * only (checkbox `change` / select `change`): it PATCHes exactly the one
+ * field that changed to `settings_url`, allows one mutation in flight at a
+ * time (shared with the Generate Edit Plan action), disables every control
+ * while saving, and never reads or writes the full Edit Plan. On success the
+ * region re-renders from a fresh project snapshot through the refresh hook;
+ * on failure the control is restored to its previous value and the standard
+ * error panel + toast are shown. The caption style select is disabled while
+ * captions are switched off.
  *
  * @param {Object} editorial — the snapshot's editorial block
  * @param {EditorialController} ctrl — shared in-flight guard
@@ -893,6 +896,14 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl =
  * @param {(() => any) | null} [onSaved] — fresh-snapshot refresh hook
  * @returns {HTMLElement | null}
  */
+const EDITORIAL_CAPTION_STYLE_OPTIONS = [
+  ["editorialPhrase", "Editorial Phrase"],
+  ["quietDocumentary", "Quiet Documentary"],
+  ["oneLine", "One Line"],
+  ["oneWord", "One Word"],
+  ["standard", "Standard"],
+];
+
 export function buildEditorialDisplayControls(
   editorial, ctrl, errors, onSaved = null, projectId = null,
 ) {
@@ -900,58 +911,94 @@ export function buildEditorialDisplayControls(
   if (!settingsUrl) return null;
   const captionsOk = typeof editorial.captions_enabled === "boolean";
   const textOk = typeof editorial.editorial_text_enabled === "boolean";
-  if (!captionsOk && !textOk) return null;
+  const captionStyleOk =
+    captionsOk && typeof editorial.caption_style === "string";
+  if (!captionsOk && !textOk && !captionStyleOk) return null;
 
   /** @type {HTMLInputElement[]} */
-  const checkboxes = [];
+  const controls = [];
   const row = el("div", { class: "row mt", "aria-label": "Editorial display settings" },
     el("span", { class: "muted small" }, "Display settings:"));
-  const makeControl = (key, label, value) => {
+  const makeCheckbox = (key, label, value) => {
     const input = el("input", { type: "checkbox", checked: value });
     input.dataset.editorialSetting = key;
     input.addEventListener("change", () => {
-      // While a mutation is in flight both controls are disabled, so this
+      // While a mutation is in flight every control is disabled, so this
       // only guards programmatic changes: undo the flip, queue nothing.
       if (ctrl.busy !== "") { input.checked = !input.checked; return; }
-      void saveEditorialSetting(key, input, { settingsUrl, ctrl, errors, onSaved, checkboxes });
+      void saveEditorialSetting(key, input, !input.checked,
+        { settingsUrl, ctrl, errors, onSaved, controls });
     });
-    checkboxes.push(input);
+    controls.push(input);
     row.append(el("label", { class: "small" }, input, ` ${label}`));
   };
-  if (captionsOk) makeControl("captions_enabled", "Captions", editorial.captions_enabled);
-  if (textOk) makeControl("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
+  const makeStyleSelect = (value) => {
+    const select = el("select", { "aria-label": "Caption style" });
+    for (const [optionValue, optionLabel] of EDITORIAL_CAPTION_STYLE_OPTIONS) {
+      const option = el("option", { value: optionValue }, optionLabel);
+      if (optionValue === value) option.selected = true;
+      select.append(option);
+    }
+    if (select.value !== value) select.value = value;
+    let current = value;
+    select.addEventListener("change", () => {
+      if (ctrl.busy !== "") { select.value = current; return; }
+      void saveEditorialSetting("caption_style", select, current,
+        { settingsUrl, ctrl, errors, onSaved, controls }
+      ).then((saved) => {
+        // On failure the control was restored to `current`; on success the
+        // region normally re-renders, but keep the guard current either way.
+        if (saved) current = select.value;
+      });
+    });
+    controls.push(select);
+    if (captionsOk && !editorial.captions_enabled) {
+      select.disabled = true;
+      select.dataset.keepDisabled = "1";
+    }
+    row.append(el("label", { class: "small" }, " Caption style", select));
+  };
+  if (captionsOk) makeCheckbox("captions_enabled", "Captions", editorial.captions_enabled);
+  if (textOk) makeCheckbox("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
+  if (captionStyleOk) makeStyleSelect(editorial.caption_style);
   return row;
 }
 
 /**
  * PATCH one changed display setting. Exactly one mutation may be in flight
- * per region; both controls stay disabled while the request runs. The
- * Edit Plan is never touched on this path.
- * @param {"captions_enabled"|"editorial_text_enabled"} key
- * @param {HTMLInputElement} input — the checkbox that changed
- * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, checkboxes: HTMLInputElement[]}} ctx
+ * per region; every control stays disabled while the request runs. The Edit
+ * Plan is never touched on this path. Returns whether the save succeeded so
+ * select-based callers can track the last persisted value.
+ * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"} key
+ * @param {HTMLInputElement | HTMLSelectElement} control — the control that changed
+ * @param {boolean | string} previous — value to restore on failure
+ * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, controls: (HTMLInputElement | HTMLSelectElement)[]}} ctx
+ * @returns {Promise<boolean>}
  */
-async function saveEditorialSetting(key, input, ctx) {
-  const { settingsUrl, ctrl, errors, onSaved, checkboxes } = ctx;
-  if (ctrl.busy !== "") return; // one mutation in flight at a time
-  const previous = !input.checked; // a `change` event means the value flipped
+async function saveEditorialSetting(key, control, previous, ctx) {
+  const { settingsUrl, ctrl, errors, onSaved, controls } = ctx;
+  if (ctrl.busy !== "") return false; // one mutation in flight at a time
   ctrl.busy = "settings";
-  for (const box of checkboxes) box.disabled = true;
+  for (const item of controls) item.disabled = true;
   errors.replaceChildren();
   // The body carries only the field that changed (the backend forbids the
   // other key in the same request).
   const body = key === "captions_enabled"
-    ? { captions_enabled: input.checked }
-    : { editorial_text_enabled: input.checked };
+    ? { captions_enabled: control.checked }
+    : key === "editorial_text_enabled"
+      ? { editorial_text_enabled: control.checked }
+      : { caption_style: control.value };
+  const isCheckbox = key !== "caption_style";
   try {
     await patchEditorialSettings(state.config, settingsUrl, body);
   } catch (err) {
     ctrl.busy = "";
-    for (const box of checkboxes) box.disabled = false;
-    input.checked = previous; // restore the previous value
+    for (const item of controls) item.disabled = item.dataset.keepDisabled === "1";
+    if (isCheckbox) control.checked = previous;
+    else control.value = previous; // restore the previous value
     errors.replaceChildren(errorPanel(err));
     toastError(err, "Editorial display setting not saved");
-    return;
+    return false;
   }
   ctrl.busy = "";
   // The plan changed on disk, so an open composition list is stale: close it
@@ -963,8 +1010,8 @@ async function saveEditorialSetting(key, input, ctx) {
     ctrl.fetchSeq += 1;
     ctrl.compositions = "idle";
   }
-  for (const box of checkboxes) box.disabled = false;
-  if (!onSaved) return;
+  for (const item of controls) item.disabled = item.dataset.keepDisabled === "1";
+  if (!onSaved) return true;
   try {
     await onSaved();
   } catch (err) {
@@ -972,6 +1019,7 @@ async function saveEditorialSetting(key, input, ctx) {
     errors.replaceChildren(errorPanel(err));
     toastError(err, "Editorial display setting saved, but the project refresh failed");
   }
+  return true;
 }
 
 /**
@@ -1091,6 +1139,55 @@ export function parseCompositionEditor(plan) {
 }
 
 /**
+ * Structural before/after summary for an AI revision proposal. Plan content
+ * remains untrusted and is returned only as plain strings/numbers for text-node
+ * rendering. `created_at` is ignored so a no-op proposal is recognizable.
+ */
+export function summarizeEditorialRevision(currentPlan, proposedPlan) {
+  const before = summarizeEditPlanCompositions(currentPlan);
+  const after = summarizeEditPlanCompositions(proposedPlan);
+  if (!before.ok || !after.ok) return { ok: false, rows: [], changed: false };
+  const rawBefore = new Map(
+    (Array.isArray(currentPlan.compositions) ? currentPlan.compositions : [])
+      .filter((item) => item && typeof item === "object" && typeof item.id === "string")
+      .map((item) => [item.id, JSON.stringify(item)]),
+  );
+  const rawAfter = new Map(
+    (Array.isArray(proposedPlan.compositions) ? proposedPlan.compositions : [])
+      .filter((item) => item && typeof item === "object" && typeof item.id === "string")
+      .map((item) => [item.id, JSON.stringify(item)]),
+  );
+  const beforeById = new Map(before.compositions.map((item) => [item.id, item]));
+  const afterById = new Map(after.compositions.map((item) => [item.id, item]));
+  const ids = [...new Set([...beforeById.keys(), ...afterById.keys()])];
+  const rows = ids.map((id) => {
+    const oldItem = beforeById.get(id) || null;
+    const newItem = afterById.get(id) || null;
+    const state = !oldItem ? "added" : !newItem ? "removed"
+      : rawBefore.get(id) === rawAfter.get(id) ? "unchanged" : "changed";
+    return { id, state, before: oldItem, after: newItem };
+  });
+  const settingsBefore = JSON.stringify({
+    captions_enabled: currentPlan?.captions_enabled,
+    caption_style: currentPlan?.caption_style,
+    editorial_text_enabled: currentPlan?.editorial_text_enabled,
+    caption_emphasis: currentPlan?.caption_emphasis,
+  });
+  const settingsAfter = JSON.stringify({
+    captions_enabled: proposedPlan?.captions_enabled,
+    caption_style: proposedPlan?.caption_style,
+    editorial_text_enabled: proposedPlan?.editorial_text_enabled,
+    caption_emphasis: proposedPlan?.caption_emphasis,
+  });
+  return {
+    ok: true,
+    rows,
+    changed: rows.some((item) => item.state !== "unchanged")
+      || settingsBefore !== settingsAfter,
+  };
+}
+
+/**
  * Enable/disable every interactive control inside the open composition
  * list. Used while a mutation is in flight (one in flight at a time per
  * region) so no second mutation can start from any row.
@@ -1116,6 +1213,7 @@ function buildCompositionControls(data, ctx) {
   if (!data.id) return null; // no validated id -> no endpoint -> no controls
   const groups = [
     buildRegenControl(data, ctx),
+    buildRevisionControl(data, ctx),
     buildDurationControl(data, ctx),
     buildTemplateControl(data, ctx),
   ];
@@ -1126,6 +1224,106 @@ function buildCompositionControls(data, ctx) {
   const assetGroup = buildAssetControls(data, ctx);
   if (assetGroup) groups.push(assetGroup);
   return el("div", { class: "stack" }, ...groups);
+}
+
+function revisionCompositionText(item) {
+  if (!item) return "—";
+  const start = item.start != null ? fmtDuration(item.start) : "—";
+  const duration = item.duration != null ? fmtDuration(item.duration) : "—";
+  return `${item.template} · start ${start} · duration ${duration} · `
+    + `${item.assetCount} assets · ${item.elementCount} elements · ${item.eventCount} events`;
+}
+
+/**
+ * Plain-language, two-phase AI revision control. Preview generation never
+ * mutates the Edit Plan; Apply uses only the opaque server-issued revision id.
+ */
+function buildRevisionControl(data, ctx) {
+  const compositionId = data?.id || null;
+  const label = compositionId ? "Revise this composition with AI" : "Revise sequence with AI";
+  const placeholder = compositionId
+    ? "Describe what should change in this composition…"
+    : "Describe a sequence change, such as adding a ten-rulers composition…";
+  const instruction = el("textarea", {
+    rows: "3", maxlength: "4000", placeholder,
+    "aria-label": label, "data-ed-revision-instruction": compositionId || "sequence",
+    style: { width: "min(100%, 720px)" },
+  });
+  const preview = el("button", {
+    class: "btn btn-sm", type: "button", disabled: true,
+    "data-ed-preview-revision": compositionId || "sequence",
+  }, "Preview AI revision");
+  const result = el("div", { class: "mt", "data-ed-revision-result": compositionId || "sequence" });
+  instruction.addEventListener("input", () => {
+    preview.disabled = ctx.ctrl.busy !== "" || !instruction.value.trim();
+  });
+  preview.addEventListener("click", async () => {
+    const requested = instruction.value.trim();
+    if (!requested || ctx.ctrl.busy !== "") return;
+    ctx.ctrl.busy = "revision";
+    preview.disabled = true;
+    preview.textContent = "Planning revision…";
+    result.replaceChildren(loadingState(2));
+    ctx.errors.replaceChildren();
+    try {
+      const proposal = await createEditorialRevision(
+        state.config, ctx.projectId, requested, compositionId,
+      );
+      const revisionId = typeof proposal?.revision_id === "string"
+        && /^[0-9a-f]{32}$/.test(proposal.revision_id)
+        ? proposal.revision_id : null;
+      const proposedPlan = proposal?.plan;
+      const diff = summarizeEditorialRevision(ctx.ctrl.plan, proposedPlan);
+      if (!revisionId || !diff.ok) {
+        throw new Error("The server returned an unreadable Editorial revision proposal.");
+      }
+      const changedRows = diff.rows.filter((item) => item.state !== "unchanged");
+      const apply = el("button", {
+        class: "btn btn-primary btn-sm", type: "button",
+        disabled: !diff.changed, "data-ed-apply-revision": revisionId,
+      }, "Apply revision");
+      const discard = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Discard");
+      apply.addEventListener("click", () => {
+        if (ctx.ctrl.busy !== "") return;
+        void ctx.runMutation(
+          () => applyEditorialRevision(state.config, ctx.projectId, revisionId),
+          "AI revision was not applied",
+        );
+      });
+      discard.addEventListener("click", () => result.replaceChildren());
+      result.replaceChildren(
+        el("div", { class: "panel stack" },
+          el("div", { class: "row wrap" },
+            el("span", { class: "badge neutral" }, "Unapplied preview"),
+            el("span", { class: "small" }, diff.changed
+              ? `${changedRows.length} composition changes proposed`
+              : "No structural changes proposed")),
+          ...changedRows.map((item) => el("div", { class: "small" },
+            el("span", { class: `badge ${item.state === "removed" ? "warn" : "neutral"}` }, item.state),
+            " ", el("span", { class: "mono" }, item.id),
+            el("div", { class: "muted" }, `Before: ${revisionCompositionText(item.before)}`),
+            el("div", { class: "muted" }, `Proposed: ${revisionCompositionText(item.after)}`),
+          )),
+          el("div", { class: "muted small" },
+            "Locked, evidence, and manually replaced assets remain protected. Nothing changes until Apply."),
+          el("div", { class: "row" }, apply, discard),
+        ),
+      );
+    } catch (err) {
+      result.replaceChildren(errorPanel(err));
+      toastError(err, "AI revision preview failed");
+    } finally {
+      ctx.ctrl.busy = "";
+      preview.textContent = "Preview AI revision";
+      preview.disabled = !instruction.value.trim();
+    }
+  });
+  return el("div", { class: "stack" },
+    el("span", { class: "small" }, label),
+    instruction,
+    el("div", { class: "row" }, preview),
+    result,
+  );
 }
 
 /** "Regenerate this composition" — bodyless POST, 600s timeout, no retry. */
@@ -1412,6 +1610,7 @@ function renderCompositionList(sums, rows, ctx) {
   }
   return el("div", { class: "stack", role: "list", "aria-label": "Compositions" },
     el("div", { class: "small" }, `Compositions (${sums.length})`),
+    buildRevisionControl(null, ctx),
     ...sums.map((sum, i) => compositionItem(sum, rows[i], ctx)),
   );
 }

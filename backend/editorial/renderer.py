@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,7 @@ from .models import (
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
-EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v3-responsive"
+EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v4-captions"
 
 
 def _script_json(value: Any) -> str:
@@ -280,11 +280,15 @@ def compile_edit_plan_html(
     plan: EditPlan,
     *,
     asset_url_resolver: AssetURLResolver | None = None,
+    captions: Sequence[dict[str, Any]] = (),
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
 
     Every approved template renders from renderer-owned layout; plan content only
-    supplies escaped text, resolved asset URLs, and element ids.
+    supplies escaped text, resolved asset URLs, and element ids. ``captions``
+    carries pre-computed caption beats (global or clip-local clock, matching the
+    plan's composition clock) with renderer-assigned design-space positions;
+    when empty the composition carries no caption layer.
     """
     unimplemented = sorted({
         item.template.value
@@ -300,6 +304,7 @@ def compile_edit_plan_html(
         for item in plan.compositions
     )
     payload = _script_json(plan.model_dump(mode="json"))
+    captions_payload = _script_json(list(captions))
     landscape = plan.width >= plan.height
     design_width, design_height = ((1920, 1080) if landscape else (1080, 1920))
     design_scale = min(plan.width / design_width, plan.height / design_height)
@@ -307,6 +312,7 @@ def compile_edit_plan_html(
     stage_top = (plan.height - design_height * design_scale) / 2
     orientation = "landscape" if landscape else "portrait"
     text_class = "editorial-text-enabled" if plan.editorial_text_enabled else "editorial-text-disabled"
+    caption_class = f" caption-style-{plan.caption_style.value}" if captions else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -407,12 +413,72 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
 .editorial-text-disabled .ruler-node span{{visibility:hidden}}
-</style></head><body class="{text_class} {orientation}"><main id="stage">{markup}</main>
+/* Caption layer: documentary phrase captions. Font sizes mirror
+   backend/captions/editorial.py _FONT_SIZES (design space); keep in sync
+   and bump EDITORIAL_RENDER_WORKFLOW_VERSION when either changes. */
+#caption-layer{{position:absolute;inset:0;z-index:120;pointer-events:none}}
+.cap{{position:absolute;display:none;opacity:0;will-change:opacity,transform}}
+.caption-style-editorialPhrase .cap,.caption-style-quietDocumentary .cap,.caption-style-oneLine .cap,.caption-style-oneWord .cap{{
+font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif;
+font-weight:600;color:var(--ivory);
+text-shadow:0 2px 9px #000b,0 0 3px #0008;
+line-height:1.3;
+}}
+.caption-style-editorialPhrase .cap{{font-size:48px;padding-left:16px;border-left:3px solid var(--rust)}}
+.caption-style-quietDocumentary .cap{{font-size:44px;font-weight:500}}
+.caption-style-oneLine .cap{{font-size:46px;font-weight:500}}
+.caption-style-oneWord .cap{{font-size:44px;font-weight:500}}
+.landscape .caption-style-editorialPhrase .cap{{font-size:40px}}
+.landscape .caption-style-quietDocumentary .cap,.landscape .caption-style-oneWord .cap{{font-size:36px}}
+.landscape .caption-style-oneLine .cap{{font-size:38px}}
+/* Paper-block emphasis: cream rectangle, dark text, no rounded corners, no glow. */
+.caption-style-editorialPhrase .cap.highlight{{
+background:#f0e5c9;color:#241f19;border-left:none;padding:6px 14px;
+font-size:58px;font-weight:700;text-shadow:none;
+}}
+.landscape .caption-style-editorialPhrase .cap.highlight{{font-size:46px;padding:4px 12px}}
+</style></head><body class="{text_class} {orientation}{caption_class}"><main id="stage">{markup}<div id="caption-layer"></div></main>
 <script>
 "use strict";
 const PLAN={payload};
+const CAPTIONS={captions_payload};
 const clamp=v=>Math.max(0,Math.min(1,v));
 const ease=v=>{{v=clamp(v);return v*v*(3-2*v)}};
+let capNode=null,capKey=null;
+function captionEl(){{
+  if(!capNode){{
+    const layer=document.getElementById('caption-layer');
+    if(!layer)return null;
+    capNode=document.createElement('div');capNode.className='cap';layer.appendChild(capNode);
+  }}
+  return capNode;
+}}
+function updateCaptions(t){{
+  let active=null;
+  for(let i=0;i<CAPTIONS.length;i++){{
+    const cue=CAPTIONS[i];
+    if(t>=cue.start&&t<cue.end)active=cue;
+  }}
+  const key=active?active.start+'|'+active.text:null;
+  if(key!==capKey){{
+    capKey=key;
+    const node=captionEl();
+    if(!node)return;
+    if(!active){{node.style.display='none';node.style.opacity='0';return;}}
+    node.textContent=active.text;
+    node.style.display='block';
+    node.classList.toggle('highlight',!!active.highlight);
+    node.style.left=active.x+'px';
+    node.style.top=active.y+'px';
+  }}
+  if(!active||!capNode)return;
+  const inP=clamp((t-active.start)/0.14);
+  const outP=clamp((active.end-t)/0.14);
+  capNode.style.opacity=String(Math.min(inP,outP));
+  const dy=(1-inP)*8;
+  const dx=active.highlight?(1-inP)*10:0;
+  capNode.style.transform=`translate(${{dx}}px,${{dy}}px)`;
+}}
 function reset(root){{
   root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
   root.querySelectorAll('.ruler-node').forEach(el=>{{el.style.opacity='0';el.classList.remove('focus')}});
@@ -450,6 +516,7 @@ window.renderAt=function(globalTime){{
     root.style.display=active?'block':'none'; if(!active)return;
     const t=globalTime-composition.start;reset(root);composition.events.forEach(event=>applyEvent(root,event,t));
   }});
+  updateCaptions(globalTime);
   return true;
 }};
 window.renderAt(0);window.__editorialReady=true;
@@ -496,6 +563,7 @@ class EditorialRenderer:
         *,
         preview_html: Path | None = None,
         asset_root: Path | None = None,
+        captions: Sequence[dict[str, Any]] = (),
     ) -> Path:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
@@ -507,6 +575,7 @@ class EditorialRenderer:
                 lambda asset: self._data_asset_url(asset_root, asset)
                 if asset_root is not None else None
             ),
+            captions=captions,
         )
         if preview_html is not None:
             preview_html.parent.mkdir(parents=True, exist_ok=True)

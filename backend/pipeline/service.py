@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 import wave
+from collections.abc import Sequence
 from dataclasses import asdict
 from html import escape
 from pathlib import Path
@@ -89,13 +90,18 @@ from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
 from backend.editorial.models import (
     EditPlan, EditPlanProvenance, EditPlanSourceKind,
-    EditorialAssetType, EditorialComposition, EditorialElement,
+    EditorialAssetType, EditorialCaptionCue, EditorialCaptionStyle,
+    EditorialComposition, EditorialElement,
     EditorialElementType, EditorialEvent, EditorialTemplate,
-    EditorialImageModel, EvidenceClass, MotionPrimitive,
+    EditorialImageModel, EditorialRevisionProposal, EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
 from backend.editorial.renderer import (
     EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
+)
+from backend.captions.editorial import (
+    build_editorial_caption_cues, place_caption_cues, slice_caption_cues,
+    synthesize_word_timings, suppress_cues_for_reveals,
 )
 from backend.schemas import (
     Asset,
@@ -433,6 +439,9 @@ class PipelineService:
                 "captions_enabled": (
                     edit_plan.captions_enabled if edit_plan is not None else None
                 ),
+                "caption_style": (
+                    edit_plan.caption_style.value if edit_plan is not None else None
+                ),
                 "editorial_text_enabled": (
                     edit_plan.editorial_text_enabled if edit_plan is not None else None
                 ),
@@ -468,16 +477,36 @@ class PipelineService:
         *,
         captions_enabled: bool | None = None,
         editorial_text_enabled: bool | None = None,
+        caption_style: str | None = None,
     ) -> EditPlan:
-        """Update only independent caption/editorial-text switches on an existing plan."""
-        if captions_enabled is None and editorial_text_enabled is None:
+        """Update only independent caption/editorial-text switches on an existing plan.
+
+        Caption style changes can move captions between the burned ASS path
+        (``standard``) and the rendered composition master, so the invalidation
+        set covers the Editorial visual stage whenever the master's caption
+        content changes on either side of the update.
+        """
+        if (
+            captions_enabled is None
+            and editorial_text_enabled is None
+            and caption_style is None
+        ):
             raise PipelineError("At least one Editorial setting must be provided.")
+        if caption_style is not None:
+            try:
+                caption_style = EditorialCaptionStyle(caption_style)
+            except ValueError as exc:
+                values = ", ".join(style.value for style in EditorialCaptionStyle)
+                raise PipelineError(
+                    f"Unknown Editorial caption style {caption_style!r}; "
+                    f"expected one of: {values}."
+                ) from exc
         with self._lock:
             project = self._project(project_id)
             if project.video_mode is not VideoMode.EDITORIAL:
                 raise PipelineError("project is not in Editorial Mode")
             plan = self.store.load_edit_plan(project.slug)
-            updates: dict[str, bool] = {}
+            updates: dict[str, Any] = {}
             if captions_enabled is not None and captions_enabled != plan.captions_enabled:
                 updates["captions_enabled"] = captions_enabled
             if (
@@ -485,6 +514,8 @@ class PipelineService:
                 and editorial_text_enabled != plan.editorial_text_enabled
             ):
                 updates["editorial_text_enabled"] = editorial_text_enabled
+            if caption_style is not None and caption_style is not plan.caption_style:
+                updates["caption_style"] = caption_style
             if not updates:
                 return plan
             updated = plan.model_copy(update=updates)
@@ -501,8 +532,46 @@ class PipelineService:
             }
             if "editorial_text_enabled" in updates:
                 invalidated.add("editorial_visual")
+            old_master_captions = self._plan_uses_master_captions(plan)
+            new_master_captions = self._plan_uses_master_captions(updated)
+            if old_master_captions or new_master_captions:
+                invalidated.add("editorial_visual")
             self._invalidate_stages(project, invalidated)
             return updated
+
+    @staticmethod
+    def _plan_uses_master_captions(plan: EditPlan) -> bool:
+        """True when captions are baked into the rendered Editorial master."""
+        return plan.captions_enabled and plan.caption_style is not EditorialCaptionStyle.STANDARD
+
+    def editorial_preview_captions(self, project_id: str) -> list[dict[str, Any]]:
+        """Positioned caption cues for the combined Editorial preview document."""
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            return []
+        plan = self.load_edit_plan(project.id)
+        cues = self._editorial_caption_cues(project, plan)
+        if not cues or not plan.compositions:
+            return []
+        design_width, design_height = (
+            (1920, 1080) if plan.width >= plan.height else (1080, 1920)
+        )
+        compositions = plan.compositions
+        total = compositions[-1].start + compositions[-1].duration
+        placed: list[dict[str, Any]] = []
+        for cue in cues:
+            midpoint = min(max((cue.start + cue.end) / 2, 0.0), max(total - 0.001, 0.0))
+            composition = next(
+                (
+                    item for item in compositions
+                    if item.start <= midpoint < item.start + item.duration
+                ),
+                compositions[0],
+            )
+            placed.extend(
+                place_caption_cues([cue], composition, design_width, design_height)
+            )
+        return placed
 
     def update_editorial_asset_lock(
         self,
@@ -1199,6 +1268,162 @@ class PipelineService:
             })
             return updated
 
+    def create_edit_plan_revision(
+        self,
+        project_id: str,
+        instruction: str,
+        *,
+        composition_id: str | None = None,
+    ) -> EditorialRevisionProposal:
+        """Generate and persist an unapplied, validated Edit Plan proposal."""
+        instruction = instruction.strip()
+        if not instruction:
+            raise ValueError("revision instruction cannot be blank")
+        if len(instruction) > 4000:
+            raise ValueError("revision instruction cannot exceed 4000 characters")
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise PipelineError("project is not in Editorial Mode")
+        try:
+            script = self.store.load_plan(project.slug)
+            original = self.store.load_edit_plan(project.slug)
+        except FileNotFoundError as exc:
+            raise PipelineError(
+                "Generate the script and Editorial Edit Plan before revising it."
+            ) from exc
+        if composition_id is not None and not any(
+            item.id == composition_id for item in original.compositions
+        ):
+            raise KeyError(f"unknown Editorial composition {composition_id!r}")
+        self._require_selected_llm_model(project)
+        assets = self.database.list_assets(project.id)
+        words = self._editorial_word_timings(project)
+        original_hash = self._editorial_hash(original.model_dump(mode="json"))
+        planner_input_hash = self._editorial_hash({
+            "project": project.model_dump(mode="json"),
+            "script": script.model_dump(mode="json"),
+            "word_timings": [word.to_dict() for word in words],
+            "assets": [asset.model_dump(mode="json") for asset in assets],
+        })
+        self.editorial_planner.llm = self.director.llm
+        proposed, draft = self.editorial_planner.revise_plan(
+            project,
+            script,
+            original,
+            instruction,
+            composition_id=composition_id,
+            assets=assets,
+            word_timings=words,
+            mock_mode=self.mock_mode,
+        )
+        proposed = proposed.model_copy(update={"created_at": utc_now()})
+        with self._lock:
+            current_project = self._project(project_id)
+            current = self.store.load_edit_plan(current_project.slug)
+            if self._editorial_hash(current.model_dump(mode="json")) != original_hash:
+                raise PipelineError(
+                    "The Editorial Edit Plan changed during revision; request a new preview."
+                )
+            current_script = self.store.load_plan(current_project.slug)
+            current_words = self._editorial_word_timings(current_project)
+            current_assets = self.database.list_assets(current_project.id)
+            current_input_hash = self._editorial_hash({
+                "project": current_project.model_dump(mode="json"),
+                "script": current_script.model_dump(mode="json"),
+                "word_timings": [word.to_dict() for word in current_words],
+                "assets": [asset.model_dump(mode="json") for asset in current_assets],
+            })
+            if current_input_hash != planner_input_hash:
+                raise PipelineError(
+                    "Editorial planner inputs changed during revision; request a new preview."
+                )
+            revision_id = uuid.uuid4().hex
+            proposal = EditorialRevisionProposal(
+                revision_id=revision_id,
+                project_id=current_project.id,
+                instruction=instruction,
+                composition_id=composition_id,
+                base_plan_sha256=original_hash,
+                planner_input_sha256=planner_input_hash,
+                plan=proposed,
+            )
+            revisions_dir = (
+                self.store.project_path(current_project) / "editorial" / "revisions"
+            )
+            self._atomic_json(
+                revisions_dir / f"{revision_id}.json",
+                proposal.model_dump(mode="json"),
+            )
+            if draft is not None:
+                self._atomic_json(
+                    revisions_dir / f"{revision_id}-planner-draft.json",
+                    draft.model_dump(mode="json"),
+                )
+            return proposal
+
+    def apply_edit_plan_revision(
+        self, project_id: str, revision_id: str,
+    ) -> EditPlan:
+        """Apply a stored proposal only if its plan and planner inputs remain current."""
+        if re.fullmatch(r"[0-9a-f]{32}", revision_id) is None:
+            raise KeyError("unknown Editorial revision")
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            proposal_path = (
+                self.store.project_path(project)
+                / "editorial" / "revisions" / f"{revision_id}.json"
+            )
+            try:
+                proposal = EditorialRevisionProposal.model_validate_json(
+                    proposal_path.read_text(encoding="utf-8")
+                )
+            except FileNotFoundError as exc:
+                raise KeyError("unknown Editorial revision") from exc
+            except (OSError, ValueError) as exc:
+                raise PipelineError("Stored Editorial revision is unreadable.") from exc
+            if proposal.project_id != project.id:
+                raise PipelineError("Editorial revision belongs to another project")
+            current = self.store.load_edit_plan(project.slug)
+            if self._editorial_hash(current.model_dump(mode="json")) != proposal.base_plan_sha256:
+                raise PipelineError(
+                    "The Edit Plan changed after this preview; request a new AI revision."
+                )
+            try:
+                script = self.store.load_plan(project.slug)
+            except FileNotFoundError as exc:
+                raise PipelineError("The project script is missing.") from exc
+            words = self._editorial_word_timings(project)
+            assets = self.database.list_assets(project.id)
+            planner_input_hash = self._editorial_hash({
+                "project": project.model_dump(mode="json"),
+                "script": script.model_dump(mode="json"),
+                "word_timings": [word.to_dict() for word in words],
+                "assets": [asset.model_dump(mode="json") for asset in assets],
+            })
+            if planner_input_hash != proposal.planner_input_sha256:
+                raise PipelineError(
+                    "Script, narration timings, or assets changed after this preview; "
+                    "request a new AI revision."
+                )
+            updated = EditPlan.model_validate(proposal.plan.model_dump(mode="python"))
+            self.store.save_edit_plan(project.slug, updated)
+            self.store.save_edit_plan_provenance(
+                project.slug,
+                self._editorial_plan_provenance(
+                    project,
+                    source_kind=EditPlanSourceKind.PLANNER,
+                    script=script,
+                    word_timings=words,
+                ),
+            )
+            self._invalidate_stages(project, {
+                "editorial_visual", "timeline", "render_preview",
+                "quality_control", "render_final", "thumbnails",
+            })
+            return updated
+
     @staticmethod
     def _editorial_hash(payload: Any) -> str:
         encoded = json.dumps(
@@ -1316,6 +1541,41 @@ class PipelineService:
             raise PipelineError(
                 "Stored narration word timings are invalid; regenerate caption alignment."
             ) from exc
+
+    def _editorial_caption_words(self, project: Project) -> list[CaptionWord]:
+        """Word timings for Editorial caption beats.
+
+        Audio-aligned timings are preferred; without them the scenes' narration
+        is spread evenly over the planned scene durations so preview and export
+        stay deterministic.
+        """
+        words = self._editorial_word_timings(project)
+        if words:
+            return words
+        scenes = self.database.list_scenes(project.id)
+        spans: list[tuple[str, float, float]] = []
+        cursor = 0.0
+        for scene in scenes:
+            if scene.narration.strip():
+                spans.append((scene.narration, cursor, scene.duration))
+            cursor += scene.duration
+        return synthesize_word_timings(spans)
+
+    def _editorial_caption_cues(self, project: Project, plan: EditPlan) -> list[EditorialCaptionCue]:
+        """Compute and suppress Editorial caption beats on the narration clock.
+
+        ``standard`` captions stay on the shared ASS path, so this returns no
+        beats for them; the rendered master then carries no caption layer.
+        """
+        if not self._plan_uses_master_captions(plan):
+            return []
+        words = self._editorial_caption_words(project)
+        cues = build_editorial_caption_cues(
+            words,
+            plan.caption_style,
+            emphasis_texts=[item.text for item in plan.caption_emphasis],
+        )
+        return suppress_cues_for_reveals(cues, plan.compositions)
 
     def list_projects(self) -> tuple[list[Project], list[dict[str, Any]]]:
         """List projects reconciling the SQLite index with on-disk directories.
@@ -2037,10 +2297,19 @@ class PipelineService:
             self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.20)
             project = self._project(job.project_id)
             cues = self._ensure_subtitles(project, force=True)
-            self._invalidate_stages(
-                project,
-                {"timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"},
-            )
+            invalidated = {
+                "timeline", "render_preview", "quality_control", "render_final",
+                "thumbnails", "metadata",
+            }
+            if project.video_mode is VideoMode.EDITORIAL:
+                try:
+                    plan = self.load_edit_plan(project.id)
+                except (PipelineError, BackendError, OSError, ValueError):
+                    plan = None
+                if plan is not None and self._plan_uses_master_captions(plan):
+                    # Word timings feed the captions baked into the Editorial master.
+                    invalidated.add("editorial_visual")
+            self._invalidate_stages(project, invalidated)
             current = self.jobs.get(job.id)
             if current is not None and current.status is JobStatus.CANCELED:
                 return cues
@@ -7567,6 +7836,15 @@ class PipelineService:
             plan = self._validate_editorial_render_inputs(project)
             clips_dir = root / "editorial" / "compositions"
             clips_dir.mkdir(parents=True, exist_ok=True)
+            captions = self._editorial_caption_cues(project, plan)
+            captions_path = root / "editorial" / "captions.json"
+            self._atomic_json(captions_path, {
+                "version": 1,
+                "captions_enabled": plan.captions_enabled,
+                "style": plan.caption_style.value,
+                "captions": [cue.model_dump(mode="json") for cue in captions],
+                "emphasis": [item.model_dump(mode="json") for item in plan.caption_emphasis],
+            })
             manifest_path = clips_dir / "manifest.json"
             previous: dict[str, Any] = {}
             if manifest_path.is_file() and not force:
@@ -7579,6 +7857,10 @@ class PipelineService:
             renderer = self._editorial_renderer_instance()
             entries: dict[str, dict[str, Any]] = {}
             clips: list[Path] = []
+            landscape = plan.width >= plan.height
+            design_width, design_height = (
+                (1920, 1080) if landscape else (1080, 1920)
+            )
             for index, composition in enumerate(plan.compositions):
                 clip_name = (
                     f"{index + 1:03d}-"
@@ -7586,7 +7868,19 @@ class PipelineService:
                 )
                 clip = clips_dir / clip_name
                 clip_plan = self._editorial_composition_render_plan(plan, composition)
-                digest = self._editorial_composition_render_hash(root, clip_plan)
+                clip_captions = place_caption_cues(
+                    slice_caption_cues(
+                        captions,
+                        composition.start,
+                        composition.start + composition.duration,
+                    ),
+                    composition,
+                    design_width,
+                    design_height,
+                )
+                digest = self._editorial_composition_render_hash(
+                    root, clip_plan, clip_captions,
+                )
                 cached = previous.get(composition.id)
                 recorded_media_hash = (
                     cached.get("media_sha256") if isinstance(cached, dict) else None
@@ -7602,7 +7896,9 @@ class PipelineService:
                     and self._incremental_hash(clip) == recorded_media_hash
                 )
                 if not reusable:
-                    renderer.render(clip_plan, clip, asset_root=root)
+                    renderer.render(
+                        clip_plan, clip, asset_root=root, captions=clip_captions,
+                    )
                 media_hash = self._incremental_hash(clip)
                 entries[composition.id] = {
                     "index": index,
@@ -7623,7 +7919,7 @@ class PipelineService:
             for stale in clips_dir.glob("*.mp4"):
                 if stale.resolve() not in keep:
                     stale.unlink(missing_ok=True)
-            return output, [output, manifest_path, *clips]
+            return output, [output, manifest_path, captions_path, *clips]
 
         return self._execute_stage(
             project, "editorial_visual", operation, backend="chromium",
@@ -7656,11 +7952,12 @@ class PipelineService:
             "compositions": [local],
             "editorial_text_enabled": plan.editorial_text_enabled,
             "captions_enabled": plan.captions_enabled,
+            "caption_style": plan.caption_style,
             "created_at": plan.created_at,
         })
 
     def _editorial_composition_render_hash(
-        self, root: Path, plan: EditPlan,
+        self, root: Path, plan: EditPlan, captions: Sequence[dict[str, Any]] = (),
     ) -> str:
         composition = plan.compositions[0]
         asset_files: list[dict[str, str | None]] = []
@@ -7674,6 +7971,7 @@ class PipelineService:
         return self._editorial_hash({
             "workflow_version": EDITORIAL_RENDER_WORKFLOW_VERSION,
             "plan": plan.model_dump(mode="json", exclude={"created_at"}),
+            "caption_cues": list(captions),
             "asset_files": asset_files,
         })
 
@@ -8019,13 +8317,19 @@ class PipelineService:
             narration_path=narration,
             narration_gain_db=self.tts.active_narration_gain(project.id),
             music_path=music if music.is_file() else None,
-            subtitles=self._subtitle_cues(project) if plan.captions_enabled else (),
+            subtitles=(
+                self._subtitle_cues(project)
+                if plan.captions_enabled
+                and plan.caption_style is EditorialCaptionStyle.STANDARD
+                else ()
+            ),
         )
         timeline.metadata.update({
             "workflow_version": "editorial-timeline-v1",
             "duration_policy": "narration_clock_with_editorial_tail_v1",
             "edit_plan_duration_seconds": plan.duration,
             "captions_enabled": plan.captions_enabled,
+            "caption_style": plan.caption_style.value,
             "editorial_text_enabled": plan.editorial_text_enabled,
         })
         return timeline
