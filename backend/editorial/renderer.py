@@ -28,6 +28,7 @@ from .models import (
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
+EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v2"
 
 
 def _script_json(value: Any) -> str:
