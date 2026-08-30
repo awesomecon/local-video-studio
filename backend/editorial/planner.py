@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field
 
@@ -17,20 +17,14 @@ from backend.schemas.models import DomainModel
 
 from .models import (
     EditPlan, EditorialAssetType, EditorialComposition, EditorialTemplate,
-    EvidenceClass, MotionPrimitive,
+    EvidenceClass, MotionPrimitive, TEMPLATE_ELEMENT_SLOTS,
 )
-
-
-class ArchiveCompositionDraft(EditorialComposition):
-    """The only template the first deterministic renderer can currently fulfill."""
-
-    template: Literal[EditorialTemplate.ARCHIVE_CANVAS] = EditorialTemplate.ARCHIVE_CANVAS
 
 
 class EditorialPlanDraft(DomainModel):
     """LLM-authored portion of an Edit Plan; project-owned fields are excluded."""
 
-    compositions: list[ArchiveCompositionDraft] = Field(min_length=1, max_length=32)
+    compositions: list[EditorialComposition] = Field(min_length=1, max_length=32)
 
 
 class EditorialPlanner:
@@ -249,7 +243,11 @@ class EditorialPlanner:
             "narration": narration,
             "word_timestamps": [word.to_dict() for word in word_timings],
             "available_assets": [cls._asset_context(asset) for asset in assets],
-            "approved_templates": [EditorialTemplate.ARCHIVE_CANVAS.value],
+            "approved_templates": [item.value for item in EditorialTemplate],
+            "template_slots": {
+                template.value: {role: kind.value for role, kind in slots.items()}
+                for template, slots in TEMPLATE_ELEMENT_SLOTS.items()
+            },
             "approved_motion_primitives": [item.value for item in MotionPrimitive],
         }
 
@@ -275,9 +273,9 @@ class EditorialPlanner:
             "events happen; never return HTML, CSS, JavaScript, font names, colors, coordinates, "
             "or invented animation names. Narration/audio timestamps are the master clock. "
             "Prefer one evolving 5–20 second composition over sentence-by-sentence full-screen "
-            "images. The prototype supports only archiveCanvas. Its exact unique element roles "
-            "are: year(text), archive-photo(image), paper(document), document-mark(underline), "
-            "ruler-grid(ruler_nodes), and reveal(text). Element ids may be concise unique slugs; "
+            "images. Choose only an approved template and use only that template's exact unique "
+            "element roles and types from template_slots; omit unused optional roles but include "
+            "the core visual roles implied by the template. Element ids may be concise unique slugs; "
             "events target those ids. Use only supplied narration refs and registered asset ids. "
             "Set source=null: the application resolves registered assets. A missing visual may be "
             "recommended as generated_image with evidence_class=illustration, but generated media "
