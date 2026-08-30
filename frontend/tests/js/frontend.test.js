@@ -114,6 +114,7 @@ import {
   renderEditorialRegion,
   buildEditorialDisplayControls,
   summarizeEditPlanCompositions,
+  summarizeEditorialRevision,
   parseCompositionEditor,
   safeEditPlanDownloadUrl,
   localApiPath,
@@ -1763,6 +1764,95 @@ record("editorial-editor: strict parser exposes only validated controls", () => 
   eq(malformed.duration, null, "non-finite durations are rejected");
   eq(malformed.elements[0].editable, false, "unknown element types cannot be edited");
   eq(malformed.events[0].actionKnown, false, "unknown motion is disabled");
+});
+
+record("editorial-revision: structural diff identifies added changed and removed compositions", () => {
+  const before = structuredClone(EDITOR_PLAN);
+  const after = structuredClone(EDITOR_PLAN);
+  after.compositions[0].elements[0].text = "TEN RULERS";
+  after.compositions.push({
+    ...structuredClone(after.compositions[0]),
+    id: "added", start: 5, duration: 3,
+  });
+  const diff = summarizeEditorialRevision(before, after);
+  assert(diff.ok);
+  assert(diff.changed);
+  eq(diff.rows.find((item) => item.id === "comp/ edit").state, "changed");
+  eq(diff.rows.find((item) => item.id === "added").state, "added");
+  const removed = summarizeEditorialRevision(after, before);
+  eq(removed.rows.find((item) => item.id === "added").state, "removed");
+  eq(summarizeEditorialRevision(before, structuredClone(before)).changed, false);
+});
+
+await recordAsync("editorial-revision: preview is non-mutating and apply uses the server revision id", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let current = structuredClone(EDITOR_PLAN);
+  const proposed = structuredClone(EDITOR_PLAN);
+  proposed.compositions[0].elements[0].text = "TEN RULERS";
+  const revisionId = "a".repeat(32);
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === EDIT_PLAN_URL) return { payload: current };
+    if (call.method === "POST" && call.url.endsWith("/editorial/revisions")) {
+      return { payload: { revision_id: revisionId, plan: proposed } };
+    }
+    if (call.method === "POST" && call.url.endsWith(`/revisions/${revisionId}/apply`)) {
+      current = proposed;
+      return { payload: current };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  const textarea = region.querySelector('[data-ed-revision-instruction="sequence"]');
+  textarea.value = "Add ten rulers and focus one.";
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  region.querySelector('[data-ed-preview-revision="sequence"]').click();
+  await flush();
+  eq(calls.at(-1), {
+    url: "/api/projects/proj-ed/editorial/revisions",
+    method: "POST",
+    body: { instruction: "Add ten rulers and focus one." },
+  });
+  eq(region.querySelector('[data-ed-text="headline"]').value, "1949",
+    "preview does not replace the current Edit Plan");
+  assert(region.textContent.includes("Unapplied preview"));
+  assert(region.textContent.includes("Nothing changes until Apply"));
+  region.querySelector(`[data-ed-apply-revision="${revisionId}"]`).click();
+  await flush();
+  eq(calls.at(-1), {
+    url: `/api/projects/proj-ed/editorial/revisions/${revisionId}/apply`,
+    method: "POST", body: null,
+  });
+  eq(region.querySelector('[data-ed-text="headline"]').value, "TEN RULERS");
+  eq(calls.filter((call) => call.method === "GET").length, 1,
+    "proposal and apply responses update the editor without another GET");
+});
+
+await recordAsync("editorial-revision: composition scope is sent explicitly", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const revisionId = "b".repeat(32);
+  const calls = stubFetch((call) => {
+    if (call.method === "GET") return { payload: EDITOR_PLAN };
+    if (call.method === "POST" && call.url.endsWith("/editorial/revisions")) {
+      return { payload: { revision_id: revisionId, plan: EDITOR_PLAN } };
+    }
+    return { status: 404, payload: { detail: "unexpected" } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  const textarea = region.querySelector('[data-ed-revision-instruction="comp/ edit"]');
+  textarea.value = "Make the reveal more deliberate.";
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  region.querySelector('[data-ed-preview-revision="comp/ edit"]').click();
+  await flush();
+  eq(calls.at(-1).body, {
+    instruction: "Make the reveal more deliberate.",
+    composition_id: "comp/ edit",
+  });
 });
 
 await recordAsync("editorial-editor: regeneration and all deterministic PATCHes are exact and do not refetch", async () => {

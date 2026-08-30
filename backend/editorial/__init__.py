@@ -1,8 +1,13 @@
 """Validated planning and deterministic rendering for Editorial Mode."""
 
 from .models import (
+    CaptionEmphasis,
     EditorialAsset,
     EditorialAssetType,
+    EditorialCaptionCue,
+    EditorialCaptionEmphasis,
+    EditorialCaptionStyle,
+    EditorialRevisionProposal,
     EditorialImageGeneration,
     EditorialImageModel,
     EditorialComposition,
@@ -21,7 +26,10 @@ from .planner import EditorialPlanDraft, EditorialPlanner
 from .renderer import EditorialRenderer, compile_edit_plan_html
 
 __all__ = [
-    "EditorialAsset", "EditorialAssetType", "EditorialImageGeneration", "EditorialImageModel", "EditorialComposition",
+    "CaptionEmphasis", "EditorialAsset", "EditorialAssetType",
+    "EditorialCaptionCue", "EditorialCaptionEmphasis", "EditorialCaptionStyle",
+    "EditorialRevisionProposal",
+    "EditorialImageGeneration", "EditorialImageModel", "EditorialComposition",
     "EditorialElement", "EditorialElementType", "EditorialEvent",
     "EditorialPlanDraft", "EditorialPlanner", "EditorialRenderer",
     "EditorialTemplate", "EditPlan", "EditPlanProvenance", "EditPlanSourceKind", "EvidenceClass",

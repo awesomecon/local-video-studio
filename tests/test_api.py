@@ -119,6 +119,89 @@ def test_editorial_composition_regeneration_is_explicit_and_scoped(tmp_path: Pat
     ).status_code == 404
 
 
+def test_editorial_ai_revision_is_previewed_before_explicit_apply(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "AI Revision", "topic": "Ten rulers",
+        "target_duration": 14, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    assert client.post(f"/api/projects/{project_id}/plan", json={}).status_code == 200
+    original = client.post(f"/api/projects/{project_id}/editorial/plan").json()
+    composition_id = original["compositions"][0]["id"]
+
+    preview = client.post(
+        f"/api/projects/{project_id}/editorial/revisions",
+        json={
+            "instruction": " Add ten ruler nodes and focus one. ",
+            "composition_id": composition_id,
+        },
+    )
+    assert preview.status_code == 200
+    proposal = preview.json()
+    assert len(proposal["revision_id"]) == 32
+    assert proposal["instruction"] == "Add ten ruler nodes and focus one."
+    assert proposal["composition_id"] == composition_id
+    # Preview generation is non-mutating.
+    assert client.get(
+        f"/api/projects/{project_id}/editorial/edit-plan"
+    ).json() == original
+
+    applied = client.post(
+        f"/api/projects/{project_id}/editorial/revisions/"
+        f"{proposal['revision_id']}/apply"
+    )
+    assert applied.status_code == 200
+    assert applied.json() == proposal["plan"]
+    assert client.get(
+        f"/api/projects/{project_id}/editorial/edit-plan"
+    ).json() == proposal["plan"]
+    assert client.post(
+        f"/api/projects/{project_id}/editorial/revisions/not-a-revision/apply"
+    ).status_code == 404
+    assert client.post(
+        f"/api/projects/{project_id}/editorial/revisions",
+        json={"instruction": "   "},
+    ).status_code == 422
+
+
+def test_editorial_ai_revision_rejects_stale_apply(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Stale Revision", "topic": "Safe apply",
+        "target_duration": 14, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    client.post(f"/api/projects/{project_id}/plan", json={})
+    client.post(f"/api/projects/{project_id}/editorial/plan")
+    proposal = client.post(
+        f"/api/projects/{project_id}/editorial/revisions",
+        json={"instruction": "Change the pacing."},
+    ).json()
+    assert client.patch(
+        f"/api/projects/{project_id}/editorial/settings",
+        json={"editorial_text_enabled": False},
+    ).status_code == 200
+    stale = client.post(
+        f"/api/projects/{project_id}/editorial/revisions/"
+        f"{proposal['revision_id']}/apply"
+    )
+    assert stale.status_code == 409
+    assert "request a new AI revision" in stale.json()["detail"]
+
+
 def test_editorial_asset_lock_and_local_replacement_are_protected(tmp_path: Path) -> None:
     app = create_app(
         load_config(environ={}),
@@ -457,8 +540,9 @@ def test_editorial_display_settings_are_narrow_and_selectively_invalidate(tmp_pa
     assert captions.json()["editorial_text_enabled"] is True
     assert captions.json()["compositions"] == original["compositions"]
     stages = client.get(f"/api/projects/{project_id}").json()["stage_state"]["stages"]
-    assert "editorial_visual" in stages
-    assert all(stage not in stages for stage in set(tracked) - {"editorial_visual"})
+    # The default editorialPhrase style bakes caption beats into the master,
+    # so switching captions off re-renders the Editorial visual.
+    assert all(stage not in stages for stage in tracked)
 
     service._atomic_json(root / "stage-state.json", {
         "version": 1,

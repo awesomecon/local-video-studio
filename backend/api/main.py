@@ -48,6 +48,7 @@ class EditorialSettingsEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     captions_enabled: bool | None = None
     editorial_text_enabled: bool | None = None
+    caption_style: str | None = None
 
 
 class EditorialAssetLockEdit(BaseModel):
@@ -61,6 +62,22 @@ class EditorialCompositionEdit(BaseModel):
     template: EditorialTemplate | None = None
     text_updates: dict[str, str] = Field(default_factory=dict, max_length=50)
     event_actions: dict[int, MotionPrimitive] = Field(default_factory=dict, max_length=100)
+
+
+class EditorialRevisionRequest(BaseModel):
+    """Plain-language request for a validated, unapplied Edit Plan proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+    instruction: str = Field(min_length=1, max_length=4000)
+    composition_id: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("instruction")
+    @classmethod
+    def non_blank_instruction(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("instruction cannot be blank")
+        return value
 
 
 class ApproveRequest(BaseModel):
@@ -885,6 +902,47 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+    @application.post("/api/projects/{project_id}/editorial/revisions")
+    def create_editorial_revision(
+        project_id: str, request: EditorialRevisionRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service.create_edit_plan_revision(
+                project_id,
+                request.instruction,
+                composition_id=request.composition_id,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except BackendError as exc:
+            status_code = (
+                status.HTTP_409_CONFLICT
+                if exc.code is BackendErrorCode.MODEL_SELECTION_REQUIRED
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(status_code=status_code, detail=exc.as_dict()) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.post(
+        "/api/projects/{project_id}/editorial/revisions/{revision_id}/apply"
+    )
+    def apply_editorial_revision(
+        project_id: str, revision_id: str,
+    ) -> dict[str, Any]:
+        try:
+            return service.apply_edit_plan_revision(
+                project_id, revision_id,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.patch("/api/projects/{project_id}/editorial/settings")
     def update_editorial_settings(
         project_id: str, request: EditorialSettingsEdit,
@@ -894,6 +952,7 @@ def create_app(
                 project_id,
                 captions_enabled=request.captions_enabled,
                 editorial_text_enabled=request.editorial_text_enabled,
+                caption_style=request.caption_style,
             ).model_dump(mode="json")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -1040,6 +1099,7 @@ def create_app(
                     f"/api/projects/{project_id}/assets/{asset.asset_id}/file"
                     if asset.asset_id else None
                 ),
+                captions=service.editorial_preview_captions(project_id),
             )
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None

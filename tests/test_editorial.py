@@ -7,7 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from backend.editorial import (
-    EditorialAsset, EditorialAssetType, EditorialImageGeneration,
+    EditorialAsset, EditorialAssetType, EditorialCaptionStyle,
+    EditorialImageGeneration,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
     EditorialPlanner, EditorialTemplate, EditPlan, MotionPrimitive,
     build_project_mars_prototype,
@@ -449,6 +450,44 @@ def test_editorial_planner_rejects_model_authored_sources_and_unknown_refs() -> 
         EditorialPlanner(_PlannerLLM(payload)).plan(project, script)
 
 
+def test_editorial_planner_sequence_revision_uses_instruction_and_validated_plan() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars-revise",
+        video_mode=VideoMode.EDITORIAL,
+    )
+    script = _editorial_script(project)
+    current = EditorialPlanner().plan(project, script, mock_mode=True)
+    payload = {
+        "compositions": [
+            {
+                **current.compositions[0].model_dump(mode="json"),
+                "elements": [
+                    {
+                        **item.model_dump(mode="json"),
+                        "text": "TEN RULERS" if item.role == "year" else item.text,
+                    }
+                    for item in current.compositions[0].elements
+                ],
+            },
+        ],
+        "caption_emphasis": [{"text": "ten men", "emphasis": "keyPhrase"}],
+    }
+    llm = _PlannerLLM(payload)
+    revised, draft = EditorialPlanner(llm).revise_plan(
+        project,
+        script,
+        current,
+        "Show ten ruler nodes, then focus the chief ruler.",
+    )
+    assert draft is not None
+    assert revised.compositions[0].elements[0].text == "TEN RULERS"
+    assert revised.caption_emphasis[0].text == "ten men"
+    context = json.loads(llm.calls[0]["messages"][1]["content"])
+    assert context["revision_instruction"].startswith("Show ten ruler nodes")
+    assert context["current_edit_plan"]["project_id"] == project.id
+    assert context["approved_motion_primitives"]
+
+
 def test_editorial_planner_mock_fallback_is_valid_and_project_owned() -> None:
     project = Project(
         title="Mars", topic="Project Mars", target_duration=14, slug="mars-mock",
@@ -490,12 +529,13 @@ def test_template_retarget_avoids_ids_already_used_by_preserved_images() -> None
 class _SyntheticEditorialRenderer:
     def __init__(self, ffmpeg) -> None:
         self.ffmpeg = ffmpeg
-        self.calls: list[tuple[EditPlan, Path, Path | None]] = []
+        self.calls: list[tuple[EditPlan, Path, Path | None, list]] = []
 
     def render(
-        self, plan: EditPlan, output: Path, *, preview_html=None, asset_root=None,
+        self, plan: EditPlan, output: Path, *, preview_html=None,
+        asset_root=None, captions=(),
     ) -> Path:
-        self.calls.append((plan, output, asset_root))
+        self.calls.append((plan, output, asset_root, list(captions)))
         output.parent.mkdir(parents=True, exist_ok=True)
         run_media_process([
             str(self.ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
@@ -555,18 +595,36 @@ def test_editorial_render_only_uses_shared_audio_caption_and_export_pipeline(tmp
     assert (info.width, info.height) == project.resolution
     assert info.fps == project.fps
     assert len(synthetic.calls) == 1
-    rendered_plan, rendered_clip, rendered_root = synthetic.calls[0]
+    rendered_plan, rendered_clip, rendered_root, rendered_captions = synthetic.calls[0]
     assert rendered_plan.compositions[0].start == 0
     assert rendered_plan.compositions[0].id == "master"
     assert rendered_clip.parent == root / "editorial" / "compositions"
     assert rendered_root == root
+    # The default editorialPhrase style bakes the beats into the master;
+    # the shared ASS subtitle track is reserved for the standard style.
+    assert rendered_plan.caption_style is EditorialCaptionStyle.EDITORIAL_PHRASE
+    assert rendered_plan.captions_enabled is True
+    for cue in rendered_captions:
+        assert cue["style"] == "editorialPhrase"
+        assert 0 <= cue["start"] < cue["end"] <= duration + 0.001
+        assert cue["x"] >= 0 and cue["y"] >= 0
+    captions_file = json.loads(
+        (root / "editorial" / "captions.json").read_text(encoding="utf-8"),
+    )
+    assert captions_file["style"] == "editorialPhrase"
+    assert captions_file["captions_enabled"] is True
+    assert [item["style"] for item in captions_file["captions"]] == [
+        "editorialPhrase",
+    ] * len(captions_file["captions"])
     timeline = json.loads((root / "timeline.json").read_text(encoding="utf-8"))
     assert timeline["clips"][0]["path"] == "editorial/master.mp4"
     assert {track["kind"] for track in timeline["audio_tracks"]} == {"narration", "music"}
-    assert timeline["subtitles"]
+    assert timeline["subtitles"] == []
+    assert timeline["metadata"]["caption_style"] == "editorialPhrase"
     stages = pipeline.project_snapshot(project.id)["stage_state"]["stages"]
     assert stages["editorial_visual"]["outputs"][0] == "editorial/master.mp4"
     assert "editorial/compositions/manifest.json" in stages["editorial_visual"]["outputs"]
+    assert "editorial/captions.json" in stages["editorial_visual"]["outputs"]
     assert stages["render_final"]["outputs"] == ["renders/final.mp4"]
     assert pipeline.jobs.get(job.id).status.value == "completed"
 

@@ -88,6 +88,65 @@ class EditPlanSourceKind(StrEnum):
     MANUAL = "manual"
 
 
+class EditorialCaptionStyle(StrEnum):
+    """Caption styles available to Editorial Mode.
+
+    ``editorialPhrase`` is the default: restrained documentary phrase captions
+    with selective paper-block emphasis. ``standard`` keeps the pre-existing
+    large centered subtitle style (rendered through the shared ASS path).
+    """
+
+    EDITORIAL_PHRASE = "editorialPhrase"
+    QUIET_DOCUMENTARY = "quietDocumentary"
+    ONE_LINE = "oneLine"
+    ONE_WORD = "oneWord"
+    STANDARD = "standard"
+
+
+class CaptionEmphasis(StrEnum):
+    """Emphasis metadata the planner may attach to a spoken phrase.
+
+    The planner returns only this metadata; the deterministic renderer decides
+    how an emphasized phrase looks.
+    """
+
+    KEY_PHRASE = "keyPhrase"
+
+
+class EditorialCaptionEmphasis(DomainModel):
+    """Planner-emphasized phrase quoted verbatim from the narration."""
+
+    text: str = Field(min_length=1, max_length=120)
+    emphasis: CaptionEmphasis = CaptionEmphasis.KEY_PHRASE
+
+    @field_validator("text")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("caption emphasis text cannot be blank")
+        return value
+
+
+class EditorialCaptionCue(DomainModel):
+    """One narration caption beat, kept separate from editorial on-screen text."""
+
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=200)
+    style: EditorialCaptionStyle = EditorialCaptionStyle.EDITORIAL_PHRASE
+    highlight: bool = False
+
+    @model_validator(mode="after")
+    def ordered_and_finite(self) -> "EditorialCaptionCue":
+        if not math.isfinite(self.start) or not math.isfinite(self.end):
+            raise ValueError("caption cue timing must be finite")
+        if self.end <= self.start:
+            raise ValueError("caption cue end must be after its start")
+        if not self.text.strip():
+            raise ValueError("caption cue text cannot be blank")
+        return self
+
+
 class EditorialElementType(StrEnum):
     TEXT = "text"
     IMAGE = "image"
@@ -283,6 +342,10 @@ class EditPlan(DomainModel):
     compositions: list[EditorialComposition] = Field(min_length=1, max_length=200)
     editorial_text_enabled: bool = True
     captions_enabled: bool = True
+    caption_style: EditorialCaptionStyle = EditorialCaptionStyle.EDITORIAL_PHRASE
+    caption_emphasis: list[EditorialCaptionEmphasis] = Field(
+        default_factory=list, max_length=50,
+    )
     created_at: datetime = Field(default_factory=utc_now)
 
     @property
@@ -307,6 +370,27 @@ class EditPlan(DomainModel):
                     "editorial compositions must be contiguous; use an explicit black composition"
                 )
             previous_end = item.start + item.duration
+        return self
+
+
+class EditorialRevisionProposal(DomainModel):
+    """Validated, unapplied AI revision stored against immutable input hashes."""
+
+    revision_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    project_id: str = Field(min_length=1, max_length=120)
+    instruction: str = Field(min_length=1, max_length=4000)
+    composition_id: str | None = Field(default=None, min_length=1, max_length=120)
+    base_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    planner_input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan: EditPlan
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_project_and_instruction(self) -> "EditorialRevisionProposal":
+        if self.plan.project_id != self.project_id:
+            raise ValueError("revision proposal plan must belong to the project")
+        if not self.instruction.strip():
+            raise ValueError("revision instruction cannot be blank")
         return self
 
 

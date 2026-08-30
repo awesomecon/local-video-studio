@@ -389,18 +389,33 @@ def test_project_editorial_display_settings_controls() -> None:
     )
     assert "typeof editorial.captions_enabled === \"boolean\"" in source
     assert "typeof editorial.editorial_text_enabled === \"boolean\"" in source
-    # Explicit user action only; one mutation in flight; both controls off
-    # while saving.
+    # The caption style select appears only for strict snapshot values and
+    # offers the documented style set.
+    assert (
+        "captionsOk && typeof editorial.caption_style === \"string\"" in source
+    )
+    assert '["editorialPhrase", "Editorial Phrase"]' in source
+    assert '["quietDocumentary", "Quiet Documentary"]' in source
+    assert '["oneLine", "One Line"]' in source
+    assert '["oneWord", "One Word"]' in source
+    assert '["standard", "Standard"]' in source
+    # Explicit user action only; one mutation in flight; every control off
+    # while saving (the style select stays off while captions are off).
     assert "input.addEventListener(\"change\", () => {" in source
     assert "if (ctrl.busy !== \"\") { input.checked = !input.checked; return; }" in source
+    assert "select.addEventListener(\"change\", () => {" in source
+    assert "if (ctrl.busy !== \"\") { select.value = current; return; }" in source
     assert "ctrl.busy = \"settings\";" in source
-    assert "for (const box of checkboxes) box.disabled = true;" in source
+    assert "for (const item of controls) item.disabled = true;" in source
+    assert 'select.dataset.keepDisabled = "1";' in source
     # The PATCH body carries only the field that changed.
     assert "const body = key === \"captions_enabled\"" in source
-    assert "{ captions_enabled: input.checked }" in source
-    assert "{ editorial_text_enabled: input.checked }" in source
+    assert "{ captions_enabled: control.checked }" in source
+    assert "{ editorial_text_enabled: control.checked }" in source
+    assert "{ caption_style: control.value }" in source
     # Failure restores the previous value and uses the existing surfaces.
-    assert "input.checked = previous; // restore the previous value" in source
+    assert "control.checked = previous" in source
+    assert "control.value = previous" in source
     assert "toastError(err, \"Editorial display setting not saved\");" in source
     # The settings path never touches the full Edit Plan.
     assert "patchEditorialSettings(" in source
