@@ -20,7 +20,8 @@
  *  - Editorial projects (video_mode === "editorial") get an extra
  *    "Editorial Preview" panel driven by the snapshot's `editorial` block
  *    ({ has_edit_plan, plan_status, stale, stale_reasons, edit_plan_url,
- *    generate_url, preview_url }); classic and legacy projects never see it.
+ *    generate_url, preview_url, settings_url, captions_enabled,
+ *    editorial_text_enabled }); classic and legacy projects never see it.
  *    Optional provenance metadata degrades safely: a missing/malformed
  *    plan_status keeps the classic "Edit Plan available" presentation, a
  *    stale plan shows a warning naming the changed inputs (project /
@@ -33,6 +34,25 @@
  *    and refreshes the panel on success; failures restore the button and
  *    follow the standard error/toast conventions. Generation never happens
  *    automatically on load or live refresh.
+ *  - Once a plan exists the panel adds, all still zero-request at render
+ *    time: independent Captions / Editorial text switches (shown only when
+ *    settings_url is a usable project-local path and each snapshot value is
+ *    a strict boolean; a change PATCHes only the changed field, one
+ *    mutation in flight at a time, both controls disabled while saving,
+ *    success re-renders from a fresh snapshot, failure restores the
+ *    previous checkbox value with the standard error surfaces, and the
+ *    Edit Plan is never GET/PUT on this path); a "Show compositions"
+ *    action that is the ONLY fetcher of the full Edit Plan (explicit
+ *    click via edit_plan_url; the compact read-only list renders
+ *    untrusted plan content as validated text and degrades malformed
+ *    compositions to placeholders instead of crashing); and a
+ *    "Download Edit Plan JSON" link built solely from a valid
+ *    project-local /api/projects/ path scoped to this project, with
+ *    ?download=true appended for backends that honor it.
+ *  - The region's live-update hook and an explicit Refresh never replace
+ *    an in-flight Generate Edit Plan POST, an in-flight display-setting
+ *    PATCH, or an open (loading / shown / errored) composition list, and
+ *    never re-issue their requests.
  */
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
@@ -41,7 +61,10 @@ import {
   needsProject,
   upsertProject,
 } from "../state.js";
-import { getProject, editProject, generateEditPlan } from "../api.js";
+import {
+  getProject, editProject, generateEditPlan,
+  patchEditorialSettings, getEditPlan,
+} from "../api.js";
 import {
   field,
   setFieldError,
@@ -149,9 +172,15 @@ function buildScreen(projectId) {
 
   /** @param {HTMLElement} region @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
   async function load(region, prov, editorial, id) {
+    // An explicit Refresh still preserves active Editorial interactions: an
+    // in-flight Generate Edit Plan POST or display-setting PATCH, or an open
+    // composition list (loading / shown / errored) keeps the mounted section
+    // in place; the in-flight action's own completion re-renders the region.
+    const ctrl = ctrlFor(editorial);
+    const preserve = ctrl.busy !== "" || ctrl.compositions !== "idle";
     region.replaceChildren(loadingState(4));
     prov.replaceChildren(loadingState(2));
-    editorial.replaceChildren();
+    if (!preserve) editorial.replaceChildren();
     /** @type {import("../api.js").ProjectSnapshot|null} */
     let snap;
     try {
@@ -175,7 +204,9 @@ function buildScreen(projectId) {
     }
     region.replaceChildren(...content);
     renderProvenance(prov, snap);
-    renderEditorialRegion(editorial, snap, () => refreshProvenance(prov, editorial, id));
+    if (!preserve) {
+      renderEditorialRegion(editorial, snap, () => refreshProvenance(prov, editorial, id));
+    }
   }
 
   /** @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
@@ -644,22 +675,95 @@ function usableUrl(value) {
 }
 
 /**
+ * Project-local (same-origin) API path or null. A value is usable only when
+ * it is a non-empty string starting with a single "/". Absolute URLs (any
+ * scheme, so remote hosts), protocol-relative paths ("//host/..."), and
+ * non-strings are never treated as request targets: malformed snapshot
+ * metadata degrades to "feature hidden", never to a request to an unknown
+ * place.
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function localApiPath(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
+  return trimmed;
+}
+
+/**
+ * Download URL for the Edit Plan JSON, or null. The source must be a clean
+ * project-local API path under /api/projects/ (localApiPath, plus: no query
+ * string, no fragment, no backslash, no whitespace); when a project id is
+ * known the path must stay inside that project, so a cross-project-looking
+ * value never becomes a link. `?download=true` is appended for backends
+ * that honor it; others simply display the JSON in the browser.
+ * @param {unknown} value — the snapshot's edit_plan_url
+ * @param {string | null} [projectId] — the current project's id
+ * @returns {string | null}
+ */
+export function safeEditPlanDownloadUrl(value, projectId = null) {
+  const path = localApiPath(value);
+  if (!path || !path.startsWith("/api/projects/")) return null;
+  if (path.includes("?") || path.includes("#") || path.includes("\\")
+    || /\s/.test(path)) return null;
+  if (projectId && typeof projectId === "string" && projectId
+    && !path.startsWith(`/api/projects/${projectId}/`)) return null;
+  return `${path}?download=true`;
+}
+
+/**
+ * In-flight / open UI state that must survive live-refresh re-renders. The
+ * app keeps one controller per (stable) Editorial region element, so
+ * replacing the section's children never destroys a pending mutation or an
+ * open composition list; unit tests pass detached instances of the same
+ * shape.
+ * @typedef {Object} EditorialController
+ * @property {""|"generate"|"settings"} busy — mutation in flight in this region
+ * @property {"idle"|"loading"|"ready"|"error"} compositions — composition list state
+ * @property {number} fetchSeq — invalidates in-flight composition fetches after a reset
+ */
+
+/** @returns {EditorialController} */
+export function createEditorialController() {
+  return { busy: "", compositions: "idle", fetchSeq: 0 };
+}
+
+/** @type {WeakMap<HTMLElement, EditorialController>} */
+const editorialRegionState = new WeakMap();
+
+/** @param {HTMLElement} region @returns {EditorialController} */
+function ctrlFor(region) {
+  let ctrl = /** @type {EditorialController | undefined} */ (editorialRegionState.get(region));
+  if (!ctrl) {
+    ctrl = createEditorialController();
+    editorialRegionState.set(region, ctrl);
+  }
+  return ctrl;
+}
+
+/**
  * Primary "Generate Edit Plan" action. One click issues exactly one bodyless
  * POST to the snapshot-provided generate URL (no force flag); the button is
  * disabled with a pending label while the request runs and is restored with
  * the standard error surfaces if it fails. On success the panel is refreshed
- * through `onGenerated` so it re-renders as "Edit Plan available".
+ * through `onGenerated` so it re-renders as "Edit Plan available". The
+ * region controller marks the mutation in flight so no other editorial
+ * mutation can start while it runs.
  * @param {string} generateUrl
  * @param {HTMLElement} errors — region for the inline failure panel
  * @param {(() => any) | null} [onGenerated]
+ * @param {EditorialController | null} [ctrl] — shared in-flight guard
  * @returns {HTMLElement}
  */
-function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
+function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl = null) {
   const button = el("button", { class: "btn btn-primary", type: "button" }, GENERATE_PLAN_LABEL);
+  const ctrlState = (ctrl && typeof ctrl === "object") ? ctrl : createEditorialController();
   let pending = false;
   button.addEventListener("click", async () => {
-    if (pending) return;
+    if (pending || ctrlState.busy !== "") return;
     pending = true;
+    ctrlState.busy = "generate";
     button.disabled = true;
     button.textContent = GENERATE_PLAN_PENDING_LABEL;
     button.dataset.editorialGeneratePending = "true";
@@ -667,12 +771,14 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
     try {
       await generateEditPlan(state.config, generateUrl);
       pending = false;
+      ctrlState.busy = "";
       button.disabled = false;
       button.textContent = GENERATE_PLAN_LABEL;
       button.dataset.editorialGeneratePending = "false";
       if (onGenerated) await onGenerated();
     } catch (err) {
       pending = false;
+      ctrlState.busy = "";
       button.disabled = false;
       button.textContent = GENERATE_PLAN_LABEL;
       button.dataset.editorialGeneratePending = "false";
@@ -681,6 +787,246 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
     }
   });
   return button;
+}
+
+/**
+ * Independent Captions / Editorial text switches for the Edit Plan's display
+ * settings, driven by the snapshot's `settings_url` + `captions_enabled` +
+ * `editorial_text_enabled`. A control is omitted when its snapshot value is
+ * not a strict boolean, and both are omitted when `settings_url` is not a
+ * usable project-local path (malformed metadata must never produce a
+ * request). A change is an explicit user action only (checkbox `change`):
+ * it PATCHes exactly the one field that changed to `settings_url`, allows
+ * one mutation in flight at a time (shared with the Generate Edit Plan
+ * action), disables both controls while saving, and never reads or writes
+ * the full Edit Plan. On success the region re-renders from a fresh project
+ * snapshot through the refresh hook; on failure the checkbox is restored to
+ * its previous value and the standard error panel + toast are shown.
+ *
+ * @param {Object} editorial — the snapshot's editorial block
+ * @param {EditorialController} ctrl — shared in-flight guard
+ * @param {HTMLElement} errors — inline failure surface shared with the panel
+ * @param {(() => any) | null} [onSaved] — fresh-snapshot refresh hook
+ * @returns {HTMLElement | null}
+ */
+export function buildEditorialDisplayControls(editorial, ctrl, errors, onSaved = null) {
+  const settingsUrl = localApiPath(editorial.settings_url);
+  if (!settingsUrl) return null;
+  const captionsOk = typeof editorial.captions_enabled === "boolean";
+  const textOk = typeof editorial.editorial_text_enabled === "boolean";
+  if (!captionsOk && !textOk) return null;
+
+  /** @type {HTMLInputElement[]} */
+  const checkboxes = [];
+  const row = el("div", { class: "row mt", "aria-label": "Editorial display settings" },
+    el("span", { class: "muted small" }, "Display settings:"));
+  const makeControl = (key, label, value) => {
+    const input = el("input", { type: "checkbox", checked: value });
+    input.dataset.editorialSetting = key;
+    input.addEventListener("change", () => {
+      // While a mutation is in flight both controls are disabled, so this
+      // only guards programmatic changes: undo the flip, queue nothing.
+      if (ctrl.busy !== "") { input.checked = !input.checked; return; }
+      void saveEditorialSetting(key, input, { settingsUrl, ctrl, errors, onSaved, checkboxes });
+    });
+    checkboxes.push(input);
+    row.append(el("label", { class: "small" }, input, ` ${label}`));
+  };
+  if (captionsOk) makeControl("captions_enabled", "Captions", editorial.captions_enabled);
+  if (textOk) makeControl("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
+  return row;
+}
+
+/**
+ * PATCH one changed display setting. Exactly one mutation may be in flight
+ * per region; both controls stay disabled while the request runs. The
+ * Edit Plan is never touched on this path.
+ * @param {"captions_enabled"|"editorial_text_enabled"} key
+ * @param {HTMLInputElement} input — the checkbox that changed
+ * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, checkboxes: HTMLInputElement[]}} ctx
+ */
+async function saveEditorialSetting(key, input, ctx) {
+  const { settingsUrl, ctrl, errors, onSaved, checkboxes } = ctx;
+  if (ctrl.busy !== "") return; // one mutation in flight at a time
+  const previous = !input.checked; // a `change` event means the value flipped
+  ctrl.busy = "settings";
+  for (const box of checkboxes) box.disabled = true;
+  errors.replaceChildren();
+  // The body carries only the field that changed (the backend forbids the
+  // other key in the same request).
+  const body = key === "captions_enabled"
+    ? { captions_enabled: input.checked }
+    : { editorial_text_enabled: input.checked };
+  try {
+    await patchEditorialSettings(state.config, settingsUrl, body);
+  } catch (err) {
+    ctrl.busy = "";
+    for (const box of checkboxes) box.disabled = false;
+    input.checked = previous; // restore the previous value
+    errors.replaceChildren(errorPanel(err));
+    toastError(err, "Editorial display setting not saved");
+    return;
+  }
+  ctrl.busy = "";
+  // The plan changed on disk, so an open composition list is stale: close it
+  // before the fresh-snapshot re-render.
+  if (ctrl.compositions !== "idle") ctrl.compositions = "idle";
+  for (const box of checkboxes) box.disabled = false;
+  if (!onSaved) return;
+  try {
+    await onSaved();
+  } catch (err) {
+    // The setting itself saved; only the confirmation refresh failed.
+    errors.replaceChildren(errorPanel(err));
+    toastError(err, "Editorial display setting saved, but the project refresh failed");
+  }
+}
+
+/**
+ * Validate an Edit Plan payload into per-composition summary data. The plan
+ * is untrusted: only object shapes with recognizable fields contribute. A
+ * malformed composition entry degrades to placeholder values ("—" / 0)
+ * instead of throwing, and a plan without an array of compositions is
+ * reported as unreadable so the UI can show its error state.
+ * @param {unknown} plan
+ * @returns {{ok: boolean, compositions: Array<{
+ *   index: number, id: string, start: number | null, duration: number | null,
+ *   template: string, assetCount: number, elementCount: number,
+ *   eventCount: number, narrationRefCount: number, evidenceAssetCount: number,
+ *   illustrationAssetCount: number, lockedAssetCount: number }>}}
+ */
+export function summarizeEditPlanCompositions(plan) {
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)
+    || !Array.isArray(plan.compositions)) {
+    return { ok: false, compositions: [] };
+  }
+  const rows = plan.compositions.map((entry, i) => {
+    const comp = (entry && typeof entry === "object" && !Array.isArray(entry)) ? entry : {};
+    const assets = Array.isArray(comp.assets) ? comp.assets : [];
+    const isAsset = (a) => a && typeof a === "object" && !Array.isArray(a);
+    const num = (v) => (typeof v === "number" && Number.isFinite(v)) ? v : null;
+    return {
+      index: i + 1,
+      id: (typeof comp.id === "string" && comp.id) ? comp.id : "—",
+      start: num(comp.start),
+      duration: num(comp.duration),
+      template: (typeof comp.template === "string" && comp.template) ? comp.template : "—",
+      assetCount: assets.length,
+      elementCount: Array.isArray(comp.elements) ? comp.elements.length : 0,
+      eventCount: Array.isArray(comp.events) ? comp.events.length : 0,
+      narrationRefCount: Array.isArray(comp.narration_refs) ? comp.narration_refs.length : 0,
+      evidenceAssetCount: assets.filter((a) => isAsset(a) && a.evidence_class === "evidence").length,
+      illustrationAssetCount: assets.filter((a) => isAsset(a) && a.evidence_class === "illustration").length,
+      lockedAssetCount: assets.filter((a) => isAsset(a) && a.locked === true).length,
+    };
+  });
+  return { ok: true, compositions: rows };
+}
+
+/**
+ * @param {ReturnType<typeof summarizeEditPlanCompositions>["compositions"][number]} sum
+ * @returns {HTMLElement}
+ */
+function compositionRow(sum) {
+  const startText = sum.start != null ? fmtDuration(sum.start) : "—";
+  const durationText = sum.duration != null ? fmtDuration(sum.duration) : "—";
+  const counts =
+    `${sum.assetCount} assets · ${sum.elementCount} elements · ${sum.eventCount} events · ` +
+    `${sum.narrationRefCount} narration refs · ${sum.evidenceAssetCount} evidence · ` +
+    `${sum.illustrationAssetCount} illustration · ${sum.lockedAssetCount} locked`;
+  return el("div", { class: "row wrap", role: "listitem", style: { gap: "10px" } },
+    el("span", { class: "badge neutral" }, String(sum.index)),
+    // Plan text is untrusted: rendered as text nodes / attributes only, never
+    // as raw HTML.
+    el("span", { class: "mono small", title: sum.id }, sum.id),
+    el("span", { class: "small" }, `start ${startText} · duration ${durationText}`),
+    el("span", { class: "small muted" }, sum.template),
+    el("span", { class: "small muted" }, counts),
+  );
+}
+
+/**
+ * @param {{ok: boolean, compositions: Array<any>}} summary
+ * @returns {HTMLElement}
+ */
+function renderCompositionList(summary) {
+  if (!summary.compositions.length) {
+    return el("div", { class: "muted small" }, "This Edit Plan has no compositions.");
+  }
+  return el("div", { class: "stack", role: "list", "aria-label": "Compositions" },
+    el("div", { class: "small" }, `Compositions (${summary.compositions.length})`),
+    ...summary.compositions.map(compositionRow),
+  );
+}
+
+/**
+ * "Show compositions" action plus the read-only list it loads on demand.
+ * This is the ONLY place the full Edit Plan is fetched: one explicit click
+ * issues one GET to the snapshot's edit_plan_url. Rendering, live refreshes,
+ * and display-setting mutations never trigger a fetch here. The in-flight
+ * guard (`ctrl.compositions`) keeps the list open across live ticks and
+ * stops duplicate fetches; a failed fetch shows the standard error panel
+ * with a Retry action.
+ * @param {Object} editorial
+ * @param {EditorialController} ctrl
+ * @returns {HTMLElement | null}
+ */
+function buildCompositionBlock(editorial, ctrl) {
+  // The action is only offered for a project-local API path: the backend
+  // always provides /api/projects/{id}/editorial/edit-plan, and any other
+  // shape is malformed metadata, not a fetch target.
+  const planUrl = localApiPath(editorial.edit_plan_url);
+  if (!planUrl || !planUrl.startsWith("/api/projects/")) return null;
+  const target = el("div", { class: "mt" });
+  const button = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Show compositions");
+  const retry = el("button", { class: "btn", type: "button" }, "Retry");
+  const startLoad = () => {
+    if (ctrl.compositions === "loading") return; // no duplicate fetches
+    void loadCompositions(planUrl, target, button, retry, ctrl);
+  };
+  button.addEventListener("click", startLoad);
+  retry.addEventListener("click", startLoad);
+  return el("div", {}, el("div", { class: "row" }, button), target);
+}
+
+/**
+ * @param {string} planUrl
+ * @param {HTMLElement} target — sub-region that shows loading / list / error
+ * @param {HTMLElement} button — the "Show compositions" action
+ * @param {HTMLElement} retry — the error-state retry action
+ * @param {EditorialController} ctrl
+ */
+async function loadCompositions(planUrl, target, button, retry, ctrl) {
+  const seq = ++ctrl.fetchSeq;
+  ctrl.compositions = "loading";
+  button.disabled = true;
+  retry.disabled = true;
+  target.replaceChildren(loadingState(2));
+  try {
+    const plan = await getEditPlan(state.config, planUrl);
+    if (seq !== ctrl.fetchSeq) return; // the region was reset underneath us
+    const summary = summarizeEditPlanCompositions(plan);
+    if (!summary.ok) {
+      ctrl.compositions = "error";
+      target.replaceChildren(errorPanel(
+        new Error("The Edit Plan is not a readable composition list."),
+        retry,
+      ));
+    } else {
+      ctrl.compositions = "ready";
+      target.replaceChildren(renderCompositionList(summary));
+    }
+  } catch (err) {
+    if (seq !== ctrl.fetchSeq) return;
+    ctrl.compositions = "error";
+    target.replaceChildren(errorPanel(err, retry));
+    toastError(err, "Could not load the Edit Plan compositions");
+  } finally {
+    if (seq === ctrl.fetchSeq) {
+      button.disabled = false;
+      retry.disabled = false;
+    }
+  }
 }
 
 /**
@@ -693,29 +1039,34 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null) {
  * provenance status on top: "stale" shows a warning naming the changed
  * inputs, "untracked" a neutral note for plans that may predate tracking,
  * and missing/malformed plan_status degrades to the classic presentation.
- * The generate endpoint is never called during render, and displaying any
- * plan state issues no requests.
+ * It then adds the display-setting switches, the on-demand composition
+ * overview, and the safe Edit Plan download link — all zero-request at
+ * render time (only explicit user actions issue requests), and all
+ * omitted defensively when their snapshot metadata is malformed. Stale and
+ * untracked plans keep every one of these available.
  *
  * @param {import("../api.js").ProjectSnapshot} snap
- * @param {(() => any) | null} [onGenerated] — refresh hook after a successful generation
+ * @param {(() => any) | null} [onGenerated] — refresh hook after a successful mutation
+ * @param {EditorialController | null} [ctrl] — shared in-flight guard
  * @returns {HTMLElement | null}
  */
-export function editorialPreviewSection(snap, onGenerated = null) {
+export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
   if (effectiveVideoMode(snap && snap.project) !== "editorial") return null;
-  const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : null;
-  const hasPlan = !!(editorial && editorial.has_edit_plan);
-  const previewUrl = hasPlan ? usableUrl(editorial.preview_url) : null;
-  const generateUrl = hasPlan ? null : usableUrl(editorial && editorial.generate_url);
+  const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : {};
+  const ctrlState = (ctrl && typeof ctrl === "object") ? ctrl : createEditorialController();
+  const hasPlan = editorial.has_edit_plan === true;
   const body = el("div", { class: "panel-body" });
   const errors = el("div", { class: "mt" });
   if (!hasPlan) {
+    const generateUrl = usableUrl(editorial.generate_url);
     body.append(emptyState(
       "No Edit Plan yet",
       "This editorial project has no Edit Plan generated yet. Once one exists, a deterministic HTML preview becomes available here.",
-      generateUrl ? [buildGeneratePlanButton(generateUrl, errors, onGenerated)] : [],
+      generateUrl ? [buildGeneratePlanButton(generateUrl, errors, onGenerated, ctrlState)] : [],
     ));
   } else {
     const planState = editorialPlanState(editorial);
+    const previewUrl = usableUrl(editorial.preview_url);
     const row = el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
       planState.kind === "stale"
         ? badge("warning", "Edit Plan is stale")
@@ -727,7 +1078,21 @@ export function editorialPreviewSection(snap, onGenerated = null) {
         ? el("a", { class: "btn btn-primary btn-sm", href: previewUrl, target: "_blank", rel: "noopener" }, "Open Preview")
         : null,
     );
+    // The download link is built only from a valid project-local path scoped
+    // to this project; it is placed after Open Preview on purpose.
+    const downloadHref = safeEditPlanDownloadUrl(editorial.edit_plan_url, snap.project && snap.project.id);
+    if (downloadHref) {
+      row.append(el("a", {
+        class: "btn btn-ghost btn-sm",
+        href: downloadHref,
+        target: "_blank",
+        rel: "noopener",
+        title: "Download the Edit Plan as JSON",
+      }, "Download Edit Plan JSON"));
+    }
     body.append(row);
+    const displayControls = buildEditorialDisplayControls(editorial, ctrlState, errors, onGenerated);
+    if (displayControls) body.append(displayControls);
     if (planState.kind === "stale") {
       body.append(el("div", { class: "mt" }, banner(
         el("div", {},
@@ -742,6 +1107,8 @@ export function editorialPreviewSection(snap, onGenerated = null) {
       body.append(el("div", { class: "muted small mt" },
         "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — Open Preview shows it as-is."));
     }
+    const compositionBlock = buildCompositionBlock(editorial, ctrlState);
+    if (compositionBlock) body.append(compositionBlock);
   }
   body.append(errors);
   return el("section", { class: "panel" },
@@ -752,20 +1119,24 @@ export function editorialPreviewSection(snap, onGenerated = null) {
 
 /**
  * Mount (or clear) the Editorial Preview panel for the current snapshot.
- * Pure rendering: no request is issued here. After a successful generation
- * the default hook re-fetches the snapshot so the panel switches to
- * "Edit Plan available" + "Open Preview".
+ * Pure rendering: no request is issued here. After a successful mutation the
+ * default hook re-fetches the snapshot so the panel switches to "Edit Plan
+ * available" + "Open Preview" (or re-reads the plan state after a display
+ * setting change).
+ *
+ * Live-refresh preservation: a Generate Edit Plan POST or a display-setting
+ * PATCH in flight, or an open composition list (loading / ready / error),
+ * keeps the mounted section in place — the job-feed tick neither replaces
+ * pending controls nor re-issues any request.
  * @param {HTMLElement} region
  * @param {import("../api.js").ProjectSnapshot} snap
  * @param {(() => any) | null} [onGenerated]
  */
 export function renderEditorialRegion(region, snap, onGenerated = null) {
-  // A planner call can legitimately outlive several live-feed ticks. Keep the
-  // mounted pending action in place so a refresh cannot expose a second,
-  // enabled button for the same in-flight POST.
-  if (region.querySelector('[data-editorial-generate-pending="true"]')) return;
+  const ctrl = ctrlFor(region);
+  if (ctrl.busy !== "" || ctrl.compositions !== "idle") return;
   const hook = onGenerated || (() => reloadEditorialRegion(region, snap));
-  const section = editorialPreviewSection(snap, hook);
+  const section = editorialPreviewSection(snap, hook, ctrl);
   region.replaceChildren(...(section ? [section] : []));
 }
 

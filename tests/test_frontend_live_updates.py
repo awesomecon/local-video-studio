@@ -360,3 +360,122 @@ def test_app_suppresses_toasts_for_parented_child_jobs() -> None:
     assert "STAGE_LABELS" in source
     assert 'scene_visual: "Scene visual",' in shared_ui
     assert 'visual_batch: "Visual batch",' in shared_ui
+
+
+def test_editorial_api_helpers_are_single_request_wrappers() -> None:
+    """The new Editorial helpers must not retry mutations automatically."""
+
+    def _body(source: str, header: str) -> str:
+        tail = source.split(header, 1)[1]
+        start = tail.index("{")
+        return tail[start:tail.index("\n}", start)]
+
+    api = _js("api.js")
+    patch = _body(api, "export function patchEditorialSettings")
+    assert "return request(config, settingsUrl, { method: \"PATCH\", body, timeoutMs: 15000, ...opts });" in patch
+    assert patch.count("request(") == 1, "the settings mutation is one request, no retry"
+    getplan = _body(api, "export function getEditPlan")
+    assert "return request(config, editPlanUrl, { timeoutMs: 30000, ...opts });" in getplan
+    assert getplan.count("request(") == 1, "the plan read is one request, no auto re-issue"
+
+
+def test_project_editorial_display_settings_controls() -> None:
+    source = _js("pages/project.js")
+    # Controls are omitted unless the metadata is strict: project-local
+    # settings_url plus strict-boolean snapshot values.
+    assert "const settingsUrl = localApiPath(editorial.settings_url);" in source
+    assert "typeof editorial.captions_enabled === \"boolean\"" in source
+    assert "typeof editorial.editorial_text_enabled === \"boolean\"" in source
+    # Explicit user action only; one mutation in flight; both controls off
+    # while saving.
+    assert "input.addEventListener(\"change\", () => {" in source
+    assert "if (ctrl.busy !== \"\") { input.checked = !input.checked; return; }" in source
+    assert "ctrl.busy = \"settings\";" in source
+    assert "for (const box of checkboxes) box.disabled = true;" in source
+    # The PATCH body carries only the field that changed.
+    assert "const body = key === \"captions_enabled\"" in source
+    assert "{ captions_enabled: input.checked }" in source
+    assert "{ editorial_text_enabled: input.checked }" in source
+    # Failure restores the previous value and uses the existing surfaces.
+    assert "input.checked = previous; // restore the previous value" in source
+    assert "toastError(err, \"Editorial display setting not saved\");" in source
+    # The settings path never touches the full Edit Plan.
+    assert "patchEditorialSettings(" in source
+    settings_block = source.split("async function saveEditorialSetting", 1)[1].split("\n}\n", 1)[0]
+    assert "getEditPlan(" not in settings_block
+    assert "edit_plan_url" not in settings_block
+
+
+def test_project_compositions_overview_is_explicit_and_safe() -> None:
+    source = _js("pages/project.js")
+    api = _js("api.js")
+    # The plan is fetched only by the explicit action, via a project-local
+    # snapshot URL (no action for non-API local paths).
+    assert '"Show compositions"' in source
+    assert "const planUrl = localApiPath(editorial.edit_plan_url);" in source
+    assert 'if (!planUrl || !planUrl.startsWith("/api/projects/")) return null;' in source
+    assert "export function getEditPlan" in api
+    # Duplicate fetches are impossible while one is in flight, and stale
+    # results are dropped after a region reset.
+    assert "if (ctrl.compositions === \"loading\") return; // no duplicate fetches" in source
+    assert "const seq = ++ctrl.fetchSeq;" in source
+    assert "if (seq !== ctrl.fetchSeq) return; // the region was reset underneath us" in source
+    # Untrusted plan content is validated defensively and rendered as text
+    # nodes: no raw-HTML sinks anywhere in the screen.
+    assert "export function summarizeEditPlanCompositions(plan) {" in source
+    assert "a.evidence_class === \"evidence\"" in source
+    assert "a.evidence_class === \"illustration\"" in source
+    assert "a.locked === true" in source
+    assert "innerHTML" not in source
+    assert "insertAdjacentHTML" not in source
+    assert "document.write" not in source
+
+
+def test_project_editorial_download_link_is_local_and_project_scoped() -> None:
+    source = _js("pages/project.js")
+    assert "export function localApiPath(value) {" in source
+    assert "if (!trimmed.startsWith(\"/\") || trimmed.startsWith(\"//\")) return null;" in source
+    assert "export function safeEditPlanDownloadUrl(value, projectId = null) {" in source
+    assert "if (!path || !path.startsWith(\"/api/projects/\")) return null;" in source
+    assert "path.includes(\"?\") || path.includes(\"#\") || path.includes(\"\\\\\")" in source
+    assert "&& !path.startsWith(`/api/projects/${projectId}/`)) return null;" in source
+    assert "return `${path}?download=true`;" in source
+    # The link is rendered only when the validator accepts the URL, and is
+    # placed after the Open Preview anchor inside the section builder.
+    assert '"Download Edit Plan JSON"' in source
+    section = source.split("export function editorialPreviewSection", 1)[1].split(
+        "\n}\n", 1
+    )[0]
+    assert 0 <= section.index('"Open Preview"') < section.index('"Download Edit Plan JSON"')
+
+
+def test_project_editorial_live_refresh_preserves_interactions() -> None:
+    source = _js("pages/project.js")
+    # The region controller lives on the stable region element, so replacing
+    # the section's children cannot destroy in-flight state.
+    assert "const editorialRegionState = new WeakMap();" in source
+    assert "const ctrl = ctrlFor(region);" in source
+    # Live-refresh guard: in-flight mutation or open composition list skips
+    # the re-render (and therefore any re-fetch).
+    assert "if (ctrl.busy !== \"\" || ctrl.compositions !== \"idle\") return;" in source
+    # An explicit Refresh preserves interactions the same way instead of
+    # wiping the mounted section.
+    assert "const preserve = ctrl.busy !== \"\" || ctrl.compositions !== \"idle\";" in source
+    assert "if (!preserve) editorial.replaceChildren();" in source
+    # A successful display-setting save closes a now-stale composition list
+    # before the fresh-snapshot re-render.
+    assert "if (ctrl.compositions !== \"idle\") ctrl.compositions = \"idle\";" in source
+
+
+def test_export_readiness_summary_reports_strict_boolean_settings() -> None:
+    source = _js("pages/export.js")
+    assert "export function editorialDisplaySettings(snap) {" in source
+    assert "captions: typeof editorial.captions_enabled === \"boolean\" ? editorial.captions_enabled : null" in source
+    assert "editorialText: typeof editorial.editorial_text_enabled === \"boolean\" ? editorial.editorial_text_enabled : null" in source
+    summary = source.split("export function renderInputSummary(", 1)[1].split(
+        "return el(\"dl\", { class: \"kv\" }, ...rows);", 1
+    )[0]
+    assert "if (display.captions !== null) {" in summary
+    assert 'display.captions ? "enabled" : "disabled"' in summary
+    assert "if (display.editorialText !== null) {" in summary
+    assert 'display.editorialText ? "enabled" : "disabled"' in summary

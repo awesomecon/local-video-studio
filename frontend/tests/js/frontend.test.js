@@ -61,6 +61,35 @@
  *                                stay usable, missing/malformed metadata
  *                                degrades to "not generated", and rendering
  *                                the summary issues no network requests).
+ *  10. Editorial display settings - Captions / Editorial text switches are
+ *                                shown only for strict-boolean snapshot
+ *                                values behind a usable project-local
+ *                                settings_url; a change PATCHes only the
+ *                                changed field, one mutation in flight,
+ *                                both controls disabled while saving,
+ *                                live refreshes preserve the pending
+ *                                controls, success re-renders from a fresh
+ *                                snapshot, failure restores the previous
+ *                                value with the standard error surfaces,
+ *                                and the full Edit Plan is never fetched on
+ *                                this path.
+ *  11. Editorial composition overview - "Show compositions" is the only
+ *                                fetcher of the Edit Plan (explicit click
+ *                                via edit_plan_url); the compact list
+ *                                renders number/id, start, duration,
+ *                                template, and asset/element/event/
+ *                                narration-ref/evidence/illustration/locked
+ *                                counts; malformed plans and compositions
+ *                                degrade to error states or placeholders
+ *                                without crashing; loading, error + retry,
+ *                                and the open list all survive live
+ *                                refreshes; the safe Download link is built
+ *                                only from project-local paths.
+ *  12. Export display settings    - the editorial readiness summary reports
+ *                                captions / editorial text enabled|disabled
+ *                                only for strict booleans (malformed values
+ *                                are omitted, never guessed); classic and
+ *                                legacy screens are unchanged.
  */
 
 import {
@@ -83,6 +112,11 @@ import {
   setInputs,
   editorialPreviewSection,
   renderEditorialRegion,
+  buildEditorialDisplayControls,
+  summarizeEditPlanCompositions,
+  safeEditPlanDownloadUrl,
+  localApiPath,
+  createEditorialController,
 } from "../../js/pages/project.js";
 import {
   renderExport,
@@ -91,6 +125,7 @@ import {
   exportWorkflowText,
   exportForceConfirmMessage,
   editorialPlanSummary,
+  editorialDisplaySettings,
   renderInputSummary,
   renderStageLabel,
 } from "../../js/pages/export.js";
@@ -807,7 +842,12 @@ record("editorial-provenance: no Generate button when has_edit_plan=true", () =>
     const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, meta));
     assert(!findGenerateButton(node),
       `no Generate button for ${meta.plan_status || "missing plan_status"}`);
-    assert(!node.querySelector("button"), "no buttons at all once a plan exists");
+    // Once a plan exists, the only actions are the explicit, read-only ones:
+    // Open Preview (anchor) and the on-demand "Show compositions" fetcher
+    // (these fixtures all carry a usable edit_plan_url).
+    const buttons = [...node.querySelectorAll("button")];
+    eq(buttons.map((b) => b.textContent), ["Show compositions"],
+      `only the Show compositions action remains for ${meta.plan_status || "missing plan_status"}`);
   }
 });
 
@@ -1163,6 +1203,590 @@ await recordAsync("export: classic force-render confirmation is unchanged", asyn
 // Leave shared app state the way later screens expect it.
 state.currentProjectId = null;
 closeModals();
+
+/* --- 10. Editorial display settings (Project Details) --------------------- */
+
+const SETTINGS_URL = "/api/projects/proj-ed/editorial/settings";
+const EDIT_PLAN_URL = "/api/projects/proj-ed/editorial/edit-plan";
+const EDITORIAL_TEXT_LABEL = "Editorial text";
+
+// Plan metadata carrying strict-boolean display settings; tests override
+// individual fields via the `extra` argument.
+function settingsMeta(extra = {}) {
+  return {
+    has_edit_plan: true,
+    plan_status: "current",
+    stale: false,
+    stale_reasons: [],
+    edit_plan_url: EDIT_PLAN_URL,
+    preview_url: EDIT_PLAN_META.preview_url,
+    settings_url: SETTINGS_URL,
+    captions_enabled: true,
+    editorial_text_enabled: false,
+    ...extra,
+  };
+}
+
+function findSettingInput(node, key) {
+  return [...node.querySelectorAll("input")].find((i) => i.dataset.editorialSetting === key) || null;
+}
+
+function findCompositionsButton(node) {
+  return [...node.querySelectorAll("button")].find((b) => b.textContent === "Show compositions") || null;
+}
+
+record("editorial-settings: classic and legacy snapshots render no display controls", () => {
+  const classic = { ...LEGACY_PROJECT, video_mode: "classic" };
+  eq(editorialPreviewSection(projectSnapshot(classic, settingsMeta())), null,
+    "classic stays null even with a full settings block");
+  eq(editorialPreviewSection(projectSnapshot(LEGACY_PROJECT, settingsMeta())), null,
+    "omitted video_mode reads as classic");
+  // The no-plan state never shows the switches (the snapshot fields are only
+  // populated once a plan exists).
+  const noPlan = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
+    has_edit_plan: false, settings_url: SETTINGS_URL,
+    captions_enabled: true, editorial_text_enabled: true,
+  }));
+  assert(noPlan, "no-plan state still renders the panel");
+  eq(noPlan.querySelectorAll("input[type=checkbox]").length, 0, "no controls without a plan");
+});
+
+record("editorial-settings: strict boolean settings render two independent checkboxes", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
+  assert(node, "the section renders");
+  const captions = findSettingInput(node, "captions_enabled");
+  const text = findSettingInput(node, "editorial_text_enabled");
+  assert(captions && text, "both controls present");
+  eq(captions.type, "checkbox");
+  eq(captions.checked, true, "starts from the snapshot value");
+  eq(text.checked, false, "starts from the snapshot value");
+  assert(node.textContent.includes("Captions"), "Captions label shown");
+  assert(node.textContent.includes(EDITORIAL_TEXT_LABEL), "Editorial text label shown");
+});
+
+record("editorial-settings: malformed settings_url or non-boolean values omit controls defensively", () => {
+  const remoteUrl = "http" + "s://remote-studio.example.com/api/projects/proj-ed/editorial/settings";
+  const cases = {
+    "remote settings_url": { ...settingsMeta(), settings_url: remoteUrl },
+    "protocol-relative settings_url": { ...settingsMeta(), settings_url: "//cdn.example.com/settings" },
+    "non-string settings_url": { ...settingsMeta(), settings_url: 42 },
+    "empty settings_url": { ...settingsMeta(), settings_url: "   " },
+    "missing settings_url": { ...settingsMeta(), settings_url: null },
+    "neither value a strict boolean": { ...settingsMeta(), captions_enabled: "yes", editorial_text_enabled: 1 },
+  };
+  for (const [name, meta] of Object.entries(cases)) {
+    const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, meta));
+    assert(node, `the section still renders (${name})`);
+    eq(node.querySelectorAll("input[type=checkbox]").length, 0,
+      `no controls for ${name}`);
+  }
+  // Per-field omission: a broken value hides only its own control.
+  const mixed = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT,
+    { ...settingsMeta(), captions_enabled: "yes" }));
+  eq(mixed.querySelectorAll("input[type=checkbox]").length, 1, "only the valid control remains");
+  assert(findSettingInput(mixed, "editorial_text_enabled"), "the valid control is the surviving one");
+  // The standalone builder agrees.
+  eq(buildEditorialDisplayControls(
+    { ...settingsMeta(), settings_url: remoteUrl }, createEditorialController(),
+    document.createElement("div")), null, "builder omits the row for a remote URL");
+});
+
+await recordAsync("editorial-settings: one click PATCHes only the changed field, never the Edit Plan", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let captions = true, textOn = false;
+  const snapFor = () => projectSnapshot(
+    EDITORIAL_PROJECT, settingsMeta({ captions_enabled: captions, editorial_text_enabled: textOn }));
+  const calls = stubFetch((call) => {
+    if (call.method === "PATCH" && call.url === SETTINGS_URL) {
+      if (call.body && call.body.captions_enabled !== undefined) captions = call.body.captions_enabled;
+      if (call.body && call.body.editorial_text_enabled !== undefined) textOn = call.body.editorial_text_enabled;
+      return { payload: { version: 1 } };
+    }
+    if (call.method === "GET" && call.url === "/api/projects/proj-ed") return { payload: snapFor() };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, snapFor());
+  const caps = findSettingInput(region, "captions_enabled");
+  caps.checked = false;
+  caps.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  const patches = calls.filter((c) => c.method === "PATCH");
+  eq(patches.length, 1, "exactly one PATCH issued");
+  eq(patches[0].url, SETTINGS_URL, "PATCHes the snapshot settings_url");
+  eq(patches[0].body, { captions_enabled: false }, "body carries only the changed field");
+  assert(!calls.some((c) => c.url === EDIT_PLAN_URL),
+    "display settings never GET/PUT the full Edit Plan");
+  eq(calls.filter((c) => c.method === "GET").length, 1, "success refreshes from one fresh snapshot");
+  const freshCaps = findSettingInput(region, "captions_enabled");
+  assert(freshCaps && !freshCaps.checked, "fresh-snapshot re-render reflects the saved value");
+  // Second, independent toggle: only its own field is PATCHed.
+  const text = findSettingInput(region, "editorial_text_enabled");
+  text.checked = true;
+  text.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  const patches2 = calls.filter((c) => c.method === "PATCH");
+  eq(patches2.length, 2, "the second change issues its own PATCH");
+  eq(patches2[1].body, { editorial_text_enabled: true }, "second body carries only its field");
+});
+
+await recordAsync("editorial-settings: one mutation in flight, both controls off, refreshes preserve pending controls", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let captions = true, textOn = false;
+  const snapFor = () => projectSnapshot(
+    EDITORIAL_PROJECT, settingsMeta({ captions_enabled: captions, editorial_text_enabled: textOn }));
+  const calls = [];
+  let finishPatch;
+  globalThis.fetch = (url, opts) => {
+    const method = (opts && opts.method) || "GET";
+    const body = (opts && opts.body != null) ? JSON.parse(opts.body) : null;
+    calls.push({ url: String(url), method, body });
+    if (method === "GET") {
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(snapFor())) });
+    }
+    return new Promise((resolve) => {
+      finishPatch = () => {
+        if (body.captions_enabled !== undefined) captions = body.captions_enabled;
+        if (body.editorial_text_enabled !== undefined) textOn = body.editorial_text_enabled;
+        resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ version: 1 })) });
+      };
+    });
+  };
+  const region = document.createElement("div");
+  renderEditorialRegion(region, snapFor());
+  const caps = findSettingInput(region, "captions_enabled");
+  caps.checked = false;
+  caps.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush(2);
+  const boxes = [...region.querySelectorAll("input")];
+  eq(boxes.length, 2, "both controls still mounted");
+  assert(boxes.every((b) => b.disabled), "both controls disabled while saving");
+  // A live snapshot tick with newer data must not replace the pending controls.
+  renderEditorialRegion(region, snapFor());
+  assert([...region.querySelectorAll("input")].every((b) => b.disabled),
+    "pending controls survive the live tick");
+  eq(calls.filter((c) => c.method === "PATCH").length, 1, "the tick issues no duplicate PATCH");
+  // A second change while saving is undone, not queued or double-issued.
+  const text = findSettingInput(region, "editorial_text_enabled");
+  text.checked = true;
+  text.dispatchEvent(new Event("change", { bubbles: true }));
+  eq(text.checked, false, "the in-flight-locked flip is reverted");
+  eq(calls.filter((c) => c.method === "PATCH").length, 1, "no second mutation is queued");
+  finishPatch();
+  await flush();
+  eq(calls.filter((c) => c.method === "PATCH").length, 1, "exactly one PATCH issued end to end");
+  eq(calls.filter((c) => c.method === "GET").length, 1, "one snapshot re-read after the save");
+  const fresh = [...region.querySelectorAll("input")];
+  assert(fresh.length === 2 && fresh.every((b) => !b.disabled), "controls re-enabled after the save");
+  const freshCaps = findSettingInput(region, "captions_enabled");
+  assert(freshCaps && !freshCaps.checked, "fresh-snapshot re-render reflects the saved value");
+});
+
+await recordAsync("editorial-settings: failure restores the previous value and the standard error surfaces", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "PATCH" && call.url === SETTINGS_URL) {
+      return { status: 500, payload: { detail: "settings rejected" } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
+  const caps = findSettingInput(region, "captions_enabled");
+  caps.checked = false; // the user asked for captions off
+  caps.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  eq(caps.checked, true, "the checkbox is restored to the previous value");
+  assert([...region.querySelectorAll("input")].every((b) => !b.disabled),
+    "both controls re-enabled after the failure");
+  assert(region.textContent.includes("settings rejected"), "inline error panel shows the backend message");
+  // The toast region caps its stack, so look the specific toast up by text.
+  const toastShown = [...document.querySelectorAll("#toasts .toast")]
+    .some((t) => t.textContent.includes("Editorial display setting not saved"));
+  assert(toastShown, "error toast surfaced");
+  eq(calls.filter((c) => c.method === "PATCH").length, 1, "failure never auto-retries the PATCH");
+  assert(!calls.some((c) => c.url === EDIT_PLAN_URL), "no Edit Plan traffic on this path");
+});
+
+await recordAsync("editorial-settings: mounting, controls, and live refreshes issue zero requests", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected call" } }));
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
+  await flush();
+  eq(calls.length, 0, "rendering and refreshes never fetch or PATCH anything");
+  assert(findSettingInput(region, "captions_enabled"), "controls present");
+  assert(findCompositionsButton(region), "the explicit composition action is available");
+});
+
+/* --- 11. Editorial composition overview ----------------------------------- */
+
+const COMPOSITION_META = {
+  has_edit_plan: true,
+  plan_status: "current",
+  stale: false,
+  stale_reasons: [],
+  edit_plan_url: EDIT_PLAN_URL,
+  preview_url: EDIT_PLAN_META.preview_url,
+};
+
+const SAMPLE_PLAN = {
+  schema_version: "editorial.edit-plan/1",
+  project_id: "proj-ed",
+  width: 1920, height: 1080, fps: 30,
+  editorial_text_enabled: false,
+  captions_enabled: true,
+  compositions: [
+    {
+      id: "comp-a", start: 0, duration: 5.5, template: "archiveCanvas",
+      assets: [
+        { id: "as-1", type: "image", evidence_class: "evidence", locked: true },
+        { id: "as-2", type: "image", evidence_class: "illustration", locked: false },
+        { id: "as-3", type: "image", evidence_class: "illustration" },
+      ],
+      elements: [1, 2, 3, 4, 5],
+      events: [1, 2, 3],
+      narration_refs: ["n-1", "n-2"],
+      caption_refs: [],
+    },
+    {
+      id: "comp-b", start: 5.5, duration: 7, template: "bigTextReveal",
+      assets: [], elements: [], events: [], narration_refs: [],
+    },
+  ],
+};
+
+record("editorial-compositions: the action is available for every plan state, never for classic", () => {
+  for (const meta of [COMPOSITION_META, stalePlanMeta(["script"]), UNTRACKED_PLAN_META, EDIT_PLAN_META]) {
+    const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, meta));
+    assert(findCompositionsButton(node),
+      `Show compositions available for ${meta.plan_status || "missing plan_status"}`);
+  }
+  const classic = { ...LEGACY_PROJECT, video_mode: "classic" };
+  eq(editorialPreviewSection(projectSnapshot(classic, COMPOSITION_META)), null,
+    "classic projects never see the composition UI");
+});
+
+record("editorial-compositions: a non-local edit_plan_url never yields the action or a link", () => {
+  const badUrls = [
+    "http" + "://remote.example/api/projects/proj-ed/editorial/edit-plan",
+    "http" + "s://remote.example/api/projects/proj-ed/editorial/edit-plan",
+    "//cdn.example.com/api/projects/proj-ed/editorial/edit-plan",
+    "/static/edit-plan.json",
+    42,
+    null,
+  ];
+  for (const bad of badUrls) {
+    const node = editorialPreviewSection(projectSnapshot(
+      EDITORIAL_PROJECT, { ...COMPOSITION_META, edit_plan_url: bad }));
+    assert(node, `the section still renders for ${JSON.stringify(bad)}`);
+    eq(findCompositionsButton(node), null, `no action for ${JSON.stringify(bad)}`);
+    assert(![...node.querySelectorAll("a")].some((a) => a.textContent === "Download Edit Plan JSON"),
+      `no download link for ${JSON.stringify(bad)}`);
+  }
+});
+
+await recordAsync("editorial-compositions: rendering and live refresh never fetch the Edit Plan", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected call" } }));
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  await flush();
+  eq(calls.length, 0, "the full plan is fetched only by an explicit action");
+  assert(findCompositionsButton(region), "the explicit action is still there");
+});
+
+await recordAsync("editorial-compositions: one explicit click fetches edit_plan_url once and renders the summary", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === EDIT_PLAN_URL) return { payload: SAMPLE_PLAN };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  eq(calls.filter((c) => c.url === EDIT_PLAN_URL).length, 1, "exactly one explicit fetch");
+  const text = region.textContent;
+  assert(text.includes("comp-a"), "first composition id shown");
+  assert(text.includes("comp-b"), "second composition id shown");
+  assert(text.includes("archiveCanvas"), "template shown");
+  assert(text.includes("bigTextReveal"), "second template shown");
+  assert(text.includes("start 0:00 · duration 0:06"), "start/duration rendered (5.5s rounds to 0:06)");
+  assert(text.includes("3 assets"), "asset count");
+  assert(text.includes("5 elements"), "element count");
+  assert(text.includes("3 events"), "event count");
+  assert(text.includes("2 narration refs"), "narration-reference count");
+  assert(text.includes("1 evidence"), "evidence asset count");
+  assert(text.includes("2 illustration"), "illustration asset count");
+  assert(text.includes("1 locked"), "locked asset count");
+});
+
+await recordAsync("editorial-compositions: loading state shows and clicks cannot duplicate the fetch", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = [];
+  let finishPlan;
+  globalThis.fetch = (url, opts) => {
+    calls.push({ url: String(url), method: (opts && opts.method) || "GET" });
+    return new Promise((resolve) => {
+      finishPlan = () => resolve({
+        ok: true, status: 200,
+        text: () => Promise.resolve(JSON.stringify(SAMPLE_PLAN)),
+      });
+    });
+  };
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  const btn = findCompositionsButton(region);
+  btn.click();
+  await flush(2);
+  assert(btn.disabled, "the action is disabled while loading");
+  assert(region.textContent.includes("Loading…"), "loading state shown");
+  btn.disabled = false;
+  btn.click(); // a re-click (even forced) must not start a second fetch
+  await flush(2);
+  eq(calls.length, 1, "no duplicate fetch while one is in flight");
+  finishPlan();
+  await flush();
+  eq(calls.length, 1, "still exactly one fetch end to end");
+  assert(region.textContent.includes("comp-a"), "the list rendered after the load");
+  assert(!btn.disabled, "the action re-enables for an explicit re-fetch");
+});
+
+await recordAsync("editorial-compositions: failure shows the error state and Retry re-fetches", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let fail = true;
+  const calls = stubFetch((call) => {
+    if (call.url === EDIT_PLAN_URL) {
+      return fail ? { status: 500, payload: { detail: "plan read failed" } } : { payload: SAMPLE_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  assert(region.textContent.includes("plan read failed"), "error state explains the failure");
+  const retry = [...region.querySelectorAll("button")].find((b) => b.textContent === "Retry");
+  assert(retry, "a Retry action is offered");
+  fail = false;
+  retry.click();
+  await flush();
+  eq(calls.filter((c) => c.url === EDIT_PLAN_URL).length, 2, "Retry issues exactly one more fetch");
+  assert(region.textContent.includes("comp-a"), "the list rendered after the retry");
+});
+
+await recordAsync("editorial-compositions: a malformed plan payload yields the error state, not a crash", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  stubFetch((call) => {
+    if (call.url === EDIT_PLAN_URL) return { payload: { compositions: "nope" } };
+    return { status: 404, payload: { detail: "unexpected" } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  assert(region.textContent.includes("not a readable composition list"),
+    "an unreadable plan explains itself");
+  assert(!region.querySelector("[role=list]"), "no phantom composition rows were rendered");
+  assert(!region.textContent.includes("comp-a"), "no plan content rendered");
+});
+
+record("editorial-compositions: malformed composition entries degrade to placeholders", () => {
+  const plan = {
+    compositions: [
+      {
+        id: "ok", start: 1, duration: 2, template: "archiveCanvas",
+        assets: [{ evidence_class: "evidence", locked: true }, { locked: "yes" }, "junk", null],
+        elements: "nope", events: [1], narration_refs: "nope",
+      },
+      "just-a-string",
+      null,
+      [1, 2, 3],
+      { start: "soon", duration: null, template: 42, assets: "nope" },
+    ],
+  };
+  const sum = summarizeEditPlanCompositions(plan);
+  assert(sum.ok, "a compositions array is readable even with garbage entries");
+  eq(sum.compositions.length, 5, "every entry produces a row");
+  const a = sum.compositions[0];
+  eq(a.id, "ok");
+  eq(a.start, 1);
+  eq(a.duration, 2);
+  eq(a.template, "archiveCanvas");
+  eq(a.assetCount, 4, "raw asset entries are counted");
+  eq(a.elementCount, 0, "non-array elements count as zero");
+  eq(a.eventCount, 1);
+  eq(a.narrationRefCount, 0, "non-array refs count as zero");
+  eq(a.evidenceAssetCount, 1, "only the strict evidence class matches");
+  eq(a.illustrationAssetCount, 0, "an unrecognized evidence_class is neither");
+  eq(a.lockedAssetCount, 1, "only strict true counts as locked");
+  const s = sum.compositions[1];
+  eq(s.id, "—", "non-object entry gets a placeholder id");
+  eq(s.start, null);
+  eq(s.duration, null);
+  eq(s.template, "—");
+  const e = sum.compositions[4];
+  eq(e.start, null, "a non-numeric start is not trusted");
+  eq(e.template, "—", "a non-string template falls back");
+  eq(e.assetCount, 0, "non-array assets count as zero");
+});
+
+record("editorial-compositions: a plan without a compositions array is unreadable", () => {
+  for (const plan of [null, "plan", 42, {}, { compositions: "nope" }, { compositions: {} }, []]) {
+    eq(summarizeEditPlanCompositions(plan).ok, false, `unreadable plan: ${JSON.stringify(plan)}`);
+  }
+});
+
+await recordAsync("editorial-compositions: Open Preview is kept and the open list survives live refreshes", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.url === EDIT_PLAN_URL) return { payload: SAMPLE_PLAN };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  const list = region.querySelector("[role=list]");
+  assert(list, "the composition list rendered");
+  const openPreview = region.querySelector("a");
+  assert(openPreview && openPreview.textContent === "Open Preview",
+    "Open Preview remains the first link with the list open");
+  // A live tick carrying newer plan metadata must not rebuild the open list
+  // or re-fetch the plan.
+  renderEditorialRegion(region, projectSnapshot(
+    EDITORIAL_PROJECT, { ...COMPOSITION_META, plan_status: "stale", stale_reasons: ["script"] }));
+  eq(region.querySelector("[role=list]"), list, "the open list is not rebuilt by a live tick");
+  eq(calls.filter((c) => c.url === EDIT_PLAN_URL).length, 1, "the tick re-issues no Edit Plan fetch");
+});
+
+record("editorial-download: the link is built only from a project-local edit_plan_url", () => {
+  const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  const anchors = [...node.querySelectorAll("a")];
+  eq(anchors[0].textContent, "Open Preview", "Open Preview stays the first link");
+  const dl = anchors.find((a) => a.textContent === "Download Edit Plan JSON");
+  assert(dl, "the download link is present");
+  eq(dl.getAttribute("href"), EDIT_PLAN_URL + "?download=true", "href appends ?download=true");
+  eq(dl.getAttribute("target"), "_blank", "opens in a new tab");
+  assert((dl.getAttribute("rel") || "").includes("noopener"), "rel carries noopener");
+});
+
+record("editorial-download: remote, malformed, and cross-project values yield no link", () => {
+  const cases = [
+    "http" + "://remote.example/api/projects/proj-ed/editorial/edit-plan",
+    "http" + "s://remote.example/api/projects/proj-ed/editorial/edit-plan",
+    "//cdn.example.com/api/projects/proj-ed/editorial/edit-plan",
+    "/static/edit-plan.json",
+    "/api/projects/proj-ed/editorial/edit-plan?download=true",
+    "/api/projects/proj-ed/editorial/edit-plan#frag",
+    "/api/projects/proj-ed/editorial\\edit-plan",
+    "/api/projects/proj-ed/editorial/ edit-plan",
+    42,
+    null,
+    "",
+  ];
+  for (const bad of cases) {
+    const node = editorialPreviewSection(projectSnapshot(
+      EDITORIAL_PROJECT, { ...COMPOSITION_META, edit_plan_url: bad }));
+    assert(node, `the section still renders for ${JSON.stringify(bad)}`);
+    assert(![...node.querySelectorAll("a")].some((a) => a.textContent === "Download Edit Plan JSON"),
+      `no download link for ${JSON.stringify(bad)}`);
+  }
+  // Valid shape but another project's id: never becomes a link.
+  const cross = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
+    ...COMPOSITION_META, edit_plan_url: "/api/projects/other-project/editorial/edit-plan",
+  }));
+  assert(![...cross.querySelectorAll("a")].some((a) => a.textContent === "Download Edit Plan JSON"),
+    "a cross-project-looking path is rejected");
+});
+
+record("download-url: the validator pins safe project-local paths only", () => {
+  eq(safeEditPlanDownloadUrl("/api/projects/proj-ed/editorial/edit-plan", "proj-ed"),
+    "/api/projects/proj-ed/editorial/edit-plan?download=true");
+  eq(safeEditPlanDownloadUrl("/api/projects/proj-ed/editorial/edit-plan"),
+    "/api/projects/proj-ed/editorial/edit-plan?download=true",
+    "without a known project id only the /api/projects/ prefix is enforced");
+  eq(safeEditPlanDownloadUrl("  /api/projects/proj-ed/editorial/edit-plan  ", "proj-ed"),
+    "/api/projects/proj-ed/editorial/edit-plan?download=true", "surrounding whitespace is trimmed");
+  eq(safeEditPlanDownloadUrl("http" + "s://remote.example/api/projects/proj-ed/editorial/edit-plan", "proj-ed"),
+    null, "absolute remote URLs are rejected");
+  eq(safeEditPlanDownloadUrl("//cdn.example.com/api/projects/proj-ed/editorial/edit-plan", "proj-ed"),
+    null, "protocol-relative URLs are rejected");
+  eq(safeEditPlanDownloadUrl("/api/projects/other/editorial/edit-plan", "proj-ed"),
+    null, "cross-project paths are rejected");
+  eq(safeEditPlanDownloadUrl("/static/plan.json", "proj-ed"), null, "paths outside /api/projects/ are rejected");
+  eq(safeEditPlanDownloadUrl("/api/projects/proj-ed/editorial/edit-plan?x=1", "proj-ed"), null,
+    "an existing query string is rejected");
+  eq(safeEditPlanDownloadUrl("/api/projects/proj-ed/editorial/edit-plan#f", "proj-ed"), null,
+    "fragments are rejected");
+  eq(safeEditPlanDownloadUrl(42), null);
+  eq(safeEditPlanDownloadUrl(null), null);
+  eq(localApiPath("https:" + "//remote.example/api"), null, "localApiPath rejects any scheme URL");
+  eq(localApiPath("/api/projects/proj-ed/editorial/settings"), "/api/projects/proj-ed/editorial/settings");
+});
+
+/* --- 12. Export readiness summary: display settings ----------------------- */
+
+record("export: editorialDisplaySettings trusts only strict booleans", () => {
+  const snap = (ed) => exportSnapshot(EDITORIAL_EXPORT_PROJECT, ed);
+  eq(editorialDisplaySettings(snap({ captions_enabled: true, editorial_text_enabled: false })),
+    { captions: true, editorialText: false });
+  eq(editorialDisplaySettings(snap({ captions_enabled: "yes", editorial_text_enabled: 1 })),
+    { captions: null, editorialText: null }, "strings/numbers are never guessed");
+  eq(editorialDisplaySettings(snap({ captions_enabled: null })),
+    { captions: null, editorialText: null }, "null means no plan, not a value");
+  eq(editorialDisplaySettings(snap(null)), { captions: null, editorialText: null });
+  eq(editorialDisplaySettings(snap("corrupt")), { captions: null, editorialText: null });
+});
+
+record("export: editorial readiness summary reports strict boolean display settings", () => {
+  const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT,
+    { ...EDIT_PLAN_CURRENT, captions_enabled: true, editorial_text_enabled: false });
+  const dl = renderInputSummary(snap, {});
+  eq([...dl.querySelectorAll("dt")].map((n) => n.textContent),
+    ["Edit Plan", "Captions", "Editorial text", "Narration", "Optional inputs"]);
+  const dds = [...dl.querySelectorAll("dd")].map((n) => n.textContent);
+  eq(dds[1], "enabled", "captions on");
+  eq(dds[2], "disabled", "editorial text off");
+  const flipped = renderInputSummary(exportSnapshot(EDITORIAL_EXPORT_PROJECT,
+    { ...EDIT_PLAN_CURRENT, captions_enabled: false, editorial_text_enabled: true }), {});
+  const flippedDds = [...flipped.querySelectorAll("dd")].map((n) => n.textContent);
+  eq(flippedDds[1], "disabled");
+  eq(flippedDds[2], "enabled");
+});
+
+record("export: malformed display settings are omitted, never guessed", () => {
+  const metas = [
+    { ...EDIT_PLAN_CURRENT, captions_enabled: "yes", editorial_text_enabled: null },
+    { ...EDIT_PLAN_CURRENT, captions_enabled: 1, editorial_text_enabled: "false" },
+    { has_edit_plan: true },
+  ];
+  for (const meta of metas) {
+    const dl = renderInputSummary(exportSnapshot(EDITORIAL_EXPORT_PROJECT, meta), {});
+    eq([...dl.querySelectorAll("dt")].map((n) => n.textContent),
+      ["Edit Plan", "Narration", "Optional inputs"], "no display rows without strict booleans");
+  }
+  const mixed = renderInputSummary(exportSnapshot(EDITORIAL_EXPORT_PROJECT,
+    { ...EDIT_PLAN_CURRENT, captions_enabled: true, editorial_text_enabled: "on" }), {});
+  eq([...mixed.querySelectorAll("dt")].map((n) => n.textContent),
+    ["Edit Plan", "Captions", "Narration", "Optional inputs"],
+    "only the strict-boolean row survives");
+});
+
+record("export: classic and legacy summaries never show display settings", () => {
+  const dl = renderInputSummary(
+    exportSnapshot(CLASSIC_EXPORT_PROJECT,
+      { has_edit_plan: true, captions_enabled: true, editorial_text_enabled: true },
+      { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS }), {});
+  eq([...dl.querySelectorAll("dt")].map((n) => n.textContent),
+    ["Scene visuals", "Narration", "Optional inputs"], "classic rows unchanged");
+  const legacy = renderInputSummary(exportSnapshot(LEGACY_EXPORT_PROJECT, undefined), {});
+  eq([...legacy.querySelectorAll("dt")].map((n) => n.textContent),
+    ["Scene visuals", "Narration", "Optional inputs"], "legacy rows unchanged");
+});
 
 /* --- report -------------------------------------------------------------- */
 
