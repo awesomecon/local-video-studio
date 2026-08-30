@@ -1,8 +1,10 @@
 from pathlib import Path
+from io import BytesIO
 import json
 
 import yaml
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from backend.api.main import create_app
 from backend.core import load_config
@@ -159,9 +161,16 @@ def test_editorial_asset_lock_and_local_replacement_are_protected(tmp_path: Path
     assert locked.status_code == 200
     assert locked.json()["compositions"][0]["assets"][0]["locked"] is True
 
+    unreadable = client.post(
+        asset_url + "/replace",
+        files={"file": ("fake.png", b"not-an-image", "image/png")},
+    )
+    assert unreadable.status_code == 422
+    image_bytes = BytesIO()
+    Image.new("RGB", (8, 8), "#a44b2a").save(image_bytes, format="PNG")
     replaced = client.post(
         asset_url + "/replace",
-        files={"file": ("replacement.png", b"local-image-bytes", "image/png")},
+        files={"file": ("replacement.png", image_bytes.getvalue(), "image/png")},
         data={"evidence": "true"},
     )
     assert replaced.status_code == 200
@@ -234,6 +243,7 @@ def test_editorial_composition_narrow_edits_retime_followers_and_retarget_templa
     assert compositions[0]["elements"][0]["text"] == "REVISED"
     assert compositions[0]["events"][0]["action"] == "scaleIn"
     assert compositions[1]["start"] == 5
+    assert compositions[1]["duration"] == 3
 
     retargeted = client.patch(url, json={"template": "documentReveal"})
     assert retargeted.status_code == 200
@@ -242,6 +252,7 @@ def test_editorial_composition_narrow_edits_retime_followers_and_retarget_templa
     assert first["elements"][0]["role"] == "document"
     assert first["elements"][0]["text"] == "REVISED"
     assert client.patch(url, json={"template": "illustrationCanvas"}).status_code == 409
+    assert client.patch(url, json={"duration": 120}).status_code == 409
     assert client.patch(url, json={}).status_code == 409
 
 

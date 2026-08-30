@@ -125,8 +125,15 @@ class EditorialPlanner:
             return current, None
 
         context = self._context(project, script, assets, word_timings)
+        regenerate_only = current.model_dump(mode="json")
+        for item in regenerate_only.get("assets", []):
+            if isinstance(item, dict):
+                # Persisted paths are trusted application state, not planner output.
+                # The planner sees the binding but must return source=null; the exact
+                # protected record is restored after validation.
+                item["source"] = None
         context.update({
-            "regenerate_only": current.model_dump(mode="json"),
+            "regenerate_only": regenerate_only,
             "previous_composition": (
                 plan.compositions[index - 1].model_dump(mode="json") if index else None
             ),
@@ -144,8 +151,9 @@ class EditorialPlanner:
         messages = [
             {"role": "system", "content": self._system_prompt() + (
                 " Regenerate only regenerate_only. Keep its fixed_fields unchanged. "
-                "Protected assets and their bound element slots are immutable; return them "
-                "unchanged. Use neighboring compositions for continuity, not as output."
+                "Protected assets and their bound element slots are immutable; return their "
+                "ids and bindings unchanged but always set source=null. Use neighboring "
+                "compositions for continuity, not as output."
             )},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
@@ -308,6 +316,10 @@ class EditorialPlanner:
         ]
         protected_ids = {item.id for item in protected_elements}
         protected_roles = {item.role for item in protected_elements}
+        displaced_ids = {
+            item.id for item in replacement.elements
+            if item.role in protected_roles and item.id not in protected_ids
+        }
         merged_assets = [item for item in replacement.assets if item.id not in protected]
         merged_assets.extend(protected.values())
         merged_elements = [
@@ -315,13 +327,16 @@ class EditorialPlanner:
             if item.id not in protected_ids and item.role not in protected_roles
         ]
         merged_elements.extend(protected_elements)
-        event_targets = {event.target for event in replacement.events}
+        replacement_events = [
+            event for event in replacement.events if event.target not in displaced_ids
+        ]
+        event_targets = {event.target for event in replacement_events}
         restored_events = [
             event for event in current.events
             if event.target in protected_ids and event.target not in event_targets
         ]
         merged_events = sorted(
-            [*replacement.events, *restored_events], key=lambda event: event.time,
+            [*replacement_events, *restored_events], key=lambda event: event.time,
         )
         return EditorialComposition.model_validate({
             **replacement.model_dump(mode="python"),

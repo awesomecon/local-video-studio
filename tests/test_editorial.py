@@ -349,10 +349,18 @@ def test_single_composition_regeneration_preserves_clock_neighbors_and_protected
     llm = _PlannerLLM({"composition": {
         "id": "attempted-id", "start": 2, "duration": 5,
         "template": "archiveCanvas",
+        "assets": [{
+            "id": "protected-photo", "type": "user_uploaded_image",
+            "asset_id": imported.id, "source": None, "locked": False,
+        }],
         "elements": [
             {"id": "new-year", "type": "text", "text": "A NEW ANGLE", "role": "year"},
+            {"id": "attempt-photo", "type": "image", "asset_id": "protected-photo", "role": "archive-photo"},
         ],
-        "events": [{"time": 0, "action": "scaleIn", "target": "new-year"}],
+        "events": [
+            {"time": 0, "action": "scaleIn", "target": "new-year"},
+            {"time": 1, "action": "fade", "target": "attempt-photo"},
+        ],
         "narration_refs": [scene_id],
     }})
 
@@ -371,6 +379,7 @@ def test_single_composition_regeneration_preserves_clock_neighbors_and_protected
     assert context["regenerate_only"]["id"] == "target"
     assert context["next_composition"]["id"] == "next"
     assert context["protected_asset_ids"] == ["protected-photo"]
+    assert context["regenerate_only"]["assets"][0]["source"] is None
 
 
 def test_editorial_planner_rejects_model_authored_sources_and_unknown_refs() -> None:

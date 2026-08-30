@@ -560,6 +560,22 @@ class PipelineService:
             suffix = Path(original_filename).suffix.lower()
             if suffix not in self._IMPORTED_IMAGE_EXTENSIONS:
                 raise ValueError("Editorial replacements must be PNG, JPEG, WebP, BMP, GIF, or TIFF")
+            try:
+                from PIL import Image, UnidentifiedImageError
+
+                with Image.open(source_path) as image:
+                    image.verify()
+                with Image.open(source_path) as image:
+                    width, height = image.size
+                    image_format = (image.format or "").upper()
+                if image_format not in {"PNG", "JPEG", "WEBP", "BMP", "GIF", "TIFF"}:
+                    raise ValueError("uploaded Editorial image format is not supported")
+                if width <= 0 or height <= 0 or width > 16_384 or height > 16_384:
+                    raise ValueError("uploaded Editorial image dimensions are not supported")
+                if width * height > 100_000_000:
+                    raise ValueError("uploaded Editorial image exceeds the pixel safety limit")
+            except (OSError, UnidentifiedImageError) as exc:
+                raise ValueError("uploaded Editorial file is not a readable image") from exc
             plan = self.store.load_edit_plan(project.slug)
             composition = next(
                 (item for item in plan.compositions if item.id == composition_id), None,
@@ -728,17 +744,32 @@ class PipelineService:
             delta = new_duration - current.duration
             compositions = list(plan.compositions)
             compositions[index] = working
-            if delta:
-                compositions = [
-                    item.model_copy(update={"start": item.start + delta})
-                    if position > index else item
-                    for position, item in enumerate(compositions)
-                ]
+            if delta and index + 1 < len(compositions):
+                follower = compositions[index + 1]
+                follower_end = follower.start + follower.duration
+                follower_duration = follower_end - (working.start + working.duration)
+                if follower_duration <= 0 or follower_duration > 120:
+                    raise PipelineError(
+                        "That duration leaves no valid time for the next composition."
+                    )
+                compositions[index + 1] = follower.model_copy(update={
+                    "start": working.start + working.duration,
+                    "duration": follower_duration,
+                })
             updated = EditPlan.model_validate({
                 **plan.model_dump(mode="python"),
                 "compositions": compositions,
                 "created_at": utc_now(),
             })
+            script = self.store.load_plan(project.slug)
+            narration_duration = self.editorial_planner._timeline_duration(
+                script.scenes, self._editorial_word_timings(project),
+            )
+            tolerance = max(1.0 / updated.fps, 0.05)
+            if updated.duration + tolerance < narration_duration:
+                raise PipelineError("Editorial compositions cannot end before narration.")
+            if updated.duration > max(plan.duration, narration_duration + 20.0) + tolerance:
+                raise PipelineError("Editorial duration cannot extend far beyond narration.")
             self.store.save_edit_plan(project.slug, updated)
             self.store.save_edit_plan_provenance(
                 project.slug,
@@ -940,6 +971,12 @@ class PipelineService:
         assets = self.database.list_assets(project.id)
         words = self._editorial_word_timings(project)
         original_hash = self._editorial_hash(original.model_dump(mode="json"))
+        planner_input_hash = self._editorial_hash({
+            "project": project.model_dump(mode="json"),
+            "script": script.model_dump(mode="json"),
+            "word_timings": [word.to_dict() for word in words],
+            "assets": [asset.model_dump(mode="json") for asset in assets],
+        })
         self.editorial_planner.llm = self.director.llm
         replacement, draft = self.editorial_planner.regenerate_composition(
             project,
@@ -951,10 +988,24 @@ class PipelineService:
             mock_mode=self.mock_mode,
         )
         with self._lock:
-            current = self.store.load_edit_plan(project.slug)
+            current_project = self._project(project_id)
+            current = self.store.load_edit_plan(current_project.slug)
             if self._editorial_hash(current.model_dump(mode="json")) != original_hash:
                 raise PipelineError(
                     "The Editorial Edit Plan changed during regeneration; retry the composition."
+                )
+            current_script = self.store.load_plan(current_project.slug)
+            current_words = self._editorial_word_timings(current_project)
+            current_assets = self.database.list_assets(current_project.id)
+            current_input_hash = self._editorial_hash({
+                "project": current_project.model_dump(mode="json"),
+                "script": current_script.model_dump(mode="json"),
+                "word_timings": [word.to_dict() for word in current_words],
+                "assets": [asset.model_dump(mode="json") for asset in current_assets],
+            })
+            if current_input_hash != planner_input_hash:
+                raise PipelineError(
+                    "Editorial planner inputs changed during regeneration; retry the composition."
                 )
             compositions = [
                 replacement if item.id == composition_id else item
@@ -965,24 +1016,24 @@ class PipelineService:
                 "compositions": compositions,
                 "created_at": utc_now(),
             })
-            self.store.save_edit_plan(project.slug, updated)
+            self.store.save_edit_plan(current_project.slug, updated)
             self.store.save_edit_plan_provenance(
-                project.slug,
+                current_project.slug,
                 self._editorial_plan_provenance(
-                    project,
+                    current_project,
                     source_kind=EditPlanSourceKind.PLANNER,
-                    script=script,
-                    word_timings=words,
+                    script=current_script,
+                    word_timings=current_words,
                 ),
             )
             if draft is not None:
                 suffix = hashlib.sha256(composition_id.encode("utf-8")).hexdigest()[:16]
                 draft_path = (
-                    self.store.project_path(project)
+                    self.store.project_path(current_project)
                     / "editorial" / f"planner-draft-{suffix}.json"
                 )
                 self._atomic_json(draft_path, draft.model_dump(mode="json"))
-            self._invalidate_stages(project, {
+            self._invalidate_stages(current_project, {
                 "editorial_visual", "timeline", "render_preview",
                 "quality_control", "render_final", "thumbnails",
             })
