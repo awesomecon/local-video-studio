@@ -117,6 +117,68 @@ def test_editorial_composition_regeneration_is_explicit_and_scoped(tmp_path: Pat
     ).status_code == 404
 
 
+def test_editorial_asset_lock_and_local_replacement_are_protected(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Editorial Asset", "topic": "Protected local media",
+        "target_duration": 4, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    script = client.post(f"/api/projects/{project_id}/plan", json={}).json()
+    scene_id = script["scenes"][0]["id"]
+    plan = {
+        "project_id": project_id,
+        "compositions": [{
+            "id": "asset-comp", "start": 0, "duration": 4,
+            "template": "archiveCanvas",
+            "assets": [{
+                "id": "hero-asset", "type": "generated_image",
+                "evidence_class": "illustration", "locked": False,
+            }],
+            "elements": [{
+                "id": "hero", "type": "image", "asset_id": "hero-asset",
+                "role": "archive-photo",
+            }],
+            "events": [{"time": 0, "action": "fade", "target": "hero"}],
+            "narration_refs": [scene_id],
+        }],
+    }
+    assert client.put(
+        f"/api/projects/{project_id}/editorial/edit-plan", json=plan,
+    ).status_code == 200
+    asset_url = (
+        f"/api/projects/{project_id}/editorial/compositions/asset-comp/assets/hero-asset"
+    )
+    locked = client.patch(asset_url, json={"locked": True})
+    assert locked.status_code == 200
+    assert locked.json()["compositions"][0]["assets"][0]["locked"] is True
+
+    replaced = client.post(
+        asset_url + "/replace",
+        files={"file": ("replacement.png", b"local-image-bytes", "image/png")},
+        data={"evidence": "true"},
+    )
+    assert replaced.status_code == 200
+    planned = replaced.json()["compositions"][0]["assets"][0]
+    assert planned["id"] == "hero-asset"
+    assert planned["type"] == "user_uploaded_image"
+    assert planned["evidence_class"] == "evidence"
+    assert planned["locked"] is True
+    assert planned["metadata"]["manual_replacement"] is True
+    registered = next(
+        item for item in client.get(f"/api/projects/{project_id}").json()["assets"]
+        if item["id"] == planned["asset_id"]
+    )
+    assert registered["backend"] == "imported_local"
+    assert client.patch(asset_url, json={"locked": False}).status_code == 409
+
+
 def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path) -> None:
     app = create_app(
         load_config(environ={}),

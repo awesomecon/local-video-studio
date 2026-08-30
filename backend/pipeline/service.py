@@ -87,7 +87,10 @@ from backend.rendering.process import (
 )
 from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
-from backend.editorial.models import EditPlan, EditPlanProvenance, EditPlanSourceKind
+from backend.editorial.models import (
+    EditPlan, EditPlanProvenance, EditPlanSourceKind,
+    EditorialAssetType, EvidenceClass,
+)
 from backend.editorial.planner import EditorialPlanner
 from backend.editorial.renderer import EditorialRenderer, compile_edit_plan_html
 from backend.schemas import (
@@ -496,6 +499,158 @@ class PipelineService:
                 invalidated.add("editorial_visual")
             self._invalidate_stages(project, invalidated)
             return updated
+
+    def update_editorial_asset_lock(
+        self,
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+        *,
+        locked: bool,
+    ) -> EditPlan:
+        """Change only a planned asset lock; factual evidence can never be unlocked."""
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            plan = self.store.load_edit_plan(project.slug)
+            composition = next(
+                (item for item in plan.compositions if item.id == composition_id), None,
+            )
+            if composition is None:
+                raise KeyError(f"unknown Editorial composition {composition_id!r}")
+            planned_asset = next(
+                (item for item in composition.assets if item.id == editorial_asset_id), None,
+            )
+            if planned_asset is None:
+                raise KeyError(f"unknown Editorial asset {editorial_asset_id!r}")
+            if planned_asset.evidence_class is EvidenceClass.EVIDENCE and not locked:
+                raise PipelineError("factual evidence assets must remain locked")
+            if planned_asset.locked == locked:
+                return plan
+            assets = [
+                item.model_copy(update={"locked": locked})
+                if item.id == editorial_asset_id else item
+                for item in composition.assets
+            ]
+            updated_composition = composition.model_copy(update={"assets": assets})
+            return self._save_editorial_composition_change(
+                project, plan, updated_composition,
+            )
+
+    def replace_editorial_asset(
+        self,
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+        source_path: Path,
+        *,
+        original_filename: str,
+        evidence: bool = False,
+    ) -> EditPlan:
+        """Copy one local image into the project and bind it as a protected replacement."""
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            if not source_path.is_file() or source_path.stat().st_size <= 0:
+                raise ValueError("uploaded Editorial image is empty or unavailable")
+            suffix = Path(original_filename).suffix.lower()
+            if suffix not in self._IMPORTED_IMAGE_EXTENSIONS:
+                raise ValueError("Editorial replacements must be PNG, JPEG, WebP, BMP, GIF, or TIFF")
+            plan = self.store.load_edit_plan(project.slug)
+            composition = next(
+                (item for item in plan.compositions if item.id == composition_id), None,
+            )
+            if composition is None:
+                raise KeyError(f"unknown Editorial composition {composition_id!r}")
+            planned_asset = next(
+                (item for item in composition.assets if item.id == editorial_asset_id), None,
+            )
+            if planned_asset is None:
+                raise KeyError(f"unknown Editorial asset {editorial_asset_id!r}")
+            destination = (
+                self.store.project_path(project) / "editorial" / "assets"
+                / f"{uuid.uuid4()}{suffix}"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, destination)
+            result = GenerationResult(
+                outputs=(destination,),
+                metadata={
+                    "backend": "imported_local",
+                    "model": "user-supplied",
+                    "model_version": "local-import-v1",
+                    "workflow_version": "editorial-asset-replacement-v1",
+                    "seed": 0,
+                    "settings": {"original_filename": Path(original_filename).name},
+                },
+                peak_vram_gb=0,
+            )
+            registered = self._record_asset(
+                project,
+                None,
+                destination,
+                AssetType.IMAGE,
+                result,
+                role="editorial_replacement",
+                record_attempt=False,
+                extra_settings={
+                    "composition_id": composition_id,
+                    "editorial_asset_id": editorial_asset_id,
+                },
+            )
+            replacement = planned_asset.model_copy(update={
+                "type": EditorialAssetType.USER_UPLOADED_IMAGE,
+                "asset_id": registered.id,
+                "source": str(registered.filepath),
+                "evidence_class": (
+                    EvidenceClass.EVIDENCE if evidence else EvidenceClass.ILLUSTRATION
+                ),
+                "locked": True,
+                "label": Path(original_filename).name,
+                "metadata": {
+                    **planned_asset.metadata,
+                    "manual_replacement": True,
+                    "original_filename": Path(original_filename).name,
+                },
+            })
+            assets = [
+                replacement if item.id == editorial_asset_id else item
+                for item in composition.assets
+            ]
+            updated_composition = composition.model_copy(update={"assets": assets})
+            return self._save_editorial_composition_change(
+                project, plan, updated_composition,
+            )
+
+    def _save_editorial_composition_change(
+        self,
+        project: Project,
+        plan: EditPlan,
+        composition,
+    ) -> EditPlan:
+        compositions = [
+            composition if item.id == composition.id else item
+            for item in plan.compositions
+        ]
+        updated = EditPlan.model_validate({
+            **plan.model_dump(mode="python"),
+            "compositions": compositions,
+            "created_at": utc_now(),
+        })
+        self.store.save_edit_plan(project.slug, updated)
+        self.store.save_edit_plan_provenance(
+            project.slug,
+            self._editorial_plan_provenance(
+                project, source_kind=EditPlanSourceKind.MANUAL,
+            ),
+        )
+        self._invalidate_stages(project, {
+            "editorial_visual", "timeline", "render_preview",
+            "quality_control", "render_final", "thumbnails",
+        })
+        return updated
 
     def ensure_edit_plan(self, project_id: str) -> EditPlan:
         """Generate the first Edit Plan from the stored script and narration clock."""
