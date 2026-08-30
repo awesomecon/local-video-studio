@@ -17,7 +17,7 @@ from backend.schemas.models import DomainModel
 
 from .models import (
     EditPlan, EditorialAssetType, EditorialComposition, EditorialTemplate,
-    EvidenceClass, MotionPrimitive, TEMPLATE_ELEMENT_SLOTS,
+    EvidenceClass, MotionPrimitive, TEMPLATE_ELEMENT_SLOTS, TEMPLATE_REQUIRED_ROLES,
 )
 
 
@@ -429,6 +429,10 @@ class EditorialPlanner:
             "template_slots": {
                 template.value: {role: kind.value for role, kind in slots.items()}
                 for template, slots in TEMPLATE_ELEMENT_SLOTS.items()
+            },
+            "template_required_roles": {
+                template.value: sorted(roles)
+                for template, roles in TEMPLATE_REQUIRED_ROLES.items()
             },
             "approved_motion_primitives": [item.value for item in MotionPrimitive],
         }

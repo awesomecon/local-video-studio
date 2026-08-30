@@ -310,6 +310,9 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert context["word_timestamps"][-1]["end_seconds"] == 14.0
     assert context["approved_templates"] == [item.value for item in EditorialTemplate]
     assert context["template_slots"]["documentReveal"]["document"] == "document"
+    assert context["template_required_roles"]["comparisonCanvas"] == [
+        "left-image", "right-image",
+    ]
 
 
 def test_editorial_planner_resolves_verified_asset_without_trusting_llm_source() -> None:
