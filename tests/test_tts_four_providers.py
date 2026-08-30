@@ -705,3 +705,56 @@ def test_breeze_retries_single_flight_409(
         reference_audio=reference, reference_text="Ref.", seed=7,
     ))
     assert recorder[-1]["text"] == "Retried after 409."
+
+
+def _fake_breeze_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "breeze-tts"
+    (checkout / "breeze_infer").mkdir(parents=True)
+    (checkout / "breeze_infer" / "api.py").write_text("# pinned fake\n", encoding="utf-8")
+    (checkout / ".venv" / "bin").mkdir(parents=True)
+    (checkout / ".venv" / "bin" / "python").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    return checkout
+
+
+def test_breeze_source_root_uses_checkout_venv_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The supervisor launches the worker with <checkout>/.venv/bin/python and
+    # no LVS_BREEZE_TTS_SOURCE; the checkout must then be derived from it.
+    checkout = _fake_breeze_checkout(tmp_path)
+    monkeypatch.delenv("LVS_BREEZE_TTS_SOURCE", raising=False)
+    monkeypatch.setattr(sys, "executable", str(checkout / ".venv" / "bin" / "python"))
+    assert BreezeProvider._source_root() == checkout
+    assert BreezeProvider._venv_checkout_root() == checkout
+
+
+def test_breeze_source_root_env_beats_checkout_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = _fake_breeze_checkout(tmp_path)
+    explicit = tmp_path / "explicit-source"
+    (explicit / "breeze_infer").mkdir(parents=True)
+    (explicit / "breeze_infer" / "api.py").write_text("# pinned fake\n", encoding="utf-8")
+    monkeypatch.setenv("LVS_BREEZE_TTS_SOURCE", str(explicit))
+    monkeypatch.setattr(sys, "executable", str(checkout / ".venv" / "bin" / "python"))
+    assert BreezeProvider._source_root() == explicit
+
+
+def test_breeze_source_root_ignores_venv_without_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bare = tmp_path / "not-a-checkout"
+    (bare / ".venv" / "bin").mkdir(parents=True)
+    monkeypatch.delenv("LVS_BREEZE_TTS_SOURCE", raising=False)
+    monkeypatch.setattr(sys, "executable", str(bare / ".venv" / "bin" / "python"))
+    assert BreezeProvider._venv_checkout_root() is None
+    assert BreezeProvider._source_root() == Path.home() / "ai/services/breeze-tts"
+
+
+def test_breeze_source_root_plain_interpreter_falls_back_to_home_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LVS_BREEZE_TTS_SOURCE", raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    assert BreezeProvider._venv_checkout_root() is None
+    assert BreezeProvider._source_root() == Path.home() / "ai/services/breeze-tts"

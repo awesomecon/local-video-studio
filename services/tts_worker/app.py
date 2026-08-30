@@ -401,11 +401,31 @@ class BreezeProvider(SpeechProvider):
 
     @staticmethod
     def _source_root() -> Path:
-        return Path(
-            os.environ.get(
-                "LVS_BREEZE_TTS_SOURCE", str(Path.home() / "ai/services/breeze-tts"),
-            )
-        ).expanduser()
+        """Resolve the pinned checkout root.
+
+        Order: explicit ``LVS_BREEZE_TTS_SOURCE``; the checkout that owns the
+        venv this process runs in (``<checkout>/.venv/bin/python`` — how the
+        supervisor launches the worker, so relocated checkouts work without
+        any extra environment); finally the ``~/ai/services/breeze-tts``
+        default.
+        """
+        env_value = os.environ.get("LVS_BREEZE_TTS_SOURCE")
+        if env_value:
+            return Path(env_value).expanduser()
+        venv_root = BreezeProvider._venv_checkout_root()
+        if venv_root is not None:
+            return venv_root
+        return Path.home() / "ai/services/breeze-tts"
+
+    @staticmethod
+    def _venv_checkout_root() -> Path | None:
+        """Infer the checkout root when running under the checkout's own venv."""
+        exe = Path(sys.executable)
+        if exe.parent.name in ("bin", "Scripts") and exe.parent.parent.name == ".venv":
+            candidate = exe.parent.parent.parent
+            if (candidate / "breeze_infer" / "api.py").is_file():
+                return candidate
+        return None
 
     @staticmethod
     def _port_for(mode: str) -> int:

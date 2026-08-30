@@ -103,6 +103,10 @@ hashed).
   note carry that restriction.
 - The source is pinned (code SHA recorded in descriptors and take metadata); the shared application
   Python environment is never touched (the venv carries its own Torch build).
+- The checkout root is resolved in order: the `LVS_BREEZE_TTS_SOURCE` environment variable, then
+  the checkout that owns the venv running the worker (`<checkout>/.venv` — how the supervisor
+  launches it, so a relocated checkout works as long as `python_path` points at that venv), then
+  `~/ai/services/breeze-tts`.
 
 ## Voice and output behavior
 
