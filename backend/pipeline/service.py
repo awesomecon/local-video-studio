@@ -7388,6 +7388,13 @@ class PipelineService:
         return plan
 
     def _ensure_editorial_visual(self, project: Project, *, force: bool) -> Path:
+        # Hold the project mutation lock through stage publication. Otherwise an
+        # edit can invalidate the stage while an older render is running, only
+        # for that older render to mark itself complete afterward.
+        with self._lock:
+            return self._ensure_editorial_visual_locked(project, force=force)
+
+    def _ensure_editorial_visual_locked(self, project: Project, *, force: bool) -> Path:
         """Render the deterministic, silent Editorial canvas for common FFmpeg finishing."""
         if project.video_mode is not VideoMode.EDITORIAL:
             raise PipelineError("Editorial visual rendering requires an Editorial Mode project.")
@@ -7421,6 +7428,9 @@ class PipelineService:
                 clip_plan = self._editorial_composition_render_plan(plan, composition)
                 digest = self._editorial_composition_render_hash(root, clip_plan)
                 cached = previous.get(composition.id)
+                recorded_media_hash = (
+                    cached.get("media_sha256") if isinstance(cached, dict) else None
+                )
                 reusable = bool(
                     not force
                     and isinstance(cached, dict)
@@ -7428,13 +7438,17 @@ class PipelineService:
                     and cached.get("file") == clip_name
                     and clip.is_file()
                     and clip.stat().st_size > 0
+                    and isinstance(recorded_media_hash, str)
+                    and self._incremental_hash(clip) == recorded_media_hash
                 )
                 if not reusable:
                     renderer.render(clip_plan, clip, asset_root=root)
+                media_hash = self._incremental_hash(clip)
                 entries[composition.id] = {
                     "index": index,
                     "file": clip_name,
                     "sha256": digest,
+                    "media_sha256": media_hash,
                     "duration": composition.duration,
                 }
                 clips.append(clip)
@@ -7459,7 +7473,21 @@ class PipelineService:
     def _editorial_composition_render_plan(
         plan: EditPlan, composition: EditorialComposition,
     ) -> EditPlan:
-        local = composition.model_copy(update={"start": 0.0})
+        start_frame = round(composition.start * plan.fps)
+        end_frame = round((composition.start + composition.duration) * plan.fps)
+        frame_duration = (end_frame - start_frame) / plan.fps
+        events = [
+            event.model_copy(update={
+                "time": min(event.time, frame_duration),
+                "duration": min(event.duration, frame_duration),
+            })
+            for event in composition.events
+        ]
+        local = composition.model_copy(update={
+            "start": 0.0,
+            "duration": frame_duration,
+            "events": events,
+        })
         return EditPlan.model_validate({
             "project_id": plan.project_id,
             "width": plan.width,

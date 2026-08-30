@@ -70,6 +70,28 @@ def test_edit_plan_rejects_unknown_motion_and_targets() -> None:
         EditPlan.model_validate(base)
 
 
+def test_edit_plan_requires_frame_valid_contiguous_compositions() -> None:
+    first = EditorialComposition(
+        id="first", start=0, duration=2, template=EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[EditorialElement(
+            id="first-title", type=EditorialElementType.TEXT,
+            text="FIRST", role="headline",
+        )],
+    )
+    gapped = EditorialComposition(
+        id="gapped", start=3, duration=1, template=EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[EditorialElement(
+            id="gap-title", type=EditorialElementType.TEXT,
+            text="GAP", role="headline",
+        )],
+    )
+    with pytest.raises(ValidationError, match="must be contiguous"):
+        EditPlan(project_id="p", fps=24, compositions=[first, gapped])
+    too_short = first.model_copy(update={"duration": 0.001})
+    with pytest.raises(ValidationError, match="at least one frame"):
+        EditPlan(project_id="p", fps=24, compositions=[too_short])
+
+
 def test_compiler_escapes_text_and_emits_seek_contract() -> None:
     plan = EditPlan(project_id="p", compositions=[EditorialComposition(
         id="c", start=0, duration=2, template=EditorialTemplate.ARCHIVE_CANVAS,
@@ -562,3 +584,9 @@ def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path:
     assert set(manifest["entries"]) == {"first", "second"}
     info = probe_media(root / "editorial" / "master.mp4", pipeline.renderer.binaries)
     assert info.has_video and info.duration_seconds >= narration_duration - 0.1
+    first_clip = root / "editorial" / "compositions" / manifest["entries"]["first"]["file"]
+    first_clip.write_bytes(b"corrupt-but-nonempty")
+    pipeline._invalidate_stages(project, {"editorial_visual"})
+    pipeline._ensure_editorial_visual(project, force=False)
+    assert [call[0].compositions[0].id for call in synthetic.calls][-1] == "first"
+    assert probe_media(first_clip, pipeline.renderer.binaries).has_video
