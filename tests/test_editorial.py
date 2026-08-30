@@ -463,6 +463,30 @@ def test_editorial_planner_mock_fallback_is_valid_and_project_owned() -> None:
     compile_edit_plan_html(plan)
 
 
+def test_template_retarget_avoids_ids_already_used_by_preserved_images() -> None:
+    project = Project(
+        title="Collision", topic="Safe retarget", target_duration=4,
+        slug="collision", video_mode=VideoMode.EDITORIAL,
+    )
+    composition = EditorialComposition.model_validate({
+        "id": "collision", "start": 0, "duration": 4,
+        "template": "archiveCanvas",
+        "assets": [{"id": "photo", "type": "generated_image"}],
+        "elements": [
+            {"id": "headline", "type": "image", "asset_id": "photo", "role": "archive-photo"},
+            {"id": "year", "type": "text", "text": "1949", "role": "year"},
+        ],
+        "events": [{"time": 0, "action": "fade", "target": "headline"}],
+    })
+
+    retargeted = PipelineService._retarget_editorial_template(
+        project, composition, EditorialTemplate.ILLUSTRATION_CANVAS,
+    )
+
+    assert [item.id for item in retargeted.elements] == ["headline", "headline-2"]
+    assert len({item.id for item in retargeted.elements}) == len(retargeted.elements)
+
+
 class _SyntheticEditorialRenderer:
     def __init__(self, ffmpeg) -> None:
         self.ffmpeg = ffmpeg

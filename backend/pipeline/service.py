@@ -958,29 +958,40 @@ class PipelineService:
                 )
                 for position, asset in enumerate(composition.assets)
             ]
+        used_element_ids = {item.id for item in images}
+
+        def new_element_id(base: str) -> str:
+            candidate = base
+            suffix = 2
+            while candidate in used_element_ids:
+                candidate = f"{base}-{suffix}"
+                suffix += 1
+            used_element_ids.add(candidate)
+            return candidate
+
         headline = texts[0].text if texts else project.title.upper()
         second_text = texts[1].text if len(texts) > 1 else ""
         elements: list[EditorialElement]
         if template is EditorialTemplate.ARCHIVE_CANVAS:
             elements = [EditorialElement(
-                id="headline", type=EditorialElementType.TEXT,
+                id=new_element_id("headline"), type=EditorialElementType.TEXT,
                 text=headline, role="year",
             )]
             if images:
                 elements.append(images[0].model_copy(update={"role": "archive-photo"}))
             if second_text:
                 elements.append(EditorialElement(
-                    id="reveal", type=EditorialElementType.TEXT,
+                    id=new_element_id("reveal"), type=EditorialElementType.TEXT,
                     text=second_text, role="reveal",
                 ))
         elif template is EditorialTemplate.DOCUMENT_REVEAL:
             elements = [EditorialElement(
-                id="document", type=EditorialElementType.DOCUMENT,
+                id=new_element_id("document"), type=EditorialElementType.DOCUMENT,
                 text=headline, role="document",
             )]
             if second_text:
                 elements.append(EditorialElement(
-                    id="annotation", type=EditorialElementType.TEXT,
+                    id=new_element_id("annotation"), type=EditorialElementType.TEXT,
                     text=second_text, role="annotation",
                 ))
             if images:
@@ -992,7 +1003,7 @@ class PipelineService:
                 images[0].model_copy(update={"role": "left-image"}),
                 images[1].model_copy(update={"role": "right-image"}),
                 EditorialElement(
-                    id="headline", type=EditorialElementType.TEXT,
+                    id=new_element_id("headline"), type=EditorialElementType.TEXT,
                     text=headline, role="headline",
                 ),
             ]
@@ -1002,23 +1013,23 @@ class PipelineService:
             elements = [
                 images[0].model_copy(update={"role": "illustration"}),
                 EditorialElement(
-                    id="headline", type=EditorialElementType.TEXT,
+                    id=new_element_id("headline"), type=EditorialElementType.TEXT,
                     text=headline, role="headline",
                 ),
             ]
             if second_text:
                 elements.append(EditorialElement(
-                    id="supporting-text", type=EditorialElementType.TEXT,
+                    id=new_element_id("supporting-text"), type=EditorialElementType.TEXT,
                     text=second_text, role="supporting-text",
                 ))
         else:
             elements = [EditorialElement(
-                id="headline", type=EditorialElementType.TEXT,
+                id=new_element_id("headline"), type=EditorialElementType.TEXT,
                 text=headline, role="headline",
             )]
             if second_text:
                 elements.append(EditorialElement(
-                    id="kicker", type=EditorialElementType.TEXT,
+                    id=new_element_id("kicker"), type=EditorialElementType.TEXT,
                     text=second_text, role="kicker",
                 ))
         actions = {
