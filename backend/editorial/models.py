@@ -76,6 +76,55 @@ class EditorialElementType(StrEnum):
     BLACK_SCREEN = "black_screen"
 
 
+TEMPLATE_ELEMENT_SLOTS: dict[
+    EditorialTemplate, dict[str, EditorialElementType]
+] = {
+    EditorialTemplate.ARCHIVE_CANVAS: {
+        "year": EditorialElementType.TEXT,
+        "archive-photo": EditorialElementType.IMAGE,
+        "paper": EditorialElementType.DOCUMENT,
+        "document-mark": EditorialElementType.UNDERLINE,
+        "ruler-grid": EditorialElementType.RULER_NODES,
+        "reveal": EditorialElementType.TEXT,
+    },
+    EditorialTemplate.DOCUMENT_REVEAL: {
+        "document": EditorialElementType.DOCUMENT,
+        "title": EditorialElementType.TEXT,
+        "passage-mark": EditorialElementType.UNDERLINE,
+        "annotation": EditorialElementType.TEXT,
+        "context-image": EditorialElementType.IMAGE,
+        "connector": EditorialElementType.LINE,
+    },
+    EditorialTemplate.COMPARISON_CANVAS: {
+        "headline": EditorialElementType.TEXT,
+        "left-image": EditorialElementType.IMAGE,
+        "right-image": EditorialElementType.IMAGE,
+        "left-label": EditorialElementType.TEXT,
+        "right-label": EditorialElementType.TEXT,
+        "divider": EditorialElementType.LINE,
+    },
+    EditorialTemplate.ILLUSTRATION_CANVAS: {
+        "illustration": EditorialElementType.IMAGE,
+        "headline": EditorialElementType.TEXT,
+        "supporting-text": EditorialElementType.TEXT,
+        "technical-line": EditorialElementType.LINE,
+    },
+    EditorialTemplate.BIG_TEXT_REVEAL: {
+        "headline": EditorialElementType.TEXT,
+        "kicker": EditorialElementType.TEXT,
+        "blackout": EditorialElementType.BLACK_SCREEN,
+    },
+}
+
+TEMPLATE_REQUIRED_ROLES: dict[EditorialTemplate, frozenset[str]] = {
+    EditorialTemplate.ARCHIVE_CANVAS: frozenset(),
+    EditorialTemplate.DOCUMENT_REVEAL: frozenset({"document"}),
+    EditorialTemplate.COMPARISON_CANVAS: frozenset({"left-image", "right-image"}),
+    EditorialTemplate.ILLUSTRATION_CANVAS: frozenset({"illustration"}),
+    EditorialTemplate.BIG_TEXT_REVEAL: frozenset({"headline"}),
+}
+
+
 class EditorialAsset(DomainModel):
     id: str = Field(default_factory=new_id, min_length=1, max_length=120)
     type: EditorialAssetType
@@ -166,25 +215,23 @@ class EditorialComposition(DomainModel):
         roles = [element.role for element in self.elements if element.role]
         if len(roles) != len(set(roles)):
             raise ValueError("element roles must be unique within a composition")
-        if self.template is EditorialTemplate.ARCHIVE_CANVAS:
-            archive_slots = {
-                "year": EditorialElementType.TEXT,
-                "archive-photo": EditorialElementType.IMAGE,
-                "paper": EditorialElementType.DOCUMENT,
-                "document-mark": EditorialElementType.UNDERLINE,
-                "ruler-grid": EditorialElementType.RULER_NODES,
-                "reveal": EditorialElementType.TEXT,
-            }
-            for element in self.elements:
-                expected = archive_slots.get(element.role)
-                if expected is None:
-                    raise ValueError(
-                        f"archiveCanvas does not define element role {element.role!r}"
-                    )
-                if element.type is not expected:
-                    raise ValueError(
-                        f"archiveCanvas role {element.role!r} requires type {expected.value}"
-                    )
+        slots = TEMPLATE_ELEMENT_SLOTS[self.template]
+        for element in self.elements:
+            expected = slots.get(element.role)
+            if expected is None:
+                raise ValueError(
+                    f"{self.template.value} does not define element role {element.role!r}"
+                )
+            if element.type is not expected:
+                raise ValueError(
+                    f"{self.template.value} role {element.role!r} requires type {expected.value}"
+                )
+        missing_roles = TEMPLATE_REQUIRED_ROLES[self.template] - set(roles)
+        if missing_roles:
+            raise ValueError(
+                f"{self.template.value} requires element roles "
+                f"{', '.join(sorted(missing_roles))}"
+            )
         known_assets = set(asset_ids)
         for element in self.elements:
             if element.asset_id and element.asset_id not in known_assets:

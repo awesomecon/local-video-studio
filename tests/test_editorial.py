@@ -55,7 +55,9 @@ def test_edit_plan_rejects_unknown_motion_and_targets() -> None:
     base = {
         "project_id": "p", "compositions": [{
             "id": "c", "start": 0, "duration": 2, "template": "bigTextReveal",
-            "elements": [{"id": "title", "type": "text", "text": "Exact"}],
+            "elements": [{
+                "id": "title", "type": "text", "text": "Exact", "role": "headline",
+            }],
             "events": [{"time": 0, "action": "inventedGlitch", "target": "title"}],
         }],
     }
@@ -162,12 +164,60 @@ def test_archive_template_rejects_unapproved_roles_and_generated_evidence() -> N
         )
 
 
-def test_prototype_compiler_rejects_unimplemented_templates() -> None:
-    plan = build_project_mars_prototype()
-    plan.compositions[0].template = EditorialTemplate.DOCUMENT_REVEAL
+@pytest.mark.parametrize(("template", "elements"), [
+    ("documentReveal", [
+        {"id": "doc", "type": "document", "text": "Verified passage", "role": "document"},
+        {"id": "mark", "type": "underline", "role": "passage-mark"},
+    ]),
+    ("comparisonCanvas", [
+        {"id": "left", "type": "image", "asset_id": "left-asset", "role": "left-image"},
+        {"id": "right", "type": "image", "asset_id": "right-asset", "role": "right-image"},
+    ]),
+    ("illustrationCanvas", [
+        {"id": "hero", "type": "image", "asset_id": "hero-asset", "role": "illustration"},
+    ]),
+    ("bigTextReveal", [
+        {"id": "headline", "type": "text", "text": "ELON", "role": "headline"},
+    ]),
+])
+def test_template_slot_contracts_accept_only_renderer_owned_roles(
+    template: str, elements: list[dict],
+) -> None:
+    asset_ids = sorted({item["asset_id"] for item in elements if item.get("asset_id")})
+    assets = [
+        {"id": asset_id, "type": "generated_image", "evidence_class": "illustration"}
+        for asset_id in asset_ids
+    ]
+    composition = EditorialComposition.model_validate({
+        "id": "contract", "start": 0, "duration": 4, "template": template,
+        "assets": assets, "elements": elements,
+    })
+    assert composition.template.value == template
+    broken = {**elements[0], "role": "invented-slot"}
+    with pytest.raises(ValidationError, match="does not define element role"):
+        EditorialComposition.model_validate({
+            "id": "broken", "start": 0, "duration": 4, "template": template,
+            "assets": assets, "elements": [broken, *elements[1:]],
+        })
 
-    with pytest.raises(ValueError, match="supports only archiveCanvas"):
-        compile_edit_plan_html(plan)
+
+@pytest.mark.parametrize(("template", "elements", "missing"), [
+    ("documentReveal", [], "document"),
+    ("comparisonCanvas", [
+        {"id": "left", "type": "image", "asset_id": "left-asset", "role": "left-image"},
+    ], "right-image"),
+    ("illustrationCanvas", [], "illustration"),
+    ("bigTextReveal", [], "headline"),
+])
+def test_template_contracts_require_their_core_visual_slots(
+    template: str, elements: list[dict], missing: str,
+) -> None:
+    assets = ([{"id": "left-asset", "type": "generated_image"}] if elements else [])
+    with pytest.raises(ValidationError, match=missing):
+        EditorialComposition.model_validate({
+            "id": "missing", "start": 0, "duration": 4, "template": template,
+            "assets": assets, "elements": elements,
+        })
 
 
 class _PlannerLLM:
@@ -235,7 +285,8 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert "HTML, CSS, JavaScript" in llm.calls[0]["messages"][0]["content"]
     context = json.loads(llm.calls[0]["messages"][1]["content"])
     assert context["word_timestamps"][-1]["end_seconds"] == 14.0
-    assert context["approved_templates"] == ["archiveCanvas"]
+    assert context["approved_templates"] == [item.value for item in EditorialTemplate]
+    assert context["template_slots"]["documentReveal"]["document"] == "document"
 
 
 def test_editorial_planner_resolves_verified_asset_without_trusting_llm_source() -> None:
