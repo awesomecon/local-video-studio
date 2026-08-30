@@ -43,16 +43,43 @@
  *    previous checkbox value with the standard error surfaces, and the
  *    Edit Plan is never GET/PUT on this path); a "Show compositions"
  *    action that is the ONLY fetcher of the full Edit Plan (explicit
- *    click via edit_plan_url; the compact read-only list renders
- *    untrusted plan content as validated text and degrades malformed
- *    compositions to placeholders instead of crashing); and a
+ *    click via edit_plan_url; the compact list renders untrusted plan
+ *    content as validated text and degrades malformed compositions to
+ *    placeholders instead of crashing); and a
  *    "Download Edit Plan JSON" link built solely from a valid
  *    project-local /api/projects/ path scoped to this project, with
  *    ?download=true appended for backends that honor it.
+ *  - While the composition list is open, every composition that validates
+ *    defensively gets inline editing controls, all built from the mounted
+ *    snapshot project id and validated plan ids (plan-authored URLs are
+ *    never trusted): Regenerate this composition (bodyless POST to the
+ *    composition's regenerate endpoint, 600s timeout, never auto-retried);
+ *    save duration (PATCH {duration}); change template (PATCH
+ *    {template} from the five-template allowlist); save deterministic
+ *    text of existing text/document elements (PATCH
+ *    {text_updates:{elementId:text}}); change existing event actions
+ *    (PATCH {event_actions:{eventIndex:motion primitive}} from the 15-primitive
+ *    allowlist); lock/unlock a planned asset (PATCH the asset endpoint
+ *    with {locked}); and replace one planned asset from a user-selected
+ *    local image (multipart POST to the asset's /replace endpoint with
+ *    `file` + `evidence` fields, same-origin credentials, normalized
+ *    errors, no manual Content-Type, no retry). Evidence assets render as
+ *    locked and offer no unlock. Malformed entries (non-string ids,
+ *    unknown templates/actions, non-boolean flags, non-finite numbers)
+ *    have their controls omitted or disabled, never a crash or a request
+ *    to an unknown target. At most one Editorial mutation runs at a time
+ *    per region: all list controls and the fetch/retry actions are
+ *    disabled while one is in flight, duplicate clicks are no-ops, and a
+ *    failed mutation restores the editable values/controls from the last
+ *    good plan with the standard inline error + toast. A successful
+ *    mutation keeps the list open and re-renders it from the returned
+ *    validated plan payload — no extra Edit Plan GET and no snapshot
+ *    re-fetch (provenance self-heals on the next live tick).
  *  - The region's live-update hook and an explicit Refresh never replace
  *    an in-flight Generate Edit Plan POST, an in-flight display-setting
- *    PATCH, or an open (loading / shown / errored) composition list, and
- *    never re-issue their requests.
+ *    PATCH, an in-flight composition mutation, or an open (loading /
+ *    shown / errored) composition list, and never re-issue their
+ *    requests.
  */
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
@@ -64,6 +91,8 @@ import {
 import {
   getProject, editProject, generateEditPlan,
   patchEditorialSettings, getEditPlan,
+  regenerateEditorialComposition, editEditorialComposition,
+  setEditorialAssetLock, replaceEditorialAsset,
 } from "../api.js";
 import {
   field,
@@ -634,6 +663,34 @@ const STALE_REASON_TEXT = {
 };
 
 /**
+ * The five Editorial template names the backend accepts; anything else in a
+ * plan is untrusted and disables the template control rather than being
+ * offered as an option.
+ * @type {string[]}
+ */
+export const EDITORIAL_TEMPLATES = [
+  "archiveCanvas", "documentReveal", "comparisonCanvas",
+  "illustrationCanvas", "bigTextReveal",
+];
+
+/**
+ * The fifteen motion primitives the backend accepts as event actions;
+ * anything else in a plan disables that event's control.
+ * @type {string[]}
+ */
+export const MOTION_PRIMITIVES = [
+  "fade", "fadeUp", "slideInLeft", "slideInRight", "scaleIn", "slowPush",
+  "paperSlide", "underline", "highlight", "drawLine", "staggerIn",
+  "dimOthers", "focusOne", "collapseToBlack", "hardCut",
+];
+
+/** Element types whose deterministic text the backend allows editing. */
+const EDITABLE_TEXT_ELEMENT_TYPES = ["text", "document"];
+
+/** Backend bounds for a composition duration (seconds). */
+const COMPOSITION_DURATION_LIMIT = 120;
+
+/**
  * Reduce the snapshot's optional provenance metadata to a panel state.
  * Only the recognized plan_status values are trusted: "stale" (with a
  * best-effort list of readable reasons), "untracked", and "current". A
@@ -743,14 +800,17 @@ export function safeEditPlanDownloadUrl(value, projectId = null) {
  * open composition list; unit tests pass detached instances of the same
  * shape.
  * @typedef {Object} EditorialController
- * @property {""|"generate"|"settings"} busy — mutation in flight in this region
+ * @property {""|"generate"|"settings"|"composition"} busy — mutation in flight in this region
  * @property {"idle"|"loading"|"ready"|"error"} compositions — composition list state
  * @property {number} fetchSeq — invalidates in-flight composition fetches after a reset
+ * @property {unknown} plan — last validated plan payload (from the explicit
+ *   GET or a successful composition mutation's response); failure recovery
+ *   re-renders the open list from it
  */
 
 /** @returns {EditorialController} */
 export function createEditorialController() {
-  return { busy: "", compositions: "idle", fetchSeq: 0 };
+  return { busy: "", compositions: "idle", fetchSeq: 0, plan: null };
 }
 
 /** @type {WeakMap<HTMLElement, EditorialController>} */
@@ -956,38 +1016,384 @@ export function summarizeEditPlanCompositions(plan) {
 }
 
 /**
+ * Validate an Edit Plan payload into per-composition editing data (the
+ * source for the inline composition controls). The plan is untrusted: only
+ * strictly-typed, recognizable fields yield controls. A malformed
+ * composition entry degrades to placeholder values with its controls
+ * omitted or disabled — never a crash, and never a request aimed at an
+ * unresolvable target (non-string ids produce no endpoint at all).
+ * @param {unknown} plan
+ * @returns {{ok: boolean, compositions: Array<{
+ *   id: string | null, start: number | null, duration: number | null,
+ *   template: string | null, templateKnown: boolean,
+ *   assets: Array<{id: string | null, hasId: boolean, label: string, type: string | null, evidence: boolean, locked: boolean}>,
+ *   elements: Array<{id: string | null, hasId: boolean, role: string, type: string | null, text: string | null, editable: boolean}>,
+ *   events: Array<{index: number, action: string | null, actionKnown: boolean}>
+ * }>}}
+ */
+export function parseCompositionEditor(plan) {
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)
+    || !Array.isArray(plan.compositions)) {
+    return { ok: false, compositions: [] };
+  }
+  const num = (v) => (typeof v === "number" && Number.isFinite(v)) ? v : null;
+  const rows = plan.compositions.map((entry) => {
+    const comp = (entry && typeof entry === "object" && !Array.isArray(entry)) ? entry : {};
+    const template = (typeof comp.template === "string") ? comp.template : null;
+    return {
+      id: (typeof comp.id === "string" && comp.id) ? comp.id : null,
+      start: num(comp.start),
+      duration: num(comp.duration),
+      template,
+      templateKnown: template != null && EDITORIAL_TEMPLATES.includes(template),
+      assets: (Array.isArray(comp.assets) ? comp.assets : []).map((a) => {
+        const obj = (a && typeof a === "object" && !Array.isArray(a)) ? a : {};
+        const assetId = (typeof obj.id === "string" && obj.id) ? obj.id : null;
+        return {
+          id: assetId,
+          hasId: assetId != null,
+          label: (typeof obj.label === "string" && obj.label) ? obj.label : (assetId || "—"),
+          type: (typeof obj.type === "string") ? obj.type : null,
+          evidence: obj.evidence_class === "evidence",
+          locked: obj.locked === true,
+        };
+      }),
+      elements: (Array.isArray(comp.elements) ? comp.elements : []).map((e) => {
+        const obj = (e && typeof e === "object" && !Array.isArray(e)) ? e : {};
+        const elementId = (typeof obj.id === "string" && obj.id) ? obj.id : null;
+        const type = (typeof obj.type === "string") ? obj.type : null;
+        const text = (typeof obj.text === "string") ? obj.text : null;
+        return {
+          id: elementId,
+          hasId: elementId != null,
+          role: (typeof obj.role === "string" && obj.role) ? obj.role : (elementId || "element"),
+          type,
+          text,
+          editable: elementId != null && text != null
+            && EDITABLE_TEXT_ELEMENT_TYPES.includes(type),
+        };
+      }),
+      events: (Array.isArray(comp.events) ? comp.events : []).map((ev, index) => {
+        const obj = (ev && typeof ev === "object" && !Array.isArray(ev)) ? ev : {};
+        const action = (typeof obj.action === "string") ? obj.action : null;
+        return { index, action, actionKnown: action != null && MOTION_PRIMITIVES.includes(action) };
+      }),
+    };
+  });
+  return { ok: true, compositions: rows };
+}
+
+/**
+ * Enable/disable every interactive control inside the open composition
+ * list. Used while a mutation is in flight (one in flight at a time per
+ * region) so no second mutation can start from any row.
+ * @param {HTMLElement} listRoot
+ * @param {boolean} disabled
+ */
+function setListControlsDisabled(listRoot, disabled) {
+  for (const node of listRoot.querySelectorAll("button, input, select")) {
+    node.disabled = disabled;
+  }
+}
+
+/**
+ * Inline editing controls for one validated composition. Every control is
+ * omitted or disabled unless its plan data is strictly valid, and every
+ * mutation URL is built from the mounted project id plus validated plan
+ * ids (never from plan-authored data).
+ * @param {ReturnType<typeof parseCompositionEditor>["compositions"][number]} data
+ * @param {{projectId: string, ctrl: EditorialController, errors: HTMLElement, runMutation: (call: () => Promise<any>, context: string) => Promise<any>}} ctx
+ * @returns {HTMLElement | null}
+ */
+function buildCompositionControls(data, ctx) {
+  if (!data.id) return null; // no validated id -> no endpoint -> no controls
+  const groups = [
+    buildRegenControl(data, ctx),
+    buildDurationControl(data, ctx),
+    buildTemplateControl(data, ctx),
+  ];
+  const textGroup = buildTextControls(data, ctx);
+  if (textGroup) groups.push(textGroup);
+  const eventGroup = buildEventControls(data, ctx);
+  if (eventGroup) groups.push(eventGroup);
+  const assetGroup = buildAssetControls(data, ctx);
+  if (assetGroup) groups.push(assetGroup);
+  return el("div", { class: "stack" }, ...groups);
+}
+
+/** "Regenerate this composition" — bodyless POST, 600s timeout, no retry. */
+function buildRegenControl(data, ctx) {
+  const btn = el("button", { class: "btn btn-sm", type: "button", "data-ed-regen": data.id }, "Regenerate");
+  btn.addEventListener("click", () => {
+    if (ctx.ctrl.busy !== "" || btn.disabled) return; // one mutation in flight
+    btn.disabled = true;
+    btn.textContent = "Regenerating…";
+    void ctx.runMutation(
+      () => regenerateEditorialComposition(state.config, ctx.projectId, data.id),
+      "Composition regeneration failed");
+  });
+  return el("div", { class: "row" }, btn);
+}
+
+/** Duration editor: number input (0 < d <= limit) + save {duration}. */
+function buildDurationControl(data, ctx) {
+  const input = el("input", {
+    type: "number", "data-ed-duration": data.id,
+    min: "0", max: String(COMPOSITION_DURATION_LIMIT), step: "any",
+    value: data.duration != null ? String(data.duration) : "",
+    style: { width: "110px" },
+  });
+  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-duration": data.id }, "Save duration");
+  const readValue = () => {
+    const raw = input.value.trim();
+    const value = Number(raw);
+    return raw !== "" && Number.isFinite(value) && value > 0 && value <= COMPOSITION_DURATION_LIMIT
+      ? value
+      : null;
+  };
+  const refresh = () => {
+    if (ctx.ctrl.busy !== "") return;
+    const value = readValue();
+    save.disabled = value == null || (data.duration != null && value === data.duration);
+  };
+  input.addEventListener("input", refresh);
+  input.addEventListener("change", refresh);
+  refresh();
+  save.addEventListener("click", () => {
+    if (ctx.ctrl.busy !== "") return;
+    const value = readValue();
+    if (value == null) {
+      ctx.errors.replaceChildren(banner(el("div", {},
+        `Duration must be a number between 0 and ${COMPOSITION_DURATION_LIMIT} seconds.`)));
+      return;
+    }
+    if (data.duration != null && value === data.duration) return;
+    void ctx.runMutation(
+      () => editEditorialComposition(state.config, ctx.projectId, data.id, { duration: value }),
+      "Composition duration not saved");
+  });
+  return el("div", { class: "row", style: { gap: "8px" } },
+    el("span", { class: "muted small" }, "Duration (s)"), input, save);
+}
+
+/** Template selector restricted to the five-template allowlist. */
+function buildTemplateControl(data, ctx) {
+  const select = el("select", { "data-ed-template": data.id },
+    ...EDITORIAL_TEMPLATES.map((t) => el("option", { value: t }, t)));
+  if (data.templateKnown) select.value = data.template;
+  else select.disabled = true; // unknown plan template: disabled, never guessed
+  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-template": data.id }, "Save template");
+  const refresh = () => {
+    if (ctx.ctrl.busy !== "") return;
+    save.disabled = !data.templateKnown || select.value === data.template;
+  };
+  select.addEventListener("change", refresh);
+  refresh();
+  save.addEventListener("click", () => {
+    if (ctx.ctrl.busy !== "" || !data.templateKnown) return;
+    if (select.value === data.template) return;
+    void ctx.runMutation(
+      () => editEditorialComposition(state.config, ctx.projectId, data.id, { template: select.value }),
+      "Template change not saved");
+  });
+  return el("div", { class: "row", style: { gap: "8px" } },
+    el("span", { class: "muted small" }, "Template"), select, save,
+    !data.templateKnown
+      ? el("span", { class: "muted small" }, `current “${data.template || "unknown"}” not recognized`)
+      : null);
+}
+
+/** Text inputs for existing text/document elements + save {text_updates}. */
+function buildTextControls(data, ctx) {
+  const editable = data.elements.filter((e) => e.editable);
+  if (!editable.length) return null;
+  const items = editable.map((e) => ({
+    e,
+    input: el("input", {
+      type: "text", "data-ed-text": e.id, value: e.text,
+      maxlength: "4000", style: { width: "280px" },
+    }),
+  }));
+  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-text": data.id }, "Save text");
+  const changed = () => items.filter(({ e, input }) => input.value !== e.text);
+  const refresh = () => {
+    if (ctx.ctrl.busy !== "") return;
+    save.disabled = changed().length === 0;
+  };
+  for (const { input } of items) {
+    input.addEventListener("input", refresh);
+    input.addEventListener("change", refresh);
+  }
+  refresh();
+  save.addEventListener("click", () => {
+    if (ctx.ctrl.busy !== "") return;
+    /** @type {Record<string, string>} */
+    const updates = {};
+    for (const { e, input } of items) {
+      if (input.value === e.text) continue;
+      if (e.type === "text" && !input.value.trim()) {
+        ctx.errors.replaceChildren(banner(el("div", {},
+          `The text of element ${e.role} cannot be empty.`)));
+        return;
+      }
+      updates[e.id] = input.value;
+    }
+    if (!Object.keys(updates).length) return;
+    void ctx.runMutation(
+      () => editEditorialComposition(state.config, ctx.projectId, data.id, { text_updates: updates }),
+      "Composition text not saved");
+  });
+  return el("div", { class: "stack" },
+    el("span", { class: "muted small" }, "Deterministic text (text / document elements):"),
+    ...items.map(({ e, input }) => el("div", { class: "row", style: { gap: "8px" } },
+      el("span", { class: "muted small", style: { minWidth: "110px" } }, e.role), input)),
+    el("div", {}, save));
+}
+
+/** Action selectors for existing events + save {event_actions}. */
+function buildEventControls(data, ctx) {
+  if (!data.events.length) return null;
+  const items = data.events.map((ev) => {
+    const select = el("select", { "data-ed-event": String(ev.index) },
+      ...MOTION_PRIMITIVES.map((a) => el("option", { value: a }, a)));
+    if (ev.actionKnown) select.value = ev.action;
+    else select.disabled = true; // unknown plan action: disabled, never guessed
+    return { ev, select };
+  });
+  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-events": data.id }, "Save events");
+  const changed = () => items.filter(({ ev, select }) => ev.actionKnown && select.value !== ev.action);
+  const refresh = () => {
+    if (ctx.ctrl.busy !== "") return;
+    save.disabled = changed().length === 0;
+  };
+  for (const { select } of items) select.addEventListener("change", refresh);
+  refresh();
+  save.addEventListener("click", () => {
+    if (ctx.ctrl.busy !== "") return;
+    /** @type {Record<number, string>} */
+    const actions = {};
+    for (const { ev, select } of items) {
+      if (!ev.actionKnown || select.value === ev.action) continue;
+      actions[ev.index] = select.value;
+    }
+    if (!Object.keys(actions).length) return;
+    void ctx.runMutation(
+      () => editEditorialComposition(state.config, ctx.projectId, data.id, { event_actions: actions }),
+      "Event actions not saved");
+  });
+  return el("div", { class: "stack" },
+    el("span", { class: "muted small" }, "Event actions:"),
+    ...items.map(({ ev, select }) => el("div", { class: "row", style: { gap: "8px" } },
+      el("span", { class: "muted small", style: { minWidth: "110px" } }, `event ${ev.index}`), select)),
+    el("div", {}, save));
+}
+
+/**
+ * Per-asset lock + local-image replacement. Evidence assets render as
+ * locked with no unlock control; assets without a valid id get no controls
+ * at all. Replacement is a multipart POST (file + evidence fields) to the
+ * asset's /replace endpoint.
+ */
+function buildAssetControls(data, ctx) {
+  if (!data.assets.length) return null;
+  const rows = data.assets.map((asset) => {
+    const row = el("div", { class: "row wrap", style: { gap: "8px" } });
+    row.append(el("span", { class: "mono small", style: { minWidth: "140px" }, title: asset.id || "" }, asset.label));
+    if (!asset.hasId) {
+      row.append(el("span", { class: "muted small" }, "unrecognized asset id — controls hidden"));
+      return row;
+    }
+    if (asset.evidence) {
+      // Factual evidence is always locked: state is shown, no unlock offered.
+      row.append(el("span", { class: "badge neutral", "data-ed-asset-state": asset.id }, "Locked (evidence)"));
+    } else {
+      const lock = el("button", { class: "btn btn-ghost btn-sm", type: "button", "data-ed-lock": asset.id },
+        asset.locked ? "Unlock" : "Lock");
+      lock.addEventListener("click", () => {
+        if (ctx.ctrl.busy !== "") return; // one mutation in flight
+        void ctx.runMutation(
+          () => setEditorialAssetLock(state.config, ctx.projectId, data.id, asset.id, !asset.locked),
+          "Asset lock not saved");
+      });
+      row.append(lock);
+    }
+    const fileInput = el("input", { type: "file", accept: "image/*", "data-ed-file": asset.id });
+    const evidenceCheck = el("input", { type: "checkbox", checked: asset.evidence, "data-ed-evidence": asset.id });
+    const replaceBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button", "data-ed-replace": asset.id }, "Replace");
+    replaceBtn.disabled = true;
+    fileInput.addEventListener("change", () => {
+      replaceBtn.disabled = ctx.ctrl.busy !== ""
+        || !fileInput.files || fileInput.files.length === 0;
+    });
+    replaceBtn.addEventListener("click", () => {
+      if (ctx.ctrl.busy !== "") return;
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      void ctx.runMutation(
+        () => replaceEditorialAsset(state.config, ctx.projectId, data.id, asset.id, file, evidenceCheck.checked),
+        "Asset replacement failed");
+    });
+    row.append(
+      el("span", { class: "muted small" }, "Replace with local image:"),
+      fileInput,
+      evidenceCheck,
+      el("span", { class: "muted small" }, "evidence"),
+      replaceBtn,
+    );
+    return row;
+  });
+  return el("div", { class: "stack" },
+    el("span", { class: "muted small" }, "Planned assets:"),
+    ...rows);
+}
+
+/**
+ * One composition row: the read-only summary plus the inline editing
+ * controls. All plan strings are rendered as text nodes / attributes only.
  * @param {ReturnType<typeof summarizeEditPlanCompositions>["compositions"][number]} sum
+ * @param {ReturnType<typeof parseCompositionEditor>["compositions"][number]} data
+ * @param {{projectId: string, ctrl: EditorialController, errors: HTMLElement, runMutation: (call: () => Promise<any>, context: string) => Promise<any>}} ctx
  * @returns {HTMLElement}
  */
-function compositionRow(sum) {
+function compositionItem(sum, data, ctx) {
   const startText = sum.start != null ? fmtDuration(sum.start) : "—";
   const durationText = sum.duration != null ? fmtDuration(sum.duration) : "—";
   const counts =
     `${sum.assetCount} assets · ${sum.elementCount} elements · ${sum.eventCount} events · ` +
     `${sum.narrationRefCount} narration refs · ${sum.evidenceAssetCount} evidence · ` +
     `${sum.illustrationAssetCount} illustration · ${sum.lockedAssetCount} locked`;
-  return el("div", { class: "row wrap", role: "listitem", style: { gap: "10px" } },
-    el("span", { class: "badge neutral" }, String(sum.index)),
-    // Plan text is untrusted: rendered as text nodes / attributes only, never
-    // as raw HTML.
-    el("span", { class: "mono small", title: sum.id }, sum.id),
-    el("span", { class: "small" }, `start ${startText} · duration ${durationText}`),
-    el("span", { class: "small muted" }, sum.template),
-    el("span", { class: "small muted" }, counts),
+  const item = el("div", { class: "ed-comp", role: "listitem" });
+  if (data.id) item.setAttribute("data-ed-comp", data.id);
+  item.append(
+    el("div", { class: "row wrap", style: { gap: "10px" } },
+      el("span", { class: "badge neutral" }, String(sum.index)),
+      // Plan text is untrusted: rendered as text nodes / attributes only, never
+      // as raw HTML.
+      el("span", { class: "mono small", title: sum.id }, sum.id),
+      el("span", { class: "small" }, `start ${startText} · duration ${durationText}`),
+      el("span", { class: "small muted" }, sum.template),
+      el("span", { class: "small muted" }, counts),
+    ),
   );
+  const controls = buildCompositionControls(data, ctx);
+  if (controls) item.append(el("div", { class: "mt" }, controls));
+  return item;
 }
 
 /**
- * @param {{ok: boolean, compositions: Array<any>}} summary
+ * The open composition list: summary rows plus inline editing controls.
+ * @param {ReturnType<typeof summarizeEditPlanCompositions>["compositions"]} sums
+ * @param {ReturnType<typeof parseCompositionEditor>["compositions"]} rows — same order
+ * @param {{projectId: string, ctrl: EditorialController, errors: HTMLElement, runMutation: (call: () => Promise<any>, context: string) => Promise<any>}} ctx
  * @returns {HTMLElement}
  */
-function renderCompositionList(summary) {
-  if (!summary.compositions.length) {
+function renderCompositionList(sums, rows, ctx) {
+  if (!sums.length) {
     return el("div", { class: "muted small" }, "This Edit Plan has no compositions.");
   }
   return el("div", { class: "stack", role: "list", "aria-label": "Compositions" },
-    el("div", { class: "small" }, `Compositions (${summary.compositions.length})`),
-    ...summary.compositions.map(compositionRow),
+    el("div", { class: "small" }, `Compositions (${sums.length})`),
+    ...sums.map((sum, i) => compositionItem(sum, rows[i], ctx)),
   );
 }
 
@@ -1003,7 +1409,7 @@ function renderCompositionList(summary) {
  * @param {EditorialController} ctrl
  * @returns {HTMLElement | null}
  */
-function buildCompositionBlock(editorial, ctrl, projectId) {
+function buildCompositionBlock(editorial, ctrl, projectId, errors) {
   // The action is only offered for a project-local API path: the backend
   // always provides /api/projects/{id}/editorial/edit-plan, and any other
   // shape is malformed metadata, not a fetch target.
@@ -1014,7 +1420,8 @@ function buildCompositionBlock(editorial, ctrl, projectId) {
   const retry = el("button", { class: "btn", type: "button" }, "Retry");
   const startLoad = () => {
     if (ctrl.compositions === "loading") return; // no duplicate fetches
-    void loadCompositions(planUrl, target, button, retry, ctrl);
+    if (ctrl.busy !== "") return;
+    void loadCompositions(planUrl, target, button, retry, ctrl, projectId, errors);
   };
   button.addEventListener("click", startLoad);
   retry.addEventListener("click", startLoad);
@@ -1028,7 +1435,7 @@ function buildCompositionBlock(editorial, ctrl, projectId) {
  * @param {HTMLElement} retry — the error-state retry action
  * @param {EditorialController} ctrl
  */
-async function loadCompositions(planUrl, target, button, retry, ctrl) {
+async function loadCompositions(planUrl, target, button, retry, ctrl, projectId, errors) {
   const seq = ++ctrl.fetchSeq;
   ctrl.compositions = "loading";
   button.disabled = true;
@@ -1038,7 +1445,8 @@ async function loadCompositions(planUrl, target, button, retry, ctrl) {
     const plan = await getEditPlan(state.config, planUrl);
     if (seq !== ctrl.fetchSeq) return; // the region was reset underneath us
     const summary = summarizeEditPlanCompositions(plan);
-    if (!summary.ok) {
+    const editor = parseCompositionEditor(plan);
+    if (!summary.ok || !editor.ok) {
       ctrl.compositions = "error";
       target.replaceChildren(errorPanel(
         new Error("The Edit Plan is not a readable composition list."),
@@ -1046,7 +1454,43 @@ async function loadCompositions(planUrl, target, button, retry, ctrl) {
       ));
     } else {
       ctrl.compositions = "ready";
-      target.replaceChildren(renderCompositionList(summary));
+      const renderPlan = (value) => {
+        const nextSummary = summarizeEditPlanCompositions(value);
+        const nextEditor = parseCompositionEditor(value);
+        if (!nextSummary.ok || !nextEditor.ok) {
+          throw new Error("The updated Edit Plan is not a readable composition list.");
+        }
+        ctrl.plan = value;
+        const runMutation = async (call, context) => {
+          if (ctrl.busy !== "") return null;
+          const priorPlan = ctrl.plan;
+          ctrl.busy = "composition";
+          button.disabled = true;
+          retry.disabled = true;
+          setListControlsDisabled(target, true);
+          errors.replaceChildren();
+          try {
+            const updated = await call();
+            ctrl.busy = "";
+            renderPlan(updated);
+            return updated;
+          } catch (err) {
+            ctrl.busy = "";
+            errors.replaceChildren(errorPanel(err));
+            toastError(err, context);
+            if (priorPlan) renderPlan(priorPlan);
+            return null;
+          } finally {
+            button.disabled = false;
+            retry.disabled = false;
+          }
+        };
+        const ctx = { projectId, ctrl, errors, runMutation };
+        target.replaceChildren(renderCompositionList(
+          nextSummary.compositions, nextEditor.compositions, ctx,
+        ));
+      };
+      renderPlan(plan);
     }
   } catch (err) {
     if (seq !== ctrl.fetchSeq) return;
@@ -1142,7 +1586,7 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
       body.append(el("div", { class: "muted small mt" },
         "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — Open Preview shows it as-is."));
     }
-    const compositionBlock = buildCompositionBlock(editorial, ctrlState, projectId);
+    const compositionBlock = buildCompositionBlock(editorial, ctrlState, projectId, errors);
     if (compositionBlock) body.append(compositionBlock);
   }
   body.append(errors);

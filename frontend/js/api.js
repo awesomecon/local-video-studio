@@ -1032,6 +1032,141 @@ export function getEditPlan(config, editPlanUrl, opts = {}) {
   return request(config, editPlanUrl, { timeoutMs: 30000, ...opts });
 }
 
+/**
+ * Local Editorial composition path, built from the mounted snapshot's
+ * project id plus a validated plan composition id. Every segment is
+ * encodeURIComponent'd so a hostile id can never escape the project's
+ * subtree or inject path separators; plan-authored URLs are never used.
+ * @param {string} projectId — the mounted snapshot's project id
+ * @param {string} compositionId — a validated (non-empty string) plan id
+ */
+function editorialCompositionPath(projectId, compositionId) {
+  return `/api/projects/${encodeURIComponent(projectId)}/editorial/compositions/${encodeURIComponent(compositionId)}`;
+}
+
+/**
+ * POST /api/projects/{id}/editorial/compositions/{compositionId}/regenerate
+ * Explicitly re-plans ONE composition (synchronous; it can run as long as a
+ * full plan generation, hence the 600s timeout). Bodyless by contract.
+ * Non-idempotent and never auto-retried: one click issues exactly one
+ * request, and a repeat is a new explicit user action. The response is the
+ * updated validated Edit Plan, which the UI renders directly without a
+ * follow-up GET.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} compositionId
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
+ */
+export function regenerateEditorialComposition(config, projectId, compositionId, opts = {}) {
+  return request(config, `${editorialCompositionPath(projectId, compositionId)}/regenerate`, {
+    method: "POST", timeoutMs: 600000, ...opts,
+  });
+}
+
+/**
+ * PATCH /api/projects/{id}/editorial/compositions/{compositionId}
+ * Narrow deterministic edits; the body carries only the provided keys among
+ * `duration` (number, 0 < d <= 120), `template` (one of the five Editorial
+ * templates), `text_updates` ({elementId: text}), and `event_actions`
+ * ({eventIndex: motion primitive}). The backend rejects anything else and
+ * returns the updated validated Edit Plan, which the UI renders directly.
+ * One request per call: no retry wrapping.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} compositionId
+ * @param {{duration?: number, template?: string, text_updates?: Record<string, string>, event_actions?: Record<number, string>}} body
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
+ */
+export function editEditorialComposition(config, projectId, compositionId, body, opts = {}) {
+  return request(config, editorialCompositionPath(projectId, compositionId), {
+    method: "PATCH", body, timeoutMs: 60000, ...opts,
+  });
+}
+
+/**
+ * PATCH /api/projects/{id}/editorial/compositions/{compositionId}/assets/{assetId}
+ * with `{locked: boolean}` — lock/unlock one planned asset. Factual evidence
+ * assets can never be unlocked (the backend refuses with a conflict). One
+ * request, no retry.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} compositionId
+ * @param {string} assetId — the planned (editorial) asset id
+ * @param {boolean} locked
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
+ */
+export function setEditorialAssetLock(config, projectId, compositionId, assetId, locked, opts = {}) {
+  return request(config,
+    `${editorialCompositionPath(projectId, compositionId)}/assets/${encodeURIComponent(assetId)}`,
+    { method: "PATCH", body: { locked }, timeoutMs: 15000, ...opts });
+}
+
+/**
+ * POST /api/projects/{id}/editorial/compositions/{compositionId}/assets/{assetId}/replace
+ * Multipart upload of one user-selected local image replacing a planned
+ * asset. Fields: `file` (the image) and `evidence` ("true"/"false"). Uses
+ * same-origin credentials, the browser-set multipart boundary (no manual
+ * Content-Type), and normalized errors; it never retries. The response is
+ * the updated validated Edit Plan.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} compositionId
+ * @param {string} assetId
+ * @param {File} file — the user-selected local image
+ * @param {boolean} evidence — classify the replacement as factual evidence
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
+ */
+export async function replaceEditorialAsset(config, projectId, compositionId, assetId, file, evidence, opts = {}) {
+  if (!(file instanceof File) && !(file instanceof Blob) || !file.size) {
+    throw new ApiErrorInstance({
+      kind: "validation",
+      message: "Select a non-empty local image file to replace this asset.",
+      status: null,
+      action: null,
+      retryable: false,
+    });
+  }
+  const path = `${editorialCompositionPath(projectId, compositionId)}/assets/${encodeURIComponent(assetId)}/replace`;
+  const url = apiUrl(config, path);
+  const form = new FormData();
+  form.append("file", file);
+  form.append("evidence", String(!!evidence));
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST", body: form, credentials: "same-origin", signal: opts.signal,
+    });
+  } catch (err) {
+    throw new ApiErrorInstance(normalizeError(err, {
+      url,
+      userAborted: !!(opts.signal && opts.signal.aborted),
+    }));
+  }
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!res.ok) {
+    const detail = body && typeof body === "object" && "detail" in body ? body.detail : body;
+    throw new ApiErrorInstance(classifyHttpError(res.status, detail));
+  }
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ApiErrorInstance({
+      kind: "incompatible",
+      message: "Backend returned a non-JSON response",
+      status: res.status,
+      action: null,
+      retryable: false,
+    });
+  }
+}
+
 /** GET /api/music/models */
 export function musicModels(config, opts = {}) {
   return request(config, "/api/music/models", { timeoutMs: 15000, ...opts });

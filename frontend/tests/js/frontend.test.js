@@ -114,6 +114,7 @@ import {
   renderEditorialRegion,
   buildEditorialDisplayControls,
   summarizeEditPlanCompositions,
+  parseCompositionEditor,
   safeEditPlanDownloadUrl,
   localApiPath,
   projectEditorialApiPath,
@@ -1718,6 +1719,161 @@ await recordAsync("editorial-compositions: Open Preview is kept and the open lis
     EDITORIAL_PROJECT, { ...COMPOSITION_META, plan_status: "stale", stale_reasons: ["script"] }));
   eq(region.querySelector("[role=list]"), list, "the open list is not rebuilt by a live tick");
   eq(calls.filter((c) => c.url === EDIT_PLAN_URL).length, 1, "the tick re-issues no Edit Plan fetch");
+});
+
+/* --- 11b. Editorial composition mutations ------------------------------- */
+
+const EDITOR_PLAN = {
+  ...SAMPLE_PLAN,
+  compositions: [{
+    id: "comp/ edit", start: 0, duration: 5, template: "illustrationCanvas",
+    assets: [
+      { id: "asset/one", label: "Hero", type: "generated_image", evidence_class: "illustration", locked: false },
+      { id: "evidence", label: "Archive", type: "historical_photo", evidence_class: "evidence", locked: true },
+    ],
+    elements: [
+      { id: "headline", type: "text", text: "1949", role: "headline" },
+      { id: "document", type: "document", text: "Project Mars", role: "supporting-text" },
+      { id: "hero", type: "image", asset_id: "asset/one", role: "illustration" },
+    ],
+    events: [{ time: 0, action: "fadeUp", target: "headline" }],
+    narration_refs: ["scene-1"], caption_refs: [],
+  }],
+};
+
+record("editorial-editor: strict parser exposes only validated controls", () => {
+  const parsed = parseCompositionEditor(EDITOR_PLAN);
+  assert(parsed.ok, "valid composition array is readable");
+  eq(parsed.compositions[0].templateKnown, true);
+  eq(parsed.compositions[0].elements.map((item) => item.editable), [true, true, false]);
+  eq(parsed.compositions[0].events[0].actionKnown, true);
+  eq(parsed.compositions[0].assets[1].evidence, true);
+  const malformed = parseCompositionEditor({ compositions: [{
+    id: 12, template: "invented", duration: Infinity,
+    assets: [{ id: null, locked: "yes" }],
+    elements: [{ id: "x", type: "html", text: "<img onerror=alert(1)>" }],
+    events: [{ action: "inventedGlitch" }],
+  }] }).compositions[0];
+  eq(malformed.id, null, "non-string ids cannot become endpoints");
+  eq(malformed.templateKnown, false, "unknown templates are disabled");
+  eq(malformed.duration, null, "non-finite durations are rejected");
+  eq(malformed.elements[0].editable, false, "unknown element types cannot be edited");
+  eq(malformed.events[0].actionKnown, false, "unknown motion is disabled");
+});
+
+await recordAsync("editorial-editor: regeneration and all deterministic PATCHes are exact and do not refetch", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  let current = structuredClone(EDITOR_PLAN);
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === EDIT_PLAN_URL) return { payload: current };
+    if (call.method === "POST" && call.url.endsWith("/regenerate")) return { payload: current };
+    if (call.method === "PATCH" && call.url.includes("/editorial/compositions/")) {
+      if (call.body.duration != null) current.compositions[0].duration = call.body.duration;
+      if (call.body.template) current.compositions[0].template = call.body.template;
+      if (call.body.text_updates) current.compositions[0].elements[0].text = call.body.text_updates.headline;
+      if (call.body.event_actions) current.compositions[0].events[0].action = call.body.event_actions[0];
+      return { payload: current };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  const encoded = "/api/projects/proj-ed/editorial/compositions/comp%2F%20edit";
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Regenerate").click();
+  await flush();
+  eq(calls.at(-1), { url: `${encoded}/regenerate`, method: "POST", body: null }, "bodyless regeneration");
+
+  let input = region.querySelector('[data-ed-duration="comp/ edit"]');
+  input.value = "6";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Save duration").click();
+  await flush();
+  eq(calls.at(-1), { url: encoded, method: "PATCH", body: { duration: 6 } });
+
+  let select = region.querySelector('[data-ed-template="comp/ edit"]');
+  select.value = "archiveCanvas";
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Save template").click();
+  await flush();
+  eq(calls.at(-1), { url: encoded, method: "PATCH", body: { template: "archiveCanvas" } });
+
+  input = region.querySelector('[data-ed-text="headline"]');
+  input.value = "ELON";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Save text").click();
+  await flush();
+  eq(calls.at(-1), { url: encoded, method: "PATCH", body: { text_updates: { headline: "ELON" } } });
+
+  select = region.querySelector('[data-ed-event="0"]');
+  select.value = "collapseToBlack";
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Save events").click();
+  await flush();
+  eq(calls.at(-1), { url: encoded, method: "PATCH", body: { event_actions: { 0: "collapseToBlack" } } });
+  eq(calls.filter((call) => call.method === "GET").length, 1,
+    "returned plans update the open editor without an automatic GET");
+  eq(region.querySelector('[data-ed-text="headline"]').value, "ELON",
+    "returned text is visible in the retained editor");
+});
+
+await recordAsync("editorial-editor: asset locking is scoped and evidence offers no unlock", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "GET") return { payload: EDITOR_PLAN };
+    return { payload: EDITOR_PLAN };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  assert(region.textContent.includes("Locked (evidence)"), "evidence lock is fixed");
+  const unlocks = [...region.querySelectorAll("button")].filter((b) => b.textContent === "Unlock");
+  eq(unlocks.length, 0, "evidence never offers unlock");
+  [...region.querySelectorAll("button")].find((b) => b.textContent === "Lock").click();
+  await flush();
+  eq(calls.at(-1), {
+    url: "/api/projects/proj-ed/editorial/compositions/comp%2F%20edit/assets/asset%2Fone",
+    method: "PATCH", body: { locked: true },
+  });
+  eq(calls.filter((call) => call.method === "GET").length, 1, "locking does not refetch the plan");
+});
+
+await recordAsync("editorial-editor: local replacement sends multipart once with no manual content type", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = [];
+  globalThis.fetch = (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    return Promise.resolve({
+      ok: true, status: 200,
+      text: () => Promise.resolve(JSON.stringify(EDITOR_PLAN)),
+    });
+  };
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  findCompositionsButton(region).click();
+  await flush();
+  const fileInput = region.querySelector('[data-ed-file="asset/one"]');
+  const image = new File([new Uint8Array([1, 2, 3])], "replacement.png", { type: "image/png" });
+  Object.defineProperty(fileInput, "files", { configurable: true, value: [image] });
+  fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+  const evidence = region.querySelector('[data-ed-evidence="asset/one"]');
+  evidence.checked = true;
+  const replace = region.querySelector('[data-ed-replace="asset/one"]');
+  replace.click();
+  replace.click();
+  await flush();
+  eq(calls.length, 2, "one explicit GET and one guarded replacement POST");
+  const call = calls[1];
+  eq(call.url,
+    "/api/projects/proj-ed/editorial/compositions/comp%2F%20edit/assets/asset%2Fone/replace");
+  eq(call.opts.method, "POST");
+  assert(call.opts.body instanceof FormData, "replacement body is multipart FormData");
+  eq(call.opts.body.get("file").name, "replacement.png");
+  eq(call.opts.body.get("evidence"), "true");
+  eq(call.opts.credentials, "same-origin");
+  assert(!call.opts.headers, "the browser owns the multipart Content-Type boundary");
 });
 
 record("editorial-download: the link is built only from a project-local edit_plan_url", () => {
