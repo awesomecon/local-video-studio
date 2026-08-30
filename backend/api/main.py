@@ -21,7 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from backend.core import AppConfig, inspect_environment, load_config
 from backend.core.h3_policy import h3_policy_payload
 from backend.core.ports import select_application_port
-from backend.editorial import EditPlan, compile_edit_plan_html
+from backend.editorial import (
+    EditPlan, EditorialTemplate, MotionPrimitive, compile_edit_plan_html,
+)
 from backend.models import LocalLLMBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
@@ -51,6 +53,14 @@ class EditorialSettingsEdit(BaseModel):
 class EditorialAssetLockEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     locked: bool
+
+
+class EditorialCompositionEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    duration: float | None = Field(default=None, gt=0, le=120)
+    template: EditorialTemplate | None = None
+    text_updates: dict[str, str] = Field(default_factory=dict, max_length=50)
+    event_actions: dict[int, MotionPrimitive] = Field(default_factory=dict, max_length=100)
 
 
 class ApproveRequest(BaseModel):
@@ -888,6 +898,30 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.patch(
+        "/api/projects/{project_id}/editorial/compositions/{composition_id}"
+    )
+    def update_editorial_composition(
+        project_id: str,
+        composition_id: str,
+        request: EditorialCompositionEdit,
+    ) -> dict[str, Any]:
+        try:
+            return service.update_editorial_composition(
+                project_id,
+                composition_id,
+                duration=request.duration,
+                template=request.template,
+                text_updates=request.text_updates,
+                event_actions=request.event_actions,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except PipelineError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
