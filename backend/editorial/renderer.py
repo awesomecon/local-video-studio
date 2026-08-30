@@ -28,7 +28,7 @@ from .models import (
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
-EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v4-captions"
+EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v6-responsive-type"
 
 
 def _script_json(value: Any) -> str:
@@ -82,6 +82,16 @@ def _card_tag(asset: EditorialAsset | None, default: str) -> str:
 
 def _portrait_fallback() -> str:
     return '<div class="photo-art"><div class="portrait-head"></div><div class="portrait-body"></div></div>'
+
+
+def _big_headline_class(text: str) -> str:
+    """Choose a deterministic size tier for exact on-screen headlines."""
+    compact_length = len("".join(text.split()))
+    if compact_length >= 18:
+        return " big-headline-long"
+    if compact_length >= 10:
+        return " big-headline-medium"
+    return ""
 
 
 def _archive_markup(
@@ -259,7 +269,7 @@ def _big_text_markup(
         <div class="research-layer">
           <div class="kicker-rule"></div>
           <div id="{escape(kicker.id if kicker else 'kicker', quote=True)}" class="big-kicker editorial-element editorial-type">{escape(kicker.text if kicker else "")}</div>
-          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline{_big_headline_class(headline.text if headline else '')} editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
           <div class="draft-label editorial-type">FIG. 05 · STATED</div>
         </div>
         <div id="{escape(blackout.id if blackout else 'blackout', quote=True)}" class="blackout editorial-element"></div>
@@ -350,7 +360,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .ruler-node:before{{content:"";position:absolute;left:12px;right:12px;top:50%;height:1px;background:#6f91a680}} .ruler-node span{{position:absolute;right:10px;top:8px;font:17px monospace}}
 .ruler-node.focus{{border-color:var(--rust);background:#4e271d;color:#ffd8bd;box-shadow:inset 0 0 0 3px #b9532f}}
 .draft-label{{position:absolute;left:80px;bottom:64px;font:18px monospace;letter-spacing:3px;color:#6f91a6}}
-.elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;font-size:210px;font-weight:900;letter-spacing:8px;color:var(--ivory);opacity:0}}
+.elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;padding:0 48px;text-align:center;white-space:nowrap;font-size:170px;font-weight:900;line-height:.92;letter-spacing:6px;color:var(--ivory);opacity:0}}
 /* documentReveal */
 .document-title{{position:absolute;left:72px;right:72px;top:96px;font-size:104px;font-weight:900;line-height:1.02;letter-spacing:2px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
 .source-sheet{{position:absolute;left:64px;right:64px;top:352px;height:872px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(1deg)}}
@@ -384,6 +394,8 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .kicker-rule{{position:absolute;left:50%;top:560px;width:120px;height:2px;margin-left:-60px;background:var(--rust)}}
 .big-kicker{{position:absolute;left:72px;right:72px;top:604px;text-align:center;font-size:34px;font-weight:700;letter-spacing:12px;text-transform:uppercase;color:var(--blue)}}
 .big-headline{{position:absolute;left:40px;right:40px;top:712px;text-align:center;font-size:250px;font-weight:900;line-height:.95;letter-spacing:4px;color:var(--ivory);text-shadow:0 10px 40px #000a}}
+.big-headline-medium{{font-size:130px;letter-spacing:1px}}
+.big-headline-long{{font-size:170px;line-height:.92;letter-spacing:2px}}
 .landscape .line-a{{left:70px;top:72px;height:920px}} .landscape .line-b{{left:70px;right:70px;top:1000px}}
 .landscape .year{{left:70px;top:62px;font-size:154px}}
 .landscape .archive-photo{{left:82px;top:270px;width:650px;height:610px}}
@@ -409,7 +421,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .landscape .illustration-headline{{left:1270px;right:70px;top:380px;font-size:82px}}
 .landscape .supporting-copy{{left:1270px;right:70px;top:570px}}
 .landscape .kicker-rule{{top:290px}} .landscape .big-kicker{{top:330px}}
-.landscape .big-headline{{top:430px;font-size:230px}}
+.landscape .big-headline{{top:430px;font-size:230px}} .landscape .big-headline-medium{{font-size:170px}} .landscape .big-headline-long{{font-size:150px}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
 .editorial-text-disabled .ruler-node span{{visibility:hidden}}
