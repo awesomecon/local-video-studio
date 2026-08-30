@@ -435,6 +435,7 @@ class EditorialPlanner:
                 for template, roles in TEMPLATE_REQUIRED_ROLES.items()
             },
             "approved_motion_primitives": [item.value for item in MotionPrimitive],
+            "approved_image_models": ["krea", "qwen_image", "ideogram4_local"],
         }
 
     @staticmethod
@@ -464,8 +465,10 @@ class EditorialPlanner:
             "the core visual roles implied by the template. Element ids may be concise unique slugs; "
             "events target those ids. Use only supplied narration refs and registered asset ids. "
             "Set source=null: the application resolves registered assets. A missing visual may be "
-            "recommended as generated_image with evidence_class=illustration, but generated media "
-            "is never evidence. Evidence requires a supplied imported_local asset and locked=true. "
+            "recommended as generated_image with evidence_class=illustration. For each such asset, "
+            "include validated generation instructions with a concrete visual-only prompt, optional "
+            "negative_prompt, seed, and one approved_image_model. Generated media is never evidence. "
+            "Evidence requires a supplied imported_local asset and locked=true. "
             "Important dates, names, quotations, and labels belong in deterministic text elements, "
             "not image prompts. Keep captions separate from editorial text. Use restrained, "
             "deliberate events from the approved motion list and keep every event within its "

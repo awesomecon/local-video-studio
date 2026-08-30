@@ -91,7 +91,7 @@ from backend.editorial.models import (
     EditPlan, EditPlanProvenance, EditPlanSourceKind,
     EditorialAssetType, EditorialComposition, EditorialElement,
     EditorialElementType, EditorialEvent, EditorialTemplate,
-    EvidenceClass, MotionPrimitive,
+    EditorialImageModel, EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
 from backend.editorial.renderer import (
@@ -643,6 +643,153 @@ class PipelineService:
             return self._save_editorial_composition_change(
                 project, plan, updated_composition,
             )
+
+    def generate_editorial_asset(
+        self,
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+    ) -> EditPlan:
+        """Explicitly generate and bind one illustration without changing scene media."""
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            plan = self.store.load_edit_plan(project.slug)
+            composition = next(
+                (item for item in plan.compositions if item.id == composition_id), None,
+            )
+            if composition is None:
+                raise KeyError(f"unknown Editorial composition {composition_id!r}")
+            planned_asset = next(
+                (item for item in composition.assets if item.id == editorial_asset_id), None,
+            )
+            if planned_asset is None:
+                raise KeyError(f"unknown Editorial asset {editorial_asset_id!r}")
+            if planned_asset.type is not EditorialAssetType.GENERATED_IMAGE:
+                raise PipelineError("only generated_image Editorial recommendations can be generated")
+            if planned_asset.generation is None:
+                raise PipelineError("the Editorial asset has no validated generation instructions")
+            if planned_asset.locked or planned_asset.metadata.get("manual_replacement") is True:
+                raise PipelineError("the Editorial asset is protected from generation")
+            if not composition.narration_refs:
+                raise PipelineError("the Editorial composition has no source narration scene")
+            source_scene = self.database.get_scene(composition.narration_refs[0])
+            if source_scene is None or source_scene.project_id != project.id:
+                raise PipelineError("the Editorial composition source scene is unavailable")
+
+            spec = planned_asset.generation
+            model_map = {
+                EditorialImageModel.KREA: (ImageModelOption.KREA, VisualType.KREA2_STILL),
+                EditorialImageModel.QWEN_IMAGE: (
+                    ImageModelOption.QWEN_IMAGE, VisualType.QWEN_IMAGE_STILL,
+                ),
+                EditorialImageModel.IDEOGRAM4_LOCAL: (
+                    ImageModelOption.IDEOGRAM4_LOCAL, VisualType.IDEOGRAM4_STILL,
+                ),
+            }
+            image_model, visual_type = model_map[spec.model]
+            synthetic = Scene.model_validate({
+                **source_scene.model_dump(mode="python"),
+                "id": f"editorial-{uuid.uuid4()}",
+                "title": planned_asset.label or source_scene.title,
+                "visual_prompt": spec.prompt,
+                "negative_prompt": spec.negative_prompt,
+                "visual_type": visual_type,
+                "preferred_image_model": image_model.value,
+                "seed": spec.seed,
+                "needs_embedded_text": False,
+                "text_in_image": "",
+                "settings": {},
+                "locked": False,
+                "status": SceneStatus.DRAFT,
+            })
+            job = self.jobs.enqueue(GenerationJob(
+                project_id=project.id,
+                stage="editorial_asset_generate",
+                backend="mock" if self.mock_mode else image_model.value,
+                parameters={
+                    "composition_id": composition_id,
+                    "editorial_asset_id": editorial_asset_id,
+                    "model": image_model.value,
+                    "seed": spec.seed,
+                },
+            ))
+            generated_root = self.store.project_path(project) / "editorial" / "assets" / "generated"
+            token = str(uuid.uuid4())
+            work_dir = generated_root / f".pending-{token}"
+            destination = generated_root / f"{token}.png"
+            work_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                self.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
+                self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
+                if self.mock_mode:
+                    result = self._mock_generate(
+                        project, "image", project_dir=work_dir,
+                        prompt=spec.prompt, negative_prompt=spec.negative_prompt,
+                        seed=spec.seed,
+                        width=min(project.resolution[0], 640),
+                        height=min(project.resolution[1], 640),
+                    )
+                else:
+                    with self._gpu_lock:
+                        result = self._dispatch_image_model(
+                            project, synthetic, work_dir, image_model, use_cache=True,
+                        )
+                if not result.outputs or not result.outputs[0].is_file():
+                    raise PipelineError("Editorial image generation returned no image")
+                from PIL import Image, UnidentifiedImageError
+
+                try:
+                    with Image.open(result.outputs[0]) as image:
+                        image.verify()
+                except (OSError, UnidentifiedImageError) as exc:
+                    raise PipelineError("Editorial image generation returned an invalid image") from exc
+                generated_root.mkdir(parents=True, exist_ok=True)
+                os.replace(result.outputs[0], destination)
+                published_result = GenerationResult(
+                    outputs=(destination,), metadata=result.metadata,
+                    peak_vram_gb=result.peak_vram_gb,
+                )
+                registered = self._record_asset(
+                    project, None, destination, AssetType.IMAGE, published_result,
+                    role="editorial_generated", job_id=job.id,
+                    extra_settings={
+                        "composition_id": composition_id,
+                        "editorial_asset_id": editorial_asset_id,
+                        "source_scene_id": source_scene.id,
+                        "generation_model": spec.model.value,
+                    },
+                )
+                replacement = planned_asset.model_copy(update={
+                    "asset_id": registered.id,
+                    "source": str(registered.filepath),
+                    "evidence_class": EvidenceClass.ILLUSTRATION,
+                    "metadata": {
+                        **planned_asset.metadata,
+                        "generated_via": "existing_image_pipeline",
+                    },
+                })
+                updated = self._save_editorial_composition_change(
+                    project, plan, composition.model_copy(update={
+                        "assets": [
+                            replacement if item.id == editorial_asset_id else item
+                            for item in composition.assets
+                        ],
+                    }),
+                )
+                self.jobs.transition(job.id, JobStatus.POSTPROCESSING, progress=0.9)
+                self.jobs.complete(job.id)
+                return updated
+            except Exception as exc:
+                current = self.jobs.get(job.id)
+                if current is not None and current.status not in {
+                    JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED,
+                }:
+                    self.jobs.fail(job.id, redact_secrets(exc))
+                raise
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
 
     def _save_editorial_composition_change(
         self,

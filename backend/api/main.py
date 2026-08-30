@@ -1000,6 +1000,33 @@ def create_app(
             if staged_path is not None:
                 staged_path.unlink(missing_ok=True)
 
+    @application.post(
+        "/api/projects/{project_id}/editorial/compositions/{composition_id}"
+        "/assets/{editorial_asset_id}/generate"
+    )
+    def generate_editorial_asset(
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+    ) -> dict[str, Any]:
+        try:
+            return service.generate_editorial_asset(
+                project_id, composition_id, editorial_asset_id,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except BackendError as exc:
+            status_code = (
+                status.HTTP_409_CONFLICT
+                if exc.code is BackendErrorCode.MODEL_SELECTION_REQUIRED
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(status_code=status_code, detail=exc.as_dict()) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.get(
         "/api/projects/{project_id}/editorial/preview",
         response_class=HTMLResponse,
