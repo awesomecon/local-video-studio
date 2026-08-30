@@ -1728,7 +1728,11 @@ const EDITOR_PLAN = {
   compositions: [{
     id: "comp/ edit", start: 0, duration: 5, template: "illustrationCanvas",
     assets: [
-      { id: "asset/one", label: "Hero", type: "generated_image", evidence_class: "illustration", locked: false },
+      {
+        id: "asset/one", label: "Hero", type: "generated_image",
+        evidence_class: "illustration", locked: false,
+        generation: { prompt: "A rust-red Mars illustration", model: "krea", seed: 4 },
+      },
       { id: "evidence", label: "Archive", type: "historical_photo", evidence_class: "evidence", locked: true },
     ],
     elements: [
@@ -1838,6 +1842,32 @@ await recordAsync("editorial-editor: asset locking is scoped and evidence offers
     method: "PATCH", body: { locked: true },
   });
   eq(calls.filter((call) => call.method === "GET").length, 1, "locking does not refetch the plan");
+});
+
+await recordAsync("editorial-editor: generated images run only after the explicit asset action", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch((call) => {
+    if (call.method === "GET") return { payload: EDITOR_PLAN };
+    return { payload: EDITOR_PLAN };
+  });
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, COMPOSITION_META));
+  await flush();
+  eq(calls.length, 0, "mounting does not generate or fetch a plan");
+  findCompositionsButton(region).click();
+  await flush();
+  const generate = region.querySelector('[data-ed-generate-asset="asset/one"]');
+  assert(generate, "validated generated_image instructions expose the explicit action");
+  generate.click();
+  generate.click();
+  await flush();
+  eq(calls, [
+    { url: EDIT_PLAN_URL, method: "GET", body: null },
+    {
+      url: "/api/projects/proj-ed/editorial/compositions/comp%2F%20edit/assets/asset%2Fone/generate",
+      method: "POST", body: null,
+    },
+  ], "one guarded bodyless POST uses locally encoded ids and no follow-up GET");
 });
 
 await recordAsync("editorial-editor: local replacement sends multipart once with no manual content type", async () => {

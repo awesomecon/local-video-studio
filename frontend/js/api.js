@@ -1104,6 +1104,13 @@ export function setEditorialAssetLock(config, projectId, compositionId, assetId,
     { method: "PATCH", body: { locked }, timeoutMs: 15000, ...opts });
 }
 
+/** Explicitly generate one validated generated_image recommendation; never auto-retried. */
+export function generateEditorialAsset(config, projectId, compositionId, assetId, opts = {}) {
+  return request(config,
+    `${editorialCompositionPath(projectId, compositionId)}/assets/${encodeURIComponent(assetId)}/generate`,
+    { method: "POST", timeoutMs: 600000, ...opts });
+}
+
 /**
  * POST /api/projects/{id}/editorial/compositions/{compositionId}/assets/{assetId}/replace
  * Multipart upload of one user-selected local image replacing a planned

@@ -92,7 +92,7 @@ import {
   getProject, editProject, generateEditPlan,
   patchEditorialSettings, getEditPlan,
   regenerateEditorialComposition, editEditorialComposition,
-  setEditorialAssetLock, replaceEditorialAsset,
+  setEditorialAssetLock, generateEditorialAsset, replaceEditorialAsset,
 } from "../api.js";
 import {
   field,
@@ -1026,7 +1026,7 @@ export function summarizeEditPlanCompositions(plan) {
  * @returns {{ok: boolean, compositions: Array<{
  *   id: string | null, start: number | null, duration: number | null,
  *   template: string | null, templateKnown: boolean,
- *   assets: Array<{id: string | null, hasId: boolean, label: string, type: string | null, evidence: boolean, locked: boolean}>,
+ *   assets: Array<{id: string | null, hasId: boolean, label: string, type: string | null, evidence: boolean, locked: boolean, canGenerate: boolean}>,
  *   elements: Array<{id: string | null, hasId: boolean, role: string, type: string | null, text: string | null, editable: boolean}>,
  *   events: Array<{index: number, action: string | null, actionKnown: boolean}>
  * }>}}
@@ -1056,6 +1056,13 @@ export function parseCompositionEditor(plan) {
           type: (typeof obj.type === "string") ? obj.type : null,
           evidence: obj.evidence_class === "evidence",
           locked: obj.locked === true,
+          canGenerate: obj.type === "generated_image"
+            && obj.locked === false
+            && obj.generation != null
+            && typeof obj.generation === "object"
+            && !Array.isArray(obj.generation)
+            && typeof obj.generation.prompt === "string"
+            && obj.generation.prompt.trim() !== "",
         };
       }),
       elements: (Array.isArray(comp.elements) ? comp.elements : []).map((e) => {
@@ -1316,6 +1323,18 @@ function buildAssetControls(data, ctx) {
           "Asset lock not saved");
       });
       row.append(lock);
+    }
+    if (asset.canGenerate) {
+      const generate = el("button", {
+        class: "btn btn-ghost btn-sm", type: "button", "data-ed-generate-asset": asset.id,
+      }, "Generate image");
+      generate.addEventListener("click", () => {
+        if (ctx.ctrl.busy !== "") return;
+        void ctx.runMutation(
+          () => generateEditorialAsset(state.config, ctx.projectId, data.id, asset.id),
+          "Editorial image generation failed");
+      });
+      row.append(generate);
     }
     const fileInput = el("input", { type: "file", accept: "image/*", "data-ed-file": asset.id });
     const evidenceCheck = el("input", { type: "checkbox", checked: asset.evidence, "data-ed-evidence": asset.id });
