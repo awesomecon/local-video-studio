@@ -188,6 +188,84 @@ def test_editorial_asset_lock_and_local_replacement_are_protected(tmp_path: Path
     assert client.patch(asset_url, json={"locked": False}).status_code == 409
 
 
+def test_editorial_generated_image_is_scoped_and_does_not_replace_scene_visual(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Editorial Illustration", "topic": "Mars archive",
+        "target_duration": 4, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    script = client.post(f"/api/projects/{project_id}/plan", json={}).json()
+    scene_id = script["scenes"][0]["id"]
+    scene_before = next(
+        item for item in client.get(f"/api/projects/{project_id}").json()["scenes"]
+        if item["id"] == scene_id
+    )
+    plan = {
+        "project_id": project_id,
+        "compositions": [{
+            "id": "generated-comp", "start": 0, "duration": 4,
+            "template": "illustrationCanvas",
+            "assets": [{
+                "id": "hero-asset", "type": "generated_image",
+                "generation": {
+                    "prompt": "A restrained rust-orange Mars illustration without text",
+                    "negative_prompt": "letters, watermark", "seed": 91, "model": "krea",
+                },
+            }],
+            "elements": [{
+                "id": "hero", "type": "image", "asset_id": "hero-asset",
+                "role": "illustration",
+            }],
+            "events": [{"time": 0, "action": "fade", "target": "hero"}],
+            "narration_refs": [scene_id],
+        }],
+    }
+    assert client.put(
+        f"/api/projects/{project_id}/editorial/edit-plan", json=plan,
+    ).status_code == 200
+    asset_url = (
+        f"/api/projects/{project_id}/editorial/compositions/generated-comp"
+        "/assets/hero-asset"
+    )
+
+    generated = client.post(asset_url + "/generate")
+
+    assert generated.status_code == 200
+    planned = generated.json()["compositions"][0]["assets"][0]
+    assert planned["source"].startswith("editorial/assets/generated/")
+    assert planned["metadata"]["generated_via"] == "existing_image_pipeline"
+    snapshot = client.get(f"/api/projects/{project_id}").json()
+    registered = next(item for item in snapshot["assets"] if item["id"] == planned["asset_id"])
+    assert registered["scene_id"] is None
+    assert registered["settings"]["role"] == "editorial_generated"
+    assert registered["settings"]["source_scene_id"] == scene_id
+    scene_after = next(item for item in snapshot["scenes"] if item["id"] == scene_id)
+    assert scene_after["status"] == scene_before["status"]
+    assert not any(
+        item["scene_id"] == scene_id and item["settings"].get("role") == "visual"
+        for item in snapshot["assets"]
+    )
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert any(
+        item["stage"] == "editorial_asset_generate" and item["status"] == "completed"
+        for item in jobs
+    )
+
+    assert client.patch(asset_url, json={"locked": True}).status_code == 200
+    assert client.post(asset_url + "/generate").status_code == 409
+
+
+
+
 def test_editorial_composition_narrow_edits_retime_followers_and_retarget_template(
     tmp_path: Path,
 ) -> None:

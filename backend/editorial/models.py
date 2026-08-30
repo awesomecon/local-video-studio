@@ -61,6 +61,28 @@ class EvidenceClass(StrEnum):
     ILLUSTRATION = "illustration"
 
 
+class EditorialImageModel(StrEnum):
+    KREA = "krea"
+    QWEN_IMAGE = "qwen_image"
+    IDEOGRAM4_LOCAL = "ideogram4_local"
+
+
+class EditorialImageGeneration(DomainModel):
+    """Validated generator inputs authored by the planner, never executable code."""
+
+    prompt: str = Field(min_length=1, max_length=8000)
+    negative_prompt: str = Field(default="", max_length=4000)
+    seed: int = Field(default=0, ge=0, le=2**63 - 1)
+    model: EditorialImageModel = EditorialImageModel.KREA
+
+    @field_validator("prompt")
+    @classmethod
+    def require_visible_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Editorial image prompts cannot be blank")
+        return value
+
+
 class EditPlanSourceKind(StrEnum):
     PLANNER = "planner"
     MANUAL = "manual"
@@ -133,6 +155,7 @@ class EditorialAsset(DomainModel):
     source: str | None = Field(default=None, max_length=4000)
     locked: bool = False
     label: str = Field(default="", max_length=500)
+    generation: EditorialImageGeneration | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("source")
@@ -154,6 +177,8 @@ class EditorialAsset(DomainModel):
             raise ValueError("generated assets cannot be classified as factual evidence")
         if self.evidence_class is EvidenceClass.EVIDENCE and not self.locked:
             raise ValueError("evidence assets must be locked against ordinary regeneration")
+        if self.generation is not None and self.type is not EditorialAssetType.GENERATED_IMAGE:
+            raise ValueError("only generated_image assets may contain generation instructions")
         return self
 
 

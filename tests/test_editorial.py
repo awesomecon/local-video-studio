@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.editorial import (
-    EditorialAsset, EditorialAssetType,
+    EditorialAsset, EditorialAssetType, EditorialImageGeneration,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
     EditorialPlanner, EditorialTemplate, EditPlan, MotionPrimitive,
     build_project_mars_prototype,
@@ -69,6 +69,30 @@ def test_edit_plan_rejects_unknown_motion_and_targets() -> None:
     }
     with pytest.raises(ValidationError, match="unknown target"):
         EditPlan.model_validate(base)
+
+
+def test_editorial_image_generation_contract_is_strict_and_backward_compatible() -> None:
+    legacy = EditorialAsset(id="legacy", type="generated_image")
+    assert legacy.generation is None
+    generated = EditorialAsset(
+        id="new", type="generated_image",
+        generation=EditorialImageGeneration(
+            prompt="A rust-red Martian archive illustration without lettering",
+            negative_prompt="text, watermark", seed=42, model="qwen_image",
+        ),
+    )
+    assert generated.generation is not None
+    assert generated.generation.model.value == "qwen_image"
+    with pytest.raises(ValidationError):
+        EditorialAsset.model_validate({
+            "id": "bad", "type": "historical_photo",
+            "generation": {"prompt": "invented evidence"},
+        })
+    with pytest.raises(ValidationError):
+        EditorialAsset.model_validate({
+            "id": "bad-model", "type": "generated_image",
+            "generation": {"prompt": "illustration", "model": "remote_magic"},
+        })
 
 
 def test_edit_plan_requires_frame_valid_contiguous_compositions() -> None:

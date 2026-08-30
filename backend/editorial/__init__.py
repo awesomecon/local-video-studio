@@ -3,6 +3,8 @@
 from .models import (
     EditorialAsset,
     EditorialAssetType,
+    EditorialImageGeneration,
+    EditorialImageModel,
     EditorialComposition,
     EditorialElement,
     EditorialElementType,
@@ -19,7 +21,7 @@ from .planner import EditorialPlanDraft, EditorialPlanner
 from .renderer import EditorialRenderer, compile_edit_plan_html
 
 __all__ = [
-    "EditorialAsset", "EditorialAssetType", "EditorialComposition",
+    "EditorialAsset", "EditorialAssetType", "EditorialImageGeneration", "EditorialImageModel", "EditorialComposition",
     "EditorialElement", "EditorialElementType", "EditorialEvent",
     "EditorialPlanDraft", "EditorialPlanner", "EditorialRenderer",
     "EditorialTemplate", "EditPlan", "EditPlanProvenance", "EditPlanSourceKind", "EvidenceClass",
