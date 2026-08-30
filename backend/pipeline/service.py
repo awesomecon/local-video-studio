@@ -7340,23 +7340,127 @@ class PipelineService:
         """Render the deterministic, silent Editorial canvas for common FFmpeg finishing."""
         if project.video_mode is not VideoMode.EDITORIAL:
             raise PipelineError("Editorial visual rendering requires an Editorial Mode project.")
-        output = self.store.project_path(project) / "editorial" / "master.mp4"
+        root = self.store.project_path(project)
+        output = root / "editorial" / "master.mp4"
         if not force and self._stage_complete(project, "editorial_visual"):
             return output
 
         def operation() -> tuple[Path, list[Path]]:
             plan = self._validate_editorial_render_inputs(project)
+            clips_dir = root / "editorial" / "compositions"
+            clips_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = clips_dir / "manifest.json"
+            previous: dict[str, Any] = {}
+            if manifest_path.is_file() and not force:
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict) and isinstance(payload.get("entries"), dict):
+                        previous = payload["entries"]
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    previous = {}
+            renderer = self._editorial_renderer_instance()
+            entries: dict[str, dict[str, Any]] = {}
+            clips: list[Path] = []
+            for index, composition in enumerate(plan.compositions):
+                clip_name = (
+                    f"{index + 1:03d}-"
+                    f"{hashlib.sha256(composition.id.encode('utf-8')).hexdigest()[:12]}.mp4"
+                )
+                clip = clips_dir / clip_name
+                clip_plan = self._editorial_composition_render_plan(plan, composition)
+                digest = self._editorial_composition_render_hash(root, clip_plan)
+                cached = previous.get(composition.id)
+                reusable = bool(
+                    not force
+                    and isinstance(cached, dict)
+                    and cached.get("sha256") == digest
+                    and cached.get("file") == clip_name
+                    and clip.is_file()
+                    and clip.stat().st_size > 0
+                )
+                if not reusable:
+                    renderer.render(clip_plan, clip, asset_root=root)
+                entries[composition.id] = {
+                    "index": index,
+                    "file": clip_name,
+                    "sha256": digest,
+                    "duration": composition.duration,
+                }
+                clips.append(clip)
             self._archive_output(project, output)
-            self._editorial_renderer_instance().render(
-                plan,
-                output,
-                asset_root=self.store.project_path(project),
-            )
-            return output, [output]
+            self._assemble_editorial_compositions(plan, clips, output)
+            self._atomic_json(manifest_path, {
+                "workflow_version": "editorial-composition-cache-v1",
+                "project_id": project.id,
+                "entries": entries,
+            })
+            keep = {path.resolve() for path in clips}
+            for stale in clips_dir.glob("*.mp4"):
+                if stale.resolve() not in keep:
+                    stale.unlink(missing_ok=True)
+            return output, [output, manifest_path, *clips]
 
         return self._execute_stage(
             project, "editorial_visual", operation, backend="chromium",
         )[0]
+
+    @staticmethod
+    def _editorial_composition_render_plan(
+        plan: EditPlan, composition: EditorialComposition,
+    ) -> EditPlan:
+        local = composition.model_copy(update={"start": 0.0})
+        return EditPlan.model_validate({
+            "project_id": plan.project_id,
+            "width": plan.width,
+            "height": plan.height,
+            "fps": plan.fps,
+            "compositions": [local],
+            "editorial_text_enabled": plan.editorial_text_enabled,
+            "captions_enabled": plan.captions_enabled,
+            "created_at": plan.created_at,
+        })
+
+    def _editorial_composition_render_hash(
+        self, root: Path, plan: EditPlan,
+    ) -> str:
+        composition = plan.compositions[0]
+        asset_files: list[dict[str, str | None]] = []
+        for asset in composition.assets:
+            digest: str | None = None
+            if asset.source and not asset.source.startswith(("http://", "https://")):
+                candidate = (root / asset.source).resolve()
+                if root.resolve() in candidate.parents and candidate.is_file():
+                    digest = self._incremental_hash(candidate)
+            asset_files.append({"id": asset.id, "source": asset.source, "sha256": digest})
+        return self._editorial_hash({
+            "workflow_version": "editorial-composition-render-v1",
+            "plan": plan.model_dump(mode="json", exclude={"created_at"}),
+            "asset_files": asset_files,
+        })
+
+    def _assemble_editorial_compositions(
+        self, plan: EditPlan, clips: list[Path], output: Path,
+    ) -> None:
+        if not clips:
+            raise PipelineError("The Editorial Edit Plan contains no compositions.")
+        publish = output.with_name(f".{output.stem}.editorial.tmp{output.suffix}")
+        publish.unlink(missing_ok=True)
+        if len(clips) == 1:
+            shutil.copyfile(clips[0], publish)
+        else:
+            ffmpeg = require_ffmpeg(self.renderer.binaries)
+            command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y"]
+            for clip in clips:
+                command.extend(["-i", str(clip)])
+            inputs = "".join(f"[{index}:v]" for index in range(len(clips)))
+            command.extend([
+                "-filter_complex", f"{inputs}concat=n={len(clips)}:v=1:a=0[outv]",
+                "-map", "[outv]", "-r", str(plan.fps),
+                "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(publish),
+            ])
+            run_media_process(command, timeout=max(120.0, plan.duration * 20))
+        os.replace(publish, output)
 
     def _ensure_preview(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "renders" / "preview.mp4"

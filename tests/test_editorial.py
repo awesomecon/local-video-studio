@@ -471,12 +471,85 @@ def test_editorial_render_only_uses_shared_audio_caption_and_export_pipeline(tmp
     assert info.has_video and info.has_audio
     assert (info.width, info.height) == project.resolution
     assert info.fps == project.fps
-    assert synthetic.calls == [(plan, root / "editorial" / "master.mp4", root)]
+    assert len(synthetic.calls) == 1
+    rendered_plan, rendered_clip, rendered_root = synthetic.calls[0]
+    assert rendered_plan.compositions[0].start == 0
+    assert rendered_plan.compositions[0].id == "master"
+    assert rendered_clip.parent == root / "editorial" / "compositions"
+    assert rendered_root == root
     timeline = json.loads((root / "timeline.json").read_text(encoding="utf-8"))
     assert timeline["clips"][0]["path"] == "editorial/master.mp4"
     assert {track["kind"] for track in timeline["audio_tracks"]} == {"narration", "music"}
     assert timeline["subtitles"]
     stages = pipeline.project_snapshot(project.id)["stage_state"]["stages"]
-    assert stages["editorial_visual"]["outputs"] == ["editorial/master.mp4"]
+    assert stages["editorial_visual"]["outputs"][0] == "editorial/master.mp4"
+    assert "editorial/compositions/manifest.json" in stages["editorial_visual"]["outputs"]
     assert stages["render_final"]["outputs"] == ["renders/final.mp4"]
     assert pipeline.jobs.get(job.id).status.value == "completed"
+
+
+def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path: Path) -> None:
+    pipeline = PipelineService(
+        load_config(environ={}),
+        database_path=tmp_path / "app" / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "app" / "tmp",
+        mock_mode=True,
+    )
+    project = pipeline.create_project(ProjectCreate(
+        title="Cached Editorial", topic="two compositions",
+        target_duration=2, resolution=(320, 568), fps=12,
+        video_mode=VideoMode.EDITORIAL,
+    ))
+    pipeline.ensure_plan(project.id)
+    project = pipeline._project(project.id)
+    pipeline._ensure_narration(project, force=False)
+    root = pipeline.store.project_path(project)
+    narration_duration = wav_duration(root / "narration" / "master.wav")
+    midpoint = narration_duration / 2
+    scene_id = pipeline.store.load_plan(project.slug).scenes[0].id
+
+    def composition(identifier: str, start: float, duration: float, text: str):
+        return EditorialComposition(
+            id=identifier, start=start, duration=duration,
+            template=EditorialTemplate.ARCHIVE_CANVAS,
+            elements=[EditorialElement(
+                id=f"{identifier}-title", type=EditorialElementType.TEXT,
+                text=text, role="year",
+            )],
+            events=[EditorialEvent(
+                time=0, action=MotionPrimitive.FADE_UP, target=f"{identifier}-title",
+            )],
+            narration_refs=[scene_id],
+        )
+
+    first = composition("first", 0, midpoint, "FIRST")
+    second = composition("second", midpoint, narration_duration - midpoint, "SECOND")
+    plan = EditPlan(
+        project_id=project.id, width=320, height=568, fps=12,
+        compositions=[first, second],
+    )
+    pipeline.save_edit_plan(project.id, plan)
+    synthetic = _SyntheticEditorialRenderer(require_ffmpeg(pipeline.renderer.binaries))
+    pipeline._editorial_renderer = synthetic  # type: ignore[assignment]
+
+    pipeline._ensure_editorial_visual(project, force=False)
+    assert [call[0].compositions[0].id for call in synthetic.calls] == ["first", "second"]
+    changed_second = second.model_copy(update={
+        "elements": [second.elements[0].model_copy(update={"text": "SECOND REVISED"})],
+    })
+    pipeline.save_edit_plan(project.id, plan.model_copy(update={
+        "compositions": [first, changed_second],
+    }))
+
+    pipeline._ensure_editorial_visual(project, force=False)
+
+    assert [call[0].compositions[0].id for call in synthetic.calls] == [
+        "first", "second", "second",
+    ]
+    manifest = json.loads(
+        (root / "editorial" / "compositions" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert set(manifest["entries"]) == {"first", "second"}
+    info = probe_media(root / "editorial" / "master.mp4", pipeline.renderer.binaries)
+    assert info.has_video and info.duration_seconds >= narration_duration - 0.1
