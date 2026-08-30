@@ -89,7 +89,9 @@ from backend.rendering.qc import MediaQC, QCReport
 from backend.rendering.subtitles import write_ass, write_srt
 from backend.editorial.models import (
     EditPlan, EditPlanProvenance, EditPlanSourceKind,
-    EditorialAssetType, EvidenceClass,
+    EditorialAssetType, EditorialComposition, EditorialElement,
+    EditorialElementType, EditorialEvent, EditorialTemplate,
+    EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
 from backend.editorial.renderer import EditorialRenderer, compile_edit_plan_html
@@ -651,6 +653,216 @@ class PipelineService:
             "quality_control", "render_final", "thumbnails",
         })
         return updated
+
+    def update_editorial_composition(
+        self,
+        project_id: str,
+        composition_id: str,
+        *,
+        duration: float | None = None,
+        template: EditorialTemplate | None = None,
+        text_updates: Mapping[str, str] | None = None,
+        event_actions: Mapping[int, MotionPrimitive] | None = None,
+    ) -> EditPlan:
+        """Apply narrow deterministic edits without accepting arbitrary Edit Plan JSON."""
+        if duration is None and template is None and not text_updates and not event_actions:
+            raise PipelineError("At least one Editorial composition edit must be provided.")
+        if template is not None and event_actions:
+            raise PipelineError("Change the template before editing its animation presets.")
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("project is not in Editorial Mode")
+            plan = self.store.load_edit_plan(project.slug)
+            try:
+                index = next(
+                    i for i, item in enumerate(plan.compositions)
+                    if item.id == composition_id
+                )
+            except StopIteration as exc:
+                raise KeyError(f"unknown Editorial composition {composition_id!r}") from exc
+            current = plan.compositions[index]
+            elements = list(current.elements)
+            if text_updates:
+                by_id = {item.id: item for item in elements}
+                for element_id, text in text_updates.items():
+                    element = by_id.get(element_id)
+                    if element is None:
+                        raise KeyError(f"unknown Editorial element {element_id!r}")
+                    if element.type not in {
+                        EditorialElementType.TEXT, EditorialElementType.DOCUMENT,
+                    }:
+                        raise PipelineError(
+                            f"Editorial element {element_id!r} does not contain editable text"
+                        )
+                    if element.type is EditorialElementType.TEXT and not text.strip():
+                        raise ValueError("Editorial text cannot be empty")
+                    by_id[element_id] = element.model_copy(update={"text": text})
+                elements = [by_id[item.id] for item in elements]
+            working = EditorialComposition.model_validate({
+                **current.model_dump(mode="python"), "elements": elements,
+            })
+            if template is not None and template is not working.template:
+                working = self._retarget_editorial_template(project, working, template)
+            events = list(working.events)
+            if event_actions:
+                for event_index, action in event_actions.items():
+                    if event_index < 0 or event_index >= len(events):
+                        raise KeyError(f"unknown Editorial event index {event_index}")
+                    events[event_index] = events[event_index].model_copy(update={"action": action})
+            new_duration = duration if duration is not None else working.duration
+            if not math.isfinite(new_duration) or new_duration <= 0 or new_duration > 120:
+                raise ValueError("Editorial composition duration must be between 0 and 120 seconds")
+            events = [
+                event.model_copy(update={
+                    "time": min(event.time, new_duration),
+                    "duration": min(event.duration, new_duration),
+                })
+                for event in events
+            ]
+            working = EditorialComposition.model_validate({
+                **working.model_dump(mode="python"),
+                "duration": new_duration,
+                "events": events,
+            })
+            delta = new_duration - current.duration
+            compositions = list(plan.compositions)
+            compositions[index] = working
+            if delta:
+                compositions = [
+                    item.model_copy(update={"start": item.start + delta})
+                    if position > index else item
+                    for position, item in enumerate(compositions)
+                ]
+            updated = EditPlan.model_validate({
+                **plan.model_dump(mode="python"),
+                "compositions": compositions,
+                "created_at": utc_now(),
+            })
+            self.store.save_edit_plan(project.slug, updated)
+            self.store.save_edit_plan_provenance(
+                project.slug,
+                self._editorial_plan_provenance(
+                    project, source_kind=EditPlanSourceKind.MANUAL,
+                ),
+            )
+            self._invalidate_stages(project, {
+                "editorial_visual", "timeline", "render_preview",
+                "quality_control", "render_final", "thumbnails",
+            })
+            return updated
+
+    @staticmethod
+    def _retarget_editorial_template(
+        project: Project,
+        composition: EditorialComposition,
+        template: EditorialTemplate,
+    ) -> EditorialComposition:
+        """Map existing content into one approved renderer-owned template."""
+        texts = [
+            item for item in composition.elements
+            if item.type in {EditorialElementType.TEXT, EditorialElementType.DOCUMENT}
+            and item.text.strip()
+        ]
+        images = [
+            item for item in composition.elements
+            if item.type is EditorialElementType.IMAGE and item.asset_id
+        ]
+        if not images:
+            images = [
+                EditorialElement(
+                    id=f"asset-{position + 1}",
+                    type=EditorialElementType.IMAGE,
+                    asset_id=asset.id,
+                    role="archive-photo",
+                )
+                for position, asset in enumerate(composition.assets)
+            ]
+        headline = texts[0].text if texts else project.title.upper()
+        second_text = texts[1].text if len(texts) > 1 else ""
+        elements: list[EditorialElement]
+        if template is EditorialTemplate.ARCHIVE_CANVAS:
+            elements = [EditorialElement(
+                id="headline", type=EditorialElementType.TEXT,
+                text=headline, role="year",
+            )]
+            if images:
+                elements.append(images[0].model_copy(update={"role": "archive-photo"}))
+            if second_text:
+                elements.append(EditorialElement(
+                    id="reveal", type=EditorialElementType.TEXT,
+                    text=second_text, role="reveal",
+                ))
+        elif template is EditorialTemplate.DOCUMENT_REVEAL:
+            elements = [EditorialElement(
+                id="document", type=EditorialElementType.DOCUMENT,
+                text=headline, role="document",
+            )]
+            if second_text:
+                elements.append(EditorialElement(
+                    id="annotation", type=EditorialElementType.TEXT,
+                    text=second_text, role="annotation",
+                ))
+            if images:
+                elements.append(images[0].model_copy(update={"role": "context-image"}))
+        elif template is EditorialTemplate.COMPARISON_CANVAS:
+            if len(images) < 2:
+                raise PipelineError("comparisonCanvas requires two image assets")
+            elements = [
+                images[0].model_copy(update={"role": "left-image"}),
+                images[1].model_copy(update={"role": "right-image"}),
+                EditorialElement(
+                    id="headline", type=EditorialElementType.TEXT,
+                    text=headline, role="headline",
+                ),
+            ]
+        elif template is EditorialTemplate.ILLUSTRATION_CANVAS:
+            if not images:
+                raise PipelineError("illustrationCanvas requires an image asset")
+            elements = [
+                images[0].model_copy(update={"role": "illustration"}),
+                EditorialElement(
+                    id="headline", type=EditorialElementType.TEXT,
+                    text=headline, role="headline",
+                ),
+            ]
+            if second_text:
+                elements.append(EditorialElement(
+                    id="supporting-text", type=EditorialElementType.TEXT,
+                    text=second_text, role="supporting-text",
+                ))
+        else:
+            elements = [EditorialElement(
+                id="headline", type=EditorialElementType.TEXT,
+                text=headline, role="headline",
+            )]
+            if second_text:
+                elements.append(EditorialElement(
+                    id="kicker", type=EditorialElementType.TEXT,
+                    text=second_text, role="kicker",
+                ))
+        actions = {
+            EditorialElementType.IMAGE: MotionPrimitive.SCALE_IN,
+            EditorialElementType.DOCUMENT: MotionPrimitive.PAPER_SLIDE,
+            EditorialElementType.UNDERLINE: MotionPrimitive.UNDERLINE,
+            EditorialElementType.LINE: MotionPrimitive.DRAW_LINE,
+            EditorialElementType.BLACK_SCREEN: MotionPrimitive.HARD_CUT,
+        }
+        events = [
+            EditorialEvent(
+                time=min(position * 0.35, max(0.0, composition.duration - 0.1)),
+                action=actions.get(element.type, MotionPrimitive.FADE_UP),
+                target=element.id,
+                duration=min(0.7, composition.duration),
+            )
+            for position, element in enumerate(elements)
+        ]
+        return EditorialComposition.model_validate({
+            **composition.model_dump(mode="python"),
+            "template": template,
+            "elements": elements,
+            "events": events,
+        })
 
     def ensure_edit_plan(self, project_id: str) -> EditPlan:
         """Generate the first Edit Plan from the stored script and narration clock."""

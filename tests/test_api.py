@@ -179,6 +179,72 @@ def test_editorial_asset_lock_and_local_replacement_are_protected(tmp_path: Path
     assert client.patch(asset_url, json={"locked": False}).status_code == 409
 
 
+def test_editorial_composition_narrow_edits_retime_followers_and_retarget_template(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Editable", "topic": "Composition controls",
+        "target_duration": 8, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    script = client.post(f"/api/projects/{project_id}/plan", json={}).json()
+    scene_id = script["scenes"][0]["id"]
+    plan = {
+        "project_id": project_id,
+        "compositions": [
+            {
+                "id": "first", "start": 0, "duration": 4,
+                "template": "bigTextReveal",
+                "elements": [{
+                    "id": "title", "type": "text", "text": "BEFORE", "role": "headline",
+                }],
+                "events": [{"time": 0, "action": "fadeUp", "target": "title"}],
+                "narration_refs": [scene_id],
+            },
+            {
+                "id": "second", "start": 4, "duration": 4,
+                "template": "bigTextReveal",
+                "elements": [{
+                    "id": "end", "type": "text", "text": "AFTER", "role": "headline",
+                }],
+                "events": [{"time": 0, "action": "fadeUp", "target": "end"}],
+                "narration_refs": [scene_id],
+            },
+        ],
+    }
+    assert client.put(
+        f"/api/projects/{project_id}/editorial/edit-plan", json=plan,
+    ).status_code == 200
+    url = f"/api/projects/{project_id}/editorial/compositions/first"
+    edited = client.patch(url, json={
+        "duration": 5,
+        "text_updates": {"title": "REVISED"},
+        "event_actions": {"0": "scaleIn"},
+    })
+    assert edited.status_code == 200
+    compositions = edited.json()["compositions"]
+    assert compositions[0]["duration"] == 5
+    assert compositions[0]["elements"][0]["text"] == "REVISED"
+    assert compositions[0]["events"][0]["action"] == "scaleIn"
+    assert compositions[1]["start"] == 5
+
+    retargeted = client.patch(url, json={"template": "documentReveal"})
+    assert retargeted.status_code == 200
+    first = retargeted.json()["compositions"][0]
+    assert first["template"] == "documentReveal"
+    assert first["elements"][0]["role"] == "document"
+    assert first["elements"][0]["text"] == "REVISED"
+    assert client.patch(url, json={"template": "illustrationCanvas"}).status_code == 409
+    assert client.patch(url, json={}).status_code == 409
+
+
 def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path) -> None:
     app = create_app(
         load_config(environ={}),
