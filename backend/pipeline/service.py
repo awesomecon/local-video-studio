@@ -553,6 +553,74 @@ class PipelineService:
             backend="mock" if self.mock_mode else "local_llm",
         )[0]
 
+    def regenerate_edit_plan_composition(
+        self, project_id: str, composition_id: str,
+    ) -> EditPlan:
+        """Explicitly re-plan one composition while preserving its clock and protected media."""
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise PipelineError("project is not in Editorial Mode")
+        try:
+            script = self.store.load_plan(project.slug)
+            original = self.store.load_edit_plan(project.slug)
+        except FileNotFoundError as exc:
+            raise PipelineError(
+                "Generate the script and Editorial Edit Plan before regenerating a composition."
+            ) from exc
+        if not any(item.id == composition_id for item in original.compositions):
+            raise KeyError(f"unknown Editorial composition {composition_id!r}")
+        self._require_selected_llm_model(project)
+        assets = self.database.list_assets(project.id)
+        words = self._editorial_word_timings(project)
+        original_hash = self._editorial_hash(original.model_dump(mode="json"))
+        self.editorial_planner.llm = self.director.llm
+        replacement, draft = self.editorial_planner.regenerate_composition(
+            project,
+            script,
+            original,
+            composition_id,
+            assets=assets,
+            word_timings=words,
+            mock_mode=self.mock_mode,
+        )
+        with self._lock:
+            current = self.store.load_edit_plan(project.slug)
+            if self._editorial_hash(current.model_dump(mode="json")) != original_hash:
+                raise PipelineError(
+                    "The Editorial Edit Plan changed during regeneration; retry the composition."
+                )
+            compositions = [
+                replacement if item.id == composition_id else item
+                for item in current.compositions
+            ]
+            updated = EditPlan.model_validate({
+                **current.model_dump(mode="python"),
+                "compositions": compositions,
+                "created_at": utc_now(),
+            })
+            self.store.save_edit_plan(project.slug, updated)
+            self.store.save_edit_plan_provenance(
+                project.slug,
+                self._editorial_plan_provenance(
+                    project,
+                    source_kind=EditPlanSourceKind.PLANNER,
+                    script=script,
+                    word_timings=words,
+                ),
+            )
+            if draft is not None:
+                suffix = hashlib.sha256(composition_id.encode("utf-8")).hexdigest()[:16]
+                draft_path = (
+                    self.store.project_path(project)
+                    / "editorial" / f"planner-draft-{suffix}.json"
+                )
+                self._atomic_json(draft_path, draft.model_dump(mode="json"))
+            self._invalidate_stages(project, {
+                "editorial_visual", "timeline", "render_preview",
+                "quality_control", "render_final", "thumbnails",
+            })
+            return updated
+
     @staticmethod
     def _editorial_hash(payload: Any) -> str:
         encoded = json.dumps(
