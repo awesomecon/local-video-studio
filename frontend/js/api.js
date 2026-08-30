@@ -257,7 +257,7 @@ import { apiUrl } from "./config.js";
  * @property {string} directory
  * @property {{version?: number, stages?: Record<string, {status?:string, job_id?:string|null, completed_at?:string, outputs?:string[]}>}} stage_state
  * @property {Array<{type: string, slug?: string, project_id?: string, detail: string}>=} recovery
- * @property {{has_edit_plan?: boolean, plan_status?: "missing"|"current"|"stale"|"untracked", stale?: boolean|null, stale_reasons?: string[], edit_plan_url?: string|null, generate_url?: string|null, preview_url?: string|null}=} [editorial]
+ * @property {{has_edit_plan?: boolean, plan_status?: "missing"|"current"|"stale"|"untracked", stale?: boolean|null, stale_reasons?: string[], edit_plan_url?: string|null, generate_url?: string|null, preview_url?: string|null, settings_url?: string|null, captions_enabled?: boolean, editorial_text_enabled?: boolean}=} [editorial]
  *   — present only on editorial project snapshots. The provenance fields
  *   (plan_status, stale, stale_reasons) are optional and may be missing or
  *   malformed on older backends; treat them defensively and fall back to the

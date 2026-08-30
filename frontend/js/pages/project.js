@@ -692,6 +692,25 @@ export function localApiPath(value) {
 }
 
 /**
+ * Exact Editorial API path for the mounted project, or null. Unlike the
+ * generic link helper this is used for requests, so it rejects trimming,
+ * queries, fragments, backslashes, and cross-project paths.
+ * @param {unknown} value
+ * @param {unknown} projectId
+ * @param {"settings"|"edit-plan"} endpoint
+ * @returns {string | null}
+ */
+export function projectEditorialApiPath(value, projectId, endpoint) {
+  if (typeof value !== "string" || value !== value.trim() || /\s/.test(value)
+    || value.includes("\\") || value.includes("?") || value.includes("#")) return null;
+  if (typeof projectId !== "string" || !projectId || /\s/.test(projectId)
+    || projectId.includes("\\") || projectId.includes("/")
+    || projectId.includes("?") || projectId.includes("#")) return null;
+  const expected = `/api/projects/${encodeURIComponent(projectId)}/editorial/${endpoint}`;
+  return localApiPath(value) === expected ? expected : null;
+}
+
+/**
  * Download URL for the Edit Plan JSON, or null. The source must be a clean
  * project-local API path under /api/projects/ (localApiPath, plus: no query
  * string, no fragment, no backslash, no whitespace); when a project id is
@@ -707,8 +726,13 @@ export function safeEditPlanDownloadUrl(value, projectId = null) {
   if (!path || !path.startsWith("/api/projects/")) return null;
   if (path.includes("?") || path.includes("#") || path.includes("\\")
     || /\s/.test(path)) return null;
-  if (projectId && typeof projectId === "string" && projectId
-    && !path.startsWith(`/api/projects/${projectId}/`)) return null;
+  if (projectId && typeof projectId === "string" && projectId) {
+    if (projectEditorialApiPath(path, projectId, "edit-plan") !== path) return null;
+  } else {
+    const parts = path.split("/");
+    if (parts.length !== 6 || !parts[3]
+      || parts[4] !== "editorial" || parts[5] !== "edit-plan") return null;
+  }
   return `${path}?download=true`;
 }
 
@@ -809,8 +833,10 @@ function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl =
  * @param {(() => any) | null} [onSaved] — fresh-snapshot refresh hook
  * @returns {HTMLElement | null}
  */
-export function buildEditorialDisplayControls(editorial, ctrl, errors, onSaved = null) {
-  const settingsUrl = localApiPath(editorial.settings_url);
+export function buildEditorialDisplayControls(
+  editorial, ctrl, errors, onSaved = null, projectId = null,
+) {
+  const settingsUrl = projectEditorialApiPath(editorial.settings_url, projectId, "settings");
   if (!settingsUrl) return null;
   const captionsOk = typeof editorial.captions_enabled === "boolean";
   const textOk = typeof editorial.editorial_text_enabled === "boolean";
@@ -870,7 +896,13 @@ async function saveEditorialSetting(key, input, ctx) {
   ctrl.busy = "";
   // The plan changed on disk, so an open composition list is stale: close it
   // before the fresh-snapshot re-render.
-  if (ctrl.compositions !== "idle") ctrl.compositions = "idle";
+  if (ctrl.compositions !== "idle") {
+    // Invalidate a composition GET that may still resolve after this save.
+    // Its detached DOM must not be allowed to move the shared controller
+    // back to `ready` and suppress all later live refreshes.
+    ctrl.fetchSeq += 1;
+    ctrl.compositions = "idle";
+  }
   for (const box of checkboxes) box.disabled = false;
   if (!onSaved) return;
   try {
@@ -971,12 +1003,12 @@ function renderCompositionList(summary) {
  * @param {EditorialController} ctrl
  * @returns {HTMLElement | null}
  */
-function buildCompositionBlock(editorial, ctrl) {
+function buildCompositionBlock(editorial, ctrl, projectId) {
   // The action is only offered for a project-local API path: the backend
   // always provides /api/projects/{id}/editorial/edit-plan, and any other
   // shape is malformed metadata, not a fetch target.
-  const planUrl = localApiPath(editorial.edit_plan_url);
-  if (!planUrl || !planUrl.startsWith("/api/projects/")) return null;
+  const planUrl = projectEditorialApiPath(editorial.edit_plan_url, projectId, "edit-plan");
+  if (!planUrl) return null;
   const target = el("div", { class: "mt" });
   const button = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Show compositions");
   const retry = el("button", { class: "btn", type: "button" }, "Retry");
@@ -1091,7 +1123,10 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
       }, "Download Edit Plan JSON"));
     }
     body.append(row);
-    const displayControls = buildEditorialDisplayControls(editorial, ctrlState, errors, onGenerated);
+    const projectId = snap.project && snap.project.id;
+    const displayControls = buildEditorialDisplayControls(
+      editorial, ctrlState, errors, onGenerated, projectId,
+    );
     if (displayControls) body.append(displayControls);
     if (planState.kind === "stale") {
       body.append(el("div", { class: "mt" }, banner(
@@ -1107,7 +1142,7 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
       body.append(el("div", { class: "muted small mt" },
         "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — Open Preview shows it as-is."));
     }
-    const compositionBlock = buildCompositionBlock(editorial, ctrlState);
+    const compositionBlock = buildCompositionBlock(editorial, ctrlState, projectId);
     if (compositionBlock) body.append(compositionBlock);
   }
   body.append(errors);
