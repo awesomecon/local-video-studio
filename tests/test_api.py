@@ -77,6 +77,14 @@ def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Pa
     assert snapshot["editorial"]["stale_reasons"] == []
     assert snapshot["editorial"]["generate_url"].endswith("/editorial/plan")
     assert client.get(f"/api/projects/{project_id}/editorial/edit-plan").json() == generated.json()
+    downloaded = client.get(
+        f"/api/projects/{project_id}/editorial/edit-plan?download=true"
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.json() == generated.json()
+    assert downloaded.headers["content-disposition"] == (
+        'attachment; filename="edit-plan.json"'
+    )
     # The idempotent endpoint returns the existing plan rather than replacing it.
     assert client.post(f"/api/projects/{project_id}/editorial/plan").json() == generated.json()
 

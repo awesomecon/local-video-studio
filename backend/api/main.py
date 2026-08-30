@@ -14,7 +14,7 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -803,9 +803,17 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
     @application.get("/api/projects/{project_id}/editorial/edit-plan")
-    def get_editorial_edit_plan(project_id: str) -> dict[str, Any]:
+    def get_editorial_edit_plan(
+        project_id: str, download: bool = False,
+    ) -> Any:
         try:
-            return service.load_edit_plan(project_id).model_dump(mode="json")
+            payload = service.load_edit_plan(project_id).model_dump(mode="json")
+            if download:
+                return JSONResponse(
+                    content=jsonable_encoder(payload),
+                    headers={"Content-Disposition": 'attachment; filename="edit-plan.json"'},
+                )
+            return payload
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:

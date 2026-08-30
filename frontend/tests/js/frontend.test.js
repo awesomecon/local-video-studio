@@ -116,6 +116,7 @@ import {
   summarizeEditPlanCompositions,
   safeEditPlanDownloadUrl,
   localApiPath,
+  projectEditorialApiPath,
   createEditorialController,
 } from "../../js/pages/project.js";
 import {
@@ -1269,6 +1270,9 @@ record("editorial-settings: malformed settings_url or non-boolean values omit co
   const cases = {
     "remote settings_url": { ...settingsMeta(), settings_url: remoteUrl },
     "protocol-relative settings_url": { ...settingsMeta(), settings_url: "//cdn.example.com/settings" },
+    "cross-project settings_url": { ...settingsMeta(), settings_url: "/api/projects/other/editorial/settings" },
+    "wrong endpoint settings_url": { ...settingsMeta(), settings_url: EDIT_PLAN_URL },
+    "backslash settings_url": { ...settingsMeta(), settings_url: "/\\host/settings" },
     "non-string settings_url": { ...settingsMeta(), settings_url: 42 },
     "empty settings_url": { ...settingsMeta(), settings_url: "   " },
     "missing settings_url": { ...settingsMeta(), settings_url: null },
@@ -1288,7 +1292,8 @@ record("editorial-settings: malformed settings_url or non-boolean values omit co
   // The standalone builder agrees.
   eq(buildEditorialDisplayControls(
     { ...settingsMeta(), settings_url: remoteUrl }, createEditorialController(),
-    document.createElement("div")), null, "builder omits the row for a remote URL");
+    document.createElement("div"), null, "proj-ed"), null,
+  "builder omits the row for a remote URL");
 });
 
 await recordAsync("editorial-settings: one click PATCHes only the changed field, never the Edit Plan", async () => {
@@ -1420,6 +1425,55 @@ await recordAsync("editorial-settings: mounting, controls, and live refreshes is
   assert(findCompositionsButton(region), "the explicit composition action is available");
 });
 
+await recordAsync("editorial-settings: saving invalidates an older composition fetch", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const freshSnap = projectSnapshot(EDITORIAL_PROJECT, settingsMeta({ captions_enabled: false }));
+  let finishPlan;
+  globalThis.fetch = (url, opts) => {
+    const method = (opts && opts.method) || "GET";
+    if (String(url) === EDIT_PLAN_URL) {
+      return new Promise((resolve) => {
+        finishPlan = () => resolve({
+          ok: true, status: 200,
+          text: () => Promise.resolve(JSON.stringify({ compositions: [] })),
+        });
+      });
+    }
+    if (String(url) === SETTINGS_URL && method === "PATCH") {
+      return Promise.resolve({
+        ok: true, status: 200,
+        text: () => Promise.resolve(JSON.stringify({ version: 1 })),
+      });
+    }
+    if (String(url) === "/api/projects/proj-ed" && method === "GET") {
+      return Promise.resolve({
+        ok: true, status: 200,
+        text: () => Promise.resolve(JSON.stringify(freshSnap)),
+      });
+    }
+    return Promise.resolve({
+      ok: false, status: 404,
+      text: () => Promise.resolve(JSON.stringify({ detail: "unexpected request" })),
+    });
+  };
+  const region = document.createElement("div");
+  renderEditorialRegion(region, projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
+  findCompositionsButton(region).click();
+  await flush(2);
+  const caps = findSettingInput(region, "captions_enabled");
+  caps.checked = false;
+  caps.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  assert(findSettingInput(region, "captions_enabled")?.checked === false,
+    "the saved setting refreshes the mounted section");
+  finishPlan();
+  await flush();
+  renderEditorialRegion(region, projectSnapshot(
+    EDITORIAL_PROJECT, { ...settingsMeta({ captions_enabled: false }), plan_status: "stale", stale_reasons: ["script"] }));
+  assert(region.textContent.includes("Edit Plan is stale"),
+    "the superseded fetch cannot poison the controller or suppress later live refreshes");
+});
+
 /* --- 11. Editorial composition overview ----------------------------------- */
 
 const COMPOSITION_META = {
@@ -1474,6 +1528,9 @@ record("editorial-compositions: a non-local edit_plan_url never yields the actio
     "http" + "s://remote.example/api/projects/proj-ed/editorial/edit-plan",
     "//cdn.example.com/api/projects/proj-ed/editorial/edit-plan",
     "/static/edit-plan.json",
+    "/api/projects/other/editorial/edit-plan",
+    "/api/projects/proj-ed/editorial/settings",
+    "/\\host/edit-plan",
     42,
     null,
   ];
@@ -1726,6 +1783,13 @@ record("download-url: the validator pins safe project-local paths only", () => {
   eq(safeEditPlanDownloadUrl(null), null);
   eq(localApiPath("https:" + "//remote.example/api"), null, "localApiPath rejects any scheme URL");
   eq(localApiPath("/api/projects/proj-ed/editorial/settings"), "/api/projects/proj-ed/editorial/settings");
+  eq(projectEditorialApiPath(SETTINGS_URL, "proj-ed", "settings"), SETTINGS_URL);
+  eq(projectEditorialApiPath("/api/projects/other/editorial/settings", "proj-ed", "settings"), null,
+    "request paths cannot cross projects");
+  eq(projectEditorialApiPath(EDIT_PLAN_URL, "proj-ed", "settings"), null,
+    "request paths must match the exact endpoint");
+  eq(projectEditorialApiPath("/\\host/settings", "proj-ed", "settings"), null,
+    "request paths reject backslashes");
 });
 
 /* --- 12. Export readiness summary: display settings ----------------------- */

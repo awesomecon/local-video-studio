@@ -383,7 +383,10 @@ def test_project_editorial_display_settings_controls() -> None:
     source = _js("pages/project.js")
     # Controls are omitted unless the metadata is strict: project-local
     # settings_url plus strict-boolean snapshot values.
-    assert "const settingsUrl = localApiPath(editorial.settings_url);" in source
+    assert (
+        'const settingsUrl = projectEditorialApiPath(editorial.settings_url, projectId, "settings");'
+        in source
+    )
     assert "typeof editorial.captions_enabled === \"boolean\"" in source
     assert "typeof editorial.editorial_text_enabled === \"boolean\"" in source
     # Explicit user action only; one mutation in flight; both controls off
@@ -412,8 +415,11 @@ def test_project_compositions_overview_is_explicit_and_safe() -> None:
     # The plan is fetched only by the explicit action, via a project-local
     # snapshot URL (no action for non-API local paths).
     assert '"Show compositions"' in source
-    assert "const planUrl = localApiPath(editorial.edit_plan_url);" in source
-    assert 'if (!planUrl || !planUrl.startsWith("/api/projects/")) return null;' in source
+    assert (
+        'const planUrl = projectEditorialApiPath(editorial.edit_plan_url, projectId, "edit-plan");'
+        in source
+    )
+    assert "if (!planUrl) return null;" in source
     assert "export function getEditPlan" in api
     # Duplicate fetches are impossible while one is in flight, and stale
     # results are dropped after a region reset.
@@ -438,7 +444,7 @@ def test_project_editorial_download_link_is_local_and_project_scoped() -> None:
     assert "export function safeEditPlanDownloadUrl(value, projectId = null) {" in source
     assert "if (!path || !path.startsWith(\"/api/projects/\")) return null;" in source
     assert "path.includes(\"?\") || path.includes(\"#\") || path.includes(\"\\\\\")" in source
-    assert "&& !path.startsWith(`/api/projects/${projectId}/`)) return null;" in source
+    assert 'projectEditorialApiPath(path, projectId, "edit-plan") !== path' in source
     assert "return `${path}?download=true`;" in source
     # The link is rendered only when the validator accepts the URL, and is
     # placed after the Open Preview anchor inside the section builder.
@@ -464,7 +470,9 @@ def test_project_editorial_live_refresh_preserves_interactions() -> None:
     assert "if (!preserve) editorial.replaceChildren();" in source
     # A successful display-setting save closes a now-stale composition list
     # before the fresh-snapshot re-render.
-    assert "if (ctrl.compositions !== \"idle\") ctrl.compositions = \"idle\";" in source
+    assert "if (ctrl.compositions !== \"idle\") {" in source
+    assert "ctrl.fetchSeq += 1;" in source
+    assert "ctrl.compositions = \"idle\";" in source
 
 
 def test_export_readiness_summary_reports_strict_boolean_settings() -> None:
