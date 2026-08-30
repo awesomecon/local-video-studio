@@ -73,6 +73,16 @@ def _asset_image(
     )
 
 
+def _card_tag(asset: EditorialAsset | None, default: str) -> str:
+    label = asset.label if asset and asset.label else default
+    klass = asset.evidence_class.value.upper() if asset else "ILLUSTRATION"
+    return f"{label.upper()} · {klass}"
+
+
+def _portrait_fallback() -> str:
+    return '<div class="photo-art"><div class="portrait-head"></div><div class="portrait-body"></div></div>'
+
+
 def _archive_markup(
     composition: EditorialComposition,
     resolver: AssetURLResolver | None,
@@ -85,8 +95,7 @@ def _archive_markup(
     reveal = _element(composition, "reveal")
     photo_asset = _asset(composition, photo)
     document_asset = _asset(composition, document)
-    photo_label = photo_asset.label if photo_asset and photo_asset.label else "ARCHIVE PHOTOGRAPH"
-    photo_class = photo_asset.evidence_class.value.upper() if photo_asset else "ILLUSTRATION"
+    photo_tag = _card_tag(photo_asset, "ARCHIVE PHOTOGRAPH")
     document_copy = (
         document_asset.label
         if document_asset and document_asset.label
@@ -98,33 +107,172 @@ def _archive_markup(
         for index in range(ruler_count)
     )
     return f"""
-      <section class="composition archive-canvas" data-composition="{escape(composition.id)}">
+      <section class="composition archive-canvas" data-composition="{escape(composition.id, quote=True)}">
         <div class="grain"></div>
         <div class="research-layer">
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
-          <div id="{escape(year.id if year else 'year', quote=True)}" class="year editorial-element">{escape(year.text if year else "")}</div>
-          <div id="{escape(photo.id if photo else 'photo', quote=True)}" class="archive-photo editorial-element">
+          <div id="{escape(year.id if year else 'year', quote=True)}" class="year editorial-element editorial-type">{escape(year.text if year else "")}</div>
+          <div id="{escape(photo.id if photo else 'photo', quote=True)}" class="archive-photo editorial-element" data-rest-rotate="-2.4">
             {_asset_image(composition, photo, resolver, class_name="archive-photo-image")}
-            <div class="photo-art"><div class="portrait-head"></div><div class="portrait-body"></div></div>
-            <div class="asset-tag">{escape(photo_label.upper())} · {escape(photo_class)}</div>
+            {_portrait_fallback()}
+            <div class="asset-tag editorial-type">{escape(photo_tag)}</div>
           </div>
-          <div id="{escape(document.id if document else 'document', quote=True)}" class="document editorial-element">
+          <div id="{escape(document.id if document else 'document', quote=True)}" class="document editorial-element" data-rest-rotate="2">
             {_asset_image(composition, document, resolver, class_name="document-image")}
-            <div class="paper-index">ARCHIVE / SOURCE DOCUMENT</div>
-            <h2>{escape(document.text if document and document.text else "DOCUMENT")}</h2>
-            <p>DOCUMENT EXCERPT</p>
+            <div class="paper-index editorial-type">ARCHIVE / SOURCE DOCUMENT</div>
+            <h2 class="editorial-type">{escape(document.text if document and document.text else "DOCUMENT")}</h2>
+            <p class="editorial-type">DOCUMENT EXCERPT</p>
             <div class="rule"></div>
-            <p class="document-copy">{escape(document_copy)}</p>
-            <div id="{escape(passage.id if passage else 'passage', quote=True)}" class="passage editorial-element"></div>
-            <div class="paper-stamp">SOURCE</div>
+            <p class="document-copy editorial-type">{escape(document_copy)}</p>
+            <div id="{escape(passage.id if passage else 'passage', quote=True)}" class="passage draw editorial-element"></div>
+            <div class="paper-stamp editorial-type">SOURCE</div>
           </div>
           <div id="{escape(rulers.id if rulers else 'rulers', quote=True)}" class="ruler-grid editorial-element">{nodes}</div>
-          <div class="draft-label">FIG. 01 · EVIDENCE MAP</div>
+          <div class="draft-label editorial-type">FIG. 01 · EVIDENCE MAP</div>
         </div>
-        <div id="blackout" class="blackout"></div>
-        <div id="{escape(reveal.id if reveal else 'reveal', quote=True)}" class="elon editorial-element">{escape(reveal.text if reveal else "")}</div>
+        <div class="blackout"></div>
+        <div id="{escape(reveal.id if reveal else 'reveal', quote=True)}" class="elon editorial-element editorial-type">{escape(reveal.text if reveal else "")}</div>
       </section>
     """
+
+
+def _document_reveal_markup(
+    composition: EditorialComposition,
+    resolver: AssetURLResolver | None,
+) -> str:
+    document = _element(composition, "document")
+    title = _element(composition, "title")
+    mark = _element(composition, "passage-mark")
+    annotation = _element(composition, "annotation")
+    context = _element(composition, "context-image")
+    connector = _element(composition, "connector")
+    document_text = document.text.strip() if document and document.text else ""
+    document_copy_tag = (
+        f'<p class="document-copy editorial-type">{escape(document_text)}</p>'
+        if document_text
+        else ""
+    )
+    context_tag = _card_tag(_asset(composition, context), "CONTEXT PHOTOGRAPH")
+    return f"""
+      <section class="composition document-reveal" data-composition="{escape(composition.id, quote=True)}">
+        <div class="grain"></div>
+        <div class="research-layer">
+          <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
+          <div id="{escape(title.id if title else 'title', quote=True)}" class="document-title editorial-element editorial-type">{escape(title.text if title else "")}</div>
+          <div id="{escape(document.id if document else 'document', quote=True)}" class="source-sheet editorial-element" data-rest-rotate="1">
+            {_asset_image(composition, document, resolver, class_name="document-image")}
+            <div class="paper-index editorial-type">SOURCE / DOCUMENT</div>
+            {document_copy_tag}
+            <div id="{escape(mark.id if mark else 'passage-mark', quote=True)}" class="passage-mark draw editorial-element"></div>
+            <div class="paper-stamp editorial-type">SOURCE</div>
+          </div>
+          <div id="{escape(connector.id if connector else 'connector', quote=True)}" class="connector-line draw editorial-element"></div>
+          <div id="{escape(annotation.id if annotation else 'annotation', quote=True)}" class="annotation editorial-element editorial-type">{escape(annotation.text if annotation else "")}</div>
+          <div id="{escape(context.id if context else 'context', quote=True)}" class="context-photo editorial-element" data-rest-rotate="-1.6">
+            {_asset_image(composition, context, resolver, class_name="context-photo-image")}
+            {_portrait_fallback()}
+            <div class="asset-tag editorial-type">{escape(context_tag)}</div>
+          </div>
+          <div class="draft-label editorial-type">FIG. 02 · SOURCE READING</div>
+        </div>
+        <div class="blackout"></div>
+      </section>
+    """
+
+
+def _comparison_markup(
+    composition: EditorialComposition,
+    resolver: AssetURLResolver | None,
+) -> str:
+    headline = _element(composition, "headline")
+    left_image = _element(composition, "left-image")
+    right_image = _element(composition, "right-image")
+    left_label = _element(composition, "left-label")
+    right_label = _element(composition, "right-label")
+    divider = _element(composition, "divider")
+    left_tag = _card_tag(_asset(composition, left_image), "LEFT SOURCE")
+    right_tag = _card_tag(_asset(composition, right_image), "RIGHT SOURCE")
+    return f"""
+      <section class="composition comparison-canvas" data-composition="{escape(composition.id, quote=True)}">
+        <div class="grain"></div>
+        <div class="research-layer">
+          <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="comparison-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div id="{escape(left_image.id if left_image else 'left-image', quote=True)}" class="comparison-card left-card editorial-element" data-rest-rotate="-1.2">
+            {_asset_image(composition, left_image, resolver, class_name="comparison-left-image")}
+            {_portrait_fallback()}
+            <div class="asset-tag editorial-type">{escape(left_tag)}</div>
+          </div>
+          <div id="{escape(right_image.id if right_image else 'right-image', quote=True)}" class="comparison-card right-card editorial-element" data-rest-rotate="1.2">
+            {_asset_image(composition, right_image, resolver, class_name="comparison-right-image")}
+            {_portrait_fallback()}
+            <div class="asset-tag editorial-type">{escape(right_tag)}</div>
+          </div>
+          <div id="{escape(left_label.id if left_label else 'left-label', quote=True)}" class="comparison-label left-label editorial-element editorial-type">{escape(left_label.text if left_label else "")}</div>
+          <div id="{escape(right_label.id if right_label else 'right-label', quote=True)}" class="comparison-label right-label editorial-element editorial-type">{escape(right_label.text if right_label else "")}</div>
+          <div id="{escape(divider.id if divider else 'divider', quote=True)}" class="divider-line draw editorial-element" data-draw-axis="y"></div>
+          <div class="draft-label editorial-type">FIG. 03 · COMPARISON</div>
+        </div>
+        <div class="blackout"></div>
+      </section>
+    """
+
+
+def _illustration_markup(
+    composition: EditorialComposition,
+    resolver: AssetURLResolver | None,
+) -> str:
+    illustration = _element(composition, "illustration")
+    headline = _element(composition, "headline")
+    supporting = _element(composition, "supporting-text")
+    rule = _element(composition, "technical-line")
+    return f"""
+      <section class="composition illustration-canvas" data-composition="{escape(composition.id, quote=True)}">
+        <div class="grain"></div>
+        <div class="research-layer">
+          <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
+          <div id="{escape(illustration.id if illustration else 'illustration', quote=True)}" class="illustration-frame editorial-element">
+            {_asset_image(composition, illustration, resolver, class_name="illustration-image")}
+            <div class="illustration-art"></div>
+          </div>
+          <div id="{escape(rule.id if rule else 'technical-line', quote=True)}" class="technical-rule draw editorial-element"></div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="illustration-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div id="{escape(supporting.id if supporting else 'supporting-text', quote=True)}" class="supporting-copy editorial-element editorial-type">{escape(supporting.text if supporting else "")}</div>
+          <div class="draft-label editorial-type">FIG. 04 · ILLUSTRATION</div>
+        </div>
+        <div class="blackout"></div>
+      </section>
+    """
+
+
+def _big_text_markup(
+    composition: EditorialComposition,
+    resolver: AssetURLResolver | None,
+) -> str:
+    headline = _element(composition, "headline")
+    kicker = _element(composition, "kicker")
+    blackout = _element(composition, "blackout")
+    return f"""
+      <section class="composition big-text-reveal" data-composition="{escape(composition.id, quote=True)}">
+        <div class="grain"></div>
+        <div class="research-layer">
+          <div class="kicker-rule"></div>
+          <div id="{escape(kicker.id if kicker else 'kicker', quote=True)}" class="big-kicker editorial-element editorial-type">{escape(kicker.text if kicker else "")}</div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div class="draft-label editorial-type">FIG. 05 · STATED</div>
+        </div>
+        <div id="{escape(blackout.id if blackout else 'blackout', quote=True)}" class="blackout editorial-element"></div>
+      </section>
+    """
+
+
+_TEMPLATE_MARKUP: dict[EditorialTemplate, Callable[[EditorialComposition, AssetURLResolver | None], str]] = {
+    EditorialTemplate.ARCHIVE_CANVAS: _archive_markup,
+    EditorialTemplate.DOCUMENT_REVEAL: _document_reveal_markup,
+    EditorialTemplate.COMPARISON_CANVAS: _comparison_markup,
+    EditorialTemplate.ILLUSTRATION_CANVAS: _illustration_markup,
+    EditorialTemplate.BIG_TEXT_REVEAL: _big_text_markup,
+}
 
 
 def compile_edit_plan_html(
@@ -132,19 +280,23 @@ def compile_edit_plan_html(
     *,
     asset_url_resolver: AssetURLResolver | None = None,
 ) -> str:
-    """Compile a validated plan into trusted, self-contained preview/render HTML."""
-    unsupported = sorted({
+    """Compile a validated plan into trusted, self-contained preview/render HTML.
+
+    Every approved template renders from renderer-owned layout; plan content only
+    supplies escaped text, resolved asset URLs, and element ids.
+    """
+    unimplemented = sorted({
         item.template.value
         for item in plan.compositions
-        if item.template is not EditorialTemplate.ARCHIVE_CANVAS
+        if item.template not in _TEMPLATE_MARKUP
     })
-    if unsupported:
+    if unimplemented:
         raise ValueError(
-            "the prototype renderer currently supports only archiveCanvas; "
-            f"unsupported templates: {', '.join(unsupported)}"
+            f"the deterministic renderer does not implement template: {', '.join(unimplemented)}"
         )
     markup = "".join(
-        _archive_markup(item, asset_url_resolver) for item in plan.compositions
+        _TEMPLATE_MARKUP[item.template](item, asset_url_resolver)
+        for item in plan.compositions
     )
     payload = _script_json(plan.model_dump(mode="json"))
     return f"""<!doctype html>
@@ -159,16 +311,22 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .research-layer{{position:absolute;inset:0;transform-origin:50% 50%}}
 .grain{{position:absolute;inset:0;z-index:80;pointer-events:none;opacity:.11;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E")}}
 .technical-line{{position:absolute;background:var(--blue);opacity:.28}} .line-a{{left:74px;top:120px;width:1px;height:1640px}} .line-b{{left:74px;right:74px;top:1704px;height:1px}}
+.blackout{{position:absolute;inset:0;z-index:100;background:#050505;opacity:0}}
+/* archiveCanvas */
 .year{{position:absolute;left:72px;top:105px;font-size:250px;font-weight:900;line-height:.84;letter-spacing:-10px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
 .archive-photo{{position:absolute;left:76px;top:420px;width:610px;height:610px;padding:18px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-2.4deg)}}
-.photo-art{{position:relative;width:100%;height:520px;overflow:hidden;background:radial-gradient(circle at 50% 27%,#a59c88 0 12%,transparent 13%),linear-gradient(145deg,#625f57,#b3aa97 46%,#494943)}}
+.photo-art{{position:absolute;overflow:hidden;background:radial-gradient(circle at 50% 27%,#a59c88 0 12%,transparent 13%),linear-gradient(145deg,#625f57,#b3aa97 46%,#494943)}}
+.archive-photo .photo-art{{inset:18px 18px 72px}}
+.context-photo .photo-art,.comparison-card .photo-art{{inset:16px 16px 64px}}
 .asset-image{{display:block;object-fit:cover}} .archive-photo-image{{position:absolute;inset:18px 18px 72px;width:calc(100% - 36px);height:520px;z-index:2;filter:grayscale(.76) sepia(.22) contrast(1.04)}}
 .archive-photo:has(.archive-photo-image) .photo-art{{visibility:hidden}}
 .portrait-head{{position:absolute;left:220px;top:100px;width:130px;height:165px;border-radius:48% 48% 42% 42%;background:#353735;box-shadow:24px 5px 0 #77756c}}
 .portrait-body{{position:absolute;left:120px;top:245px;width:360px;height:340px;border-radius:48% 48% 0 0;background:#292c2c}}
-.asset-tag{{padding-top:18px;color:#3b3731;font-size:22px;letter-spacing:3px}}
+.asset-tag{{position:absolute;color:#3b3731;font-size:22px;letter-spacing:3px;text-align:center}}
+.archive-photo .asset-tag{{left:18px;right:18px;bottom:14px}}
+.context-photo .asset-tag,.comparison-card .asset-tag{{left:16px;right:16px;bottom:10px}}
 .document{{position:absolute;right:54px;top:630px;width:590px;height:760px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(2deg)}}
-.document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}} .document>*:not(.document-image){{position:relative;z-index:2}}
+.document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}} .document>*:not(.document-image):not(.passage):not(.paper-stamp){{position:relative;z-index:2}}
 .paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "DejaVu Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "DejaVu Serif",serif;letter-spacing:3px}}
 .document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "DejaVu Serif",serif;letter-spacing:0}}
 .passage{{position:absolute;left:54px;right:54px;top:508px;height:22px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
@@ -178,13 +336,43 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .ruler-node:before{{content:"";position:absolute;left:12px;right:12px;top:50%;height:1px;background:#6f91a680}} .ruler-node span{{position:absolute;right:10px;top:8px;font:17px monospace}}
 .ruler-node.focus{{border-color:var(--rust);background:#4e271d;color:#ffd8bd;box-shadow:inset 0 0 0 3px #b9532f}}
 .draft-label{{position:absolute;left:80px;bottom:64px;font:18px monospace;letter-spacing:3px;color:#6f91a6}}
-.blackout{{position:absolute;inset:0;z-index:100;background:#050505;opacity:0}}
 .elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;font-size:210px;font-weight:900;letter-spacing:8px;color:var(--ivory);opacity:0}}
-.editorial-text-disabled .year,.editorial-text-disabled .elon,
-.editorial-text-disabled .asset-tag,.editorial-text-disabled .paper-index,
-.editorial-text-disabled .document h2,.editorial-text-disabled .document>p,
-.editorial-text-disabled .paper-stamp,.editorial-text-disabled .ruler-node span,
-.editorial-text-disabled .draft-label{{visibility:hidden}}
+/* documentReveal */
+.document-title{{position:absolute;left:72px;right:72px;top:96px;font-size:104px;font-weight:900;line-height:1.02;letter-spacing:2px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
+.source-sheet{{position:absolute;left:64px;right:64px;top:352px;height:872px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(1deg)}}
+.source-sheet .document-image{{opacity:.18}} .source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp){{position:relative;z-index:2}}
+.source-sheet .paper-index{{margin-top:0}} .source-sheet .document-copy{{font:30px/1.72 "DejaVu Serif",serif;margin:44px 0 0;letter-spacing:0}}
+.passage-mark{{position:absolute;left:56px;right:56px;top:196px;height:34px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
+.connector-line{{position:absolute;left:72px;top:1268px;width:520px;height:2px;background:var(--blue);transform-origin:left center}}
+.annotation{{position:absolute;left:72px;top:1308px;width:500px;font:28px/1.6 "DejaVu Serif",serif;color:var(--ivory);border-left:3px solid var(--rust);padding-left:26px}}
+.context-photo{{position:absolute;right:72px;top:1288px;width:380px;height:520px;padding:16px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-1.6deg)}}
+.context-photo-image{{position:absolute;inset:16px 16px 64px;width:calc(100% - 32px);height:440px;z-index:2;filter:grayscale(.72) sepia(.2) contrast(1.03)}}
+.context-photo:has(.context-photo-image) .photo-art{{visibility:hidden}}
+/* comparisonCanvas */
+.comparison-headline{{position:absolute;left:72px;right:72px;top:110px;font-size:100px;font-weight:900;line-height:1.05;letter-spacing:1px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
+.comparison-card{{position:absolute;top:420px;width:440px;height:560px;padding:16px;background:#c9bea4;box-shadow:0 30px 80px #0008}}
+.left-card{{left:72px;transform:rotate(-1.2deg)}} .right-card{{right:72px;transform:rotate(1.2deg)}}
+.comparison-left-image{{position:absolute;inset:16px 16px 64px;width:calc(100% - 32px);height:480px;z-index:2;filter:grayscale(.72) sepia(.18) contrast(1.03)}}
+.comparison-right-image{{position:absolute;inset:16px 16px 64px;width:calc(100% - 32px);height:480px;z-index:2;filter:grayscale(.72) sepia(.18) contrast(1.03)}}
+.comparison-card:has(.comparison-left-image) .photo-art,.comparison-card:has(.comparison-right-image) .photo-art{{visibility:hidden}}
+.comparison-label{{position:absolute;top:1032px;width:440px;font-size:40px;font-weight:900;letter-spacing:2px;text-transform:uppercase;color:var(--ivory);border-top:3px solid var(--rust);padding-top:18px}}
+.left-label{{left:72px}} .right-label{{right:72px}}
+.divider-line{{position:absolute;left:539px;top:470px;width:2px;height:660px;background:var(--blue);transform-origin:top center}}
+/* illustrationCanvas */
+.illustration-frame{{position:absolute;left:72px;right:72px;top:300px;height:980px;padding:18px;background:var(--charcoal-2);border:1px solid #6f91a659;box-shadow:0 35px 95px #000b}}
+.illustration-art{{position:absolute;inset:18px;overflow:hidden;background:radial-gradient(circle at 50% 42%,#2e3d49 0 20%,transparent 42%),linear-gradient(155deg,#222a32,#3c4b57 55%,#171c21)}}
+.illustration-image{{position:absolute;inset:18px;width:calc(100% - 36px);height:calc(100% - 36px);z-index:2}}
+.illustration-frame:has(.illustration-image) .illustration-art{{display:none}}
+.technical-rule{{position:absolute;left:72px;right:72px;top:1332px;height:2px;background:var(--blue);transform-origin:left center}}
+.illustration-headline{{position:absolute;left:72px;right:72px;top:1396px;font-size:92px;font-weight:900;line-height:1;letter-spacing:1px;color:var(--ivory)}}
+.supporting-copy{{position:absolute;left:72px;right:72px;top:1548px;font:28px/1.62 "DejaVu Serif",serif;color:#d9d0b2}}
+/* bigTextReveal */
+.kicker-rule{{position:absolute;left:50%;top:560px;width:120px;height:2px;margin-left:-60px;background:var(--rust)}}
+.big-kicker{{position:absolute;left:72px;right:72px;top:604px;text-align:center;font-size:34px;font-weight:700;letter-spacing:12px;text-transform:uppercase;color:var(--blue)}}
+.big-headline{{position:absolute;left:40px;right:40px;top:712px;text-align:center;font-size:250px;font-weight:900;line-height:.95;letter-spacing:4px;color:var(--ivory);text-shadow:0 10px 40px #000a}}
+.focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
+.editorial-text-disabled .editorial-type{{visibility:hidden}}
+.editorial-text-disabled .ruler-node span{{visibility:hidden}}
 </style></head><body class="{'editorial-text-enabled' if plan.editorial_text_enabled else 'editorial-text-disabled'}"><main id="stage">{markup}</main>
 <script>
 "use strict";
@@ -192,31 +380,32 @@ const PLAN={payload};
 const clamp=v=>Math.max(0,Math.min(1,v));
 const ease=v=>{{v=clamp(v);return v*v*(3-2*v)}};
 function reset(root){{
-  root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none'}});
+  root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
   root.querySelectorAll('.ruler-node').forEach(el=>{{el.style.opacity='0';el.classList.remove('focus')}});
-  root.querySelector('.research-layer').style.cssText='';
-  root.querySelector('.blackout').style.opacity='0';
-  const passage=root.querySelector('#passage'); if(passage) passage.style.transform='scaleX(0)';
+  const layer=root.querySelector('.research-layer');if(layer)layer.style.cssText='';
+  const blackout=root.querySelector('.blackout');if(blackout)blackout.style.opacity='0';
+  root.querySelectorAll('.draw').forEach(el=>{{el.style.transform=el.dataset.drawAxis==='y'?'scaleY(0)':'scaleX(0)'}});
 }}
 function applyEvent(root,event,t){{
   if(t<event.time)return;
   const p=event.duration===0?1:ease((t-event.time)/event.duration);
   const target=event.target==='canvas'?root:root.querySelector('#'+CSS.escape(event.target));
   if(!target)return;
+  const rest=Number(target.dataset.restRotate)||0;
   switch(event.action){{
-    case 'fade': target.style.opacity=String(p); break;
+    case 'fade': target.style.opacity=String(p);break;
     case 'fadeUp': target.style.opacity=String(p);target.style.transform=`translateY(${{(1-p)*70}}px)`;break;
-    case 'slideInLeft': target.style.opacity=String(p);target.style.transform=`translateX(${{(p-1)*520}}px) rotate(-2.4deg)`;break;
+    case 'slideInLeft': target.style.opacity=String(p);target.style.transform=`translateX(${{(p-1)*520}}px) rotate(${{rest}}deg)`;break;
     case 'slideInRight': target.style.opacity=String(p);target.style.transform=`translateX(${{(1-p)*520}}px)`;break;
     case 'scaleIn': target.style.opacity=String(p);target.style.transform=`scale(${{.78+.22*p}})`;break;
     case 'slowPush': target.style.opacity='1';target.style.transform=`scale(${{1+.04*p}})`;break;
-    case 'paperSlide': target.style.opacity=String(p);target.style.transform=`translate(${{(1-p)*520}}px,${{(1-p)*90}}px) rotate(${{7-5*p}}deg)`;break;
+    case 'paperSlide': target.style.opacity=String(p);target.style.transform=`translate(${{(1-p)*520}}px,${{(1-p)*90}}px) rotate(${{rest*(3.5-2.5*p)}}deg)`;break;
     case 'underline': case 'highlight': target.style.opacity=String(p);target.style.transform=`scaleX(${{p}})`;break;
-    case 'drawLine': target.style.opacity=String(p);target.style.transform=`scaleX(${{p}})`;break;
-    case 'staggerIn': {{const nodes=[...target.querySelectorAll('.ruler-node')];nodes.forEach((node,i)=>{{const q=ease(clamp(p*1.65-i/nodes.length*.65));node.style.opacity=String(q);node.style.transform=`translateY(${{(1-q)*34}}px)`}});target.style.opacity='1';break;}}
-    case 'dimOthers': {{const focus=Number(event.value)||0;target.querySelectorAll('.ruler-node').forEach((node,i)=>{{node.style.opacity=String(i===focus?1:1-.78*p)}});target.style.opacity='1';break;}}
-    case 'focusOne': {{const focus=Number(event.value)||0;const node=target.querySelectorAll('.ruler-node')[focus];if(node&&p>.2)node.classList.add('focus');target.style.opacity='1';break;}}
-    case 'collapseToBlack': {{const layer=root.querySelector('.research-layer');layer.style.opacity=String(1-p);layer.style.transform=`scale(${{1-.08*p}})`;root.querySelector('.blackout').style.opacity=String(p);break;}}
+    case 'drawLine': target.style.opacity=String(p);target.style.transform=(target.dataset.drawAxis==='y')?`scaleY(${{p}})`:`scaleX(${{p}})`;break;
+    case 'staggerIn': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{nodes.forEach((node,i)=>{{const q=ease(clamp(p*1.65-i/nodes.length*.65));node.style.opacity=String(q);node.style.transform=`translateY(${{(1-q)*34}}px)`}});target.style.opacity='1';}}else{{target.style.opacity=String(p);target.style.transform=`translateY(${{(1-p)*40}}px)`;}}break;}}
+    case 'dimOthers': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;nodes.forEach((node,i)=>{{node.style.opacity=String(i===focus?1:1-.78*p)}});target.style.opacity='1';}}else{{target.style.filter=`brightness(${{1-.2*p}})`;}}break;}}
+    case 'focusOne': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;const node=nodes[focus];if(node&&p>.2)node.classList.add('focus');target.style.opacity='1';}}else{{target.style.opacity='1';if(p>.2)target.classList.add('focus-mark');}}break;}}
+    case 'collapseToBlack': {{const layer=root.querySelector('.research-layer');if(layer){{layer.style.opacity=String(1-p);layer.style.transform=`scale(${{1-.08*p}})`;}}const blackout=root.querySelector('.blackout');if(blackout)blackout.style.opacity=String(p);break;}}
     case 'hardCut': target.style.opacity='1';break;
   }}
 }}
