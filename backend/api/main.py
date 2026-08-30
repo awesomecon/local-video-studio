@@ -48,6 +48,11 @@ class EditorialSettingsEdit(BaseModel):
     editorial_text_enabled: bool | None = None
 
 
+class EditorialAssetLockEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    locked: bool
+
+
 class ApproveRequest(BaseModel):
     lock: bool = False
 
@@ -888,6 +893,78 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.patch(
+        "/api/projects/{project_id}/editorial/compositions/{composition_id}"
+        "/assets/{editorial_asset_id}"
+    )
+    def update_editorial_asset_lock(
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+        request: EditorialAssetLockEdit,
+    ) -> dict[str, Any]:
+        try:
+            return service.update_editorial_asset_lock(
+                project_id,
+                composition_id,
+                editorial_asset_id,
+                locked=request.locked,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.post(
+        "/api/projects/{project_id}/editorial/compositions/{composition_id}"
+        "/assets/{editorial_asset_id}/replace"
+    )
+    async def replace_editorial_asset(
+        project_id: str,
+        composition_id: str,
+        editorial_asset_id: str,
+        file: UploadFile = File(...),
+        evidence: bool = Form(False),
+    ) -> dict[str, Any]:
+        filename = Path(file.filename or "upload").name
+        staged_path: Path | None = None
+        try:
+            suffix = Path(filename).suffix.lower()
+            service.temp_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                prefix="lvs-editorial-asset-",
+                suffix=suffix,
+                dir=service.temp_root,
+                delete=False,
+            ) as staged:
+                staged_path = Path(staged.name)
+                total = 0
+                while chunk := await file.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > 1024 * 1024 * 1024:
+                        raise ValueError("uploaded Editorial image exceeds the 1 GB local import limit")
+                    staged.write(chunk)
+            return service.replace_editorial_asset(
+                project_id,
+                composition_id,
+                editorial_asset_id,
+                staged_path,
+                original_filename=filename,
+                evidence=evidence,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        finally:
+            await file.close()
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
 
     @application.get(
         "/api/projects/{project_id}/editorial/preview",
