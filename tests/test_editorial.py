@@ -120,7 +120,7 @@ def test_compiler_can_hide_editorial_typography_without_hiding_caption_data() ->
 
     html = compile_edit_plan_html(plan)
 
-    assert '<body class="editorial-text-disabled">' in html
+    assert '<body class="editorial-text-disabled portrait">' in html
     assert '"captions_enabled":true' in html
 
 
@@ -679,12 +679,33 @@ def test_every_template_compiles_with_shared_theme_and_seek_contract() -> None:
         for marker in THEME_MARKERS:
             assert marker in html, (template.value, marker)
         assert f'data-composition="{template.value}"' in html
-        assert '<body class="editorial-text-enabled">' in html
+        assert '<body class="editorial-text-enabled portrait">' in html
         # Compositions are isolated: hidden until renderAt activates the interval.
         assert ".composition{position:absolute;inset:0;display:none" in html
         # Every approved motion primitive stays available in the compiled runtime.
         for name in MOTION_NAMES:
             assert f"case '{name}':" in html, (template.value, name)
+
+
+def test_renderer_scales_vertical_preview_and_uses_landscape_layout() -> None:
+    vertical = EditPlan(
+        project_id="vertical", width=320, height=568,
+        compositions=[_template_composition(EditorialTemplate.BIG_TEXT_REVEAL)],
+    )
+    vertical_html = compile_edit_plan_html(vertical)
+    assert '<body class="editorial-text-enabled portrait">' in vertical_html
+    assert "width:1080px;height:1920px" in vertical_html
+    assert "transform:scale(0.29583333)" in vertical_html
+
+    horizontal = EditPlan(
+        project_id="horizontal", width=1920, height=1080,
+        compositions=[_template_composition(EditorialTemplate.COMPARISON_CANVAS)],
+    )
+    horizontal_html = compile_edit_plan_html(horizontal)
+    assert '<body class="editorial-text-enabled landscape">' in horizontal_html
+    assert "width:1920px;height:1080px" in horizontal_html
+    assert "transform:scale(1.00000000)" in horizontal_html
+    assert ".landscape .comparison-card" in horizontal_html
 
 
 def test_document_reveal_binds_roles_to_layout_regions() -> None:
@@ -1033,7 +1054,7 @@ def test_typography_disable_hides_type_but_keeps_imagery_and_caption_data(
         plan,
         asset_url_resolver=lambda asset: f"/m/{asset.id}",
     )
-    assert '<body class="editorial-text-disabled">' in html
+    assert '<body class="editorial-text-disabled portrait">' in html
     assert '"captions_enabled":true' in html
     assert ".editorial-text-disabled .editorial-type{visibility:hidden}" in html
     assert ".editorial-text-disabled .ruler-node span{visibility:hidden}" in html
