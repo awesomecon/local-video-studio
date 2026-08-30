@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from html import escape
 
 import pytest
 from pydantic import ValidationError
@@ -590,3 +591,456 @@ def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path:
     pipeline._ensure_editorial_visual(project, force=False)
     assert [call[0].compositions[0].id for call in synthetic.calls][-1] == "first"
     assert probe_media(first_clip, pipeline.renderer.binaries).has_video
+# Deterministic template library: renderer-owned layout for all five templates
+# ---------------------------------------------------------------------------
+
+THEME_MARKERS = (
+    "--charcoal:#111315",
+    "--ivory:#e9dfc6",
+    "--rust:#b9532f",
+    "--blue:#6f91a6",
+    '"DejaVu Sans Condensed"',
+    '"DejaVu Serif"',
+    "grain",
+    "window.renderAt",
+    "__editorialReady",
+)
+
+MOTION_NAMES = [item.value for item in MotionPrimitive]
+
+
+def _element(eid: str, role: str, etype: EditorialElementType, **fields) -> EditorialElement:
+    return EditorialElement(id=eid, role=role, type=etype, **fields)
+
+
+def _asset(
+    aid: str,
+    atype: EditorialAssetType = EditorialAssetType.GENERATED_IMAGE,
+) -> EditorialAsset:
+    return EditorialAsset(id=aid, type=atype)
+
+
+def _composition(
+    cid: str,
+    template: EditorialTemplate,
+    *,
+    start: float = 0.0,
+    duration: float = 4.0,
+    assets: list[EditorialAsset] | None = None,
+    elements: list[EditorialElement] | None = None,
+    events: list[EditorialEvent] | None = None,
+) -> EditorialComposition:
+    return EditorialComposition(
+        id=cid,
+        start=start,
+        duration=duration,
+        template=template,
+        assets=assets or [],
+        elements=elements or [],
+        events=events or [],
+    )
+
+
+def _template_composition(template: EditorialTemplate, *, cid: str = "c1") -> EditorialComposition:
+    """Minimal valid composition for every template, using non-prototype ids."""
+    if template is EditorialTemplate.ARCHIVE_CANVAS:
+        return _composition(cid, template, assets=[_asset("photo-1")], elements=[
+            _element("year-1", "year", EditorialElementType.TEXT, text="1949"),
+            _element("photo-1", "archive-photo", EditorialElementType.IMAGE, asset_id="photo-1"),
+        ])
+    if template is EditorialTemplate.DOCUMENT_REVEAL:
+        return _composition(cid, template, assets=[_asset("scan-1")], elements=[
+            _element("doc-1", "document", EditorialElementType.DOCUMENT, asset_id="scan-1"),
+            _element("title-1", "title", EditorialElementType.TEXT, text="SHEET"),
+        ])
+    if template is EditorialTemplate.COMPARISON_CANVAS:
+        return _composition(cid, template, assets=[_asset("left-1"), _asset("right-1")], elements=[
+            _element("left-1", "left-image", EditorialElementType.IMAGE, asset_id="left-1"),
+            _element("right-1", "right-image", EditorialElementType.IMAGE, asset_id="right-1"),
+        ])
+    if template is EditorialTemplate.ILLUSTRATION_CANVAS:
+        return _composition(cid, template, assets=[_asset("hero-1")], elements=[
+            _element("hero-1", "illustration", EditorialElementType.IMAGE, asset_id="hero-1"),
+        ])
+    return _composition(cid, template, elements=[
+        _element("head-1", "headline", EditorialElementType.TEXT, text="WORD"),
+    ])
+
+
+def _plan_payload(html: str) -> dict:
+    return json.loads(html.split("const PLAN=")[1].splitlines()[0].rstrip(";"))
+
+
+def test_every_template_compiles_with_shared_theme_and_seek_contract() -> None:
+    for template in EditorialTemplate:
+        html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[
+            _template_composition(template, cid=template.value),
+        ]))
+        for marker in THEME_MARKERS:
+            assert marker in html, (template.value, marker)
+        assert f'data-composition="{template.value}"' in html
+        assert '<body class="editorial-text-enabled">' in html
+        # Compositions are isolated: hidden until renderAt activates the interval.
+        assert ".composition{position:absolute;inset:0;display:none" in html
+        # Every approved motion primitive stays available in the compiled runtime.
+        for name in MOTION_NAMES:
+            assert f"case '{name}':" in html, (template.value, name)
+
+
+def test_document_reveal_binds_roles_to_layout_regions() -> None:
+    composition = _composition(
+        "dr-comp", EditorialTemplate.DOCUMENT_REVEAL, duration=6,
+        assets=[_asset("scan-7f"), _asset("photo-91")],
+        elements=[
+            _element(
+                "sheet-7f", "document", EditorialElementType.DOCUMENT,
+                text="The 1949 memorandum", asset_id="scan-7f",
+            ),
+            _element("title-9c", "title", EditorialElementType.TEXT, text="ONE PLAN"),
+            _element("mark-31", "passage-mark", EditorialElementType.UNDERLINE),
+            _element(
+                "note-b2", "annotation", EditorialElementType.TEXT,
+                text="Marginal reading note",
+            ),
+            _element("photo-91e", "context-image", EditorialElementType.IMAGE, asset_id="photo-91"),
+            _element("join-08", "connector", EditorialElementType.LINE),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.FADE_UP, target="title-9c"),
+            EditorialEvent(time=0.8, action=MotionPrimitive.PAPER_SLIDE, target="sheet-7f"),
+            EditorialEvent(time=2.0, action=MotionPrimitive.UNDERLINE, target="mark-31"),
+            EditorialEvent(time=2.8, action=MotionPrimitive.DRAW_LINE, target="join-08"),
+            EditorialEvent(time=3.6, action=MotionPrimitive.FADE, target="note-b2"),
+            EditorialEvent(time=4.4, action=MotionPrimitive.SLIDE_IN_RIGHT, target="photo-91e"),
+        ],
+    )
+    html = compile_edit_plan_html(
+        EditPlan(project_id="p", compositions=[composition]),
+        asset_url_resolver=lambda asset: f"/media/{asset.id}",
+    )
+    assert 'id="sheet-7f" class="source-sheet editorial-element"' in html
+    assert 'id="title-9c" class="document-title editorial-element editorial-type"' in html
+    assert 'id="mark-31" class="passage-mark draw editorial-element"' in html
+    assert 'id="note-b2" class="annotation editorial-element editorial-type"' in html
+    assert 'id="photo-91e" class="context-photo editorial-element"' in html
+    assert 'id="join-08" class="connector-line draw editorial-element"' in html
+    assert ">ONE PLAN<" in html
+    assert ">The 1949 memorandum<" in html
+    assert ">Marginal reading note<" in html
+    assert 'src="/media/scan-7f"' in html
+    assert 'src="/media/photo-91"' in html
+
+
+def test_comparison_canvas_binds_roles_to_layout_regions() -> None:
+    composition = _composition(
+        "cmp-comp", EditorialTemplate.COMPARISON_CANVAS, duration=5,
+        assets=[_asset("left-asset"), _asset("right-asset")],
+        elements=[
+            _element("head-a1", "headline", EditorialElementType.TEXT, text="TWO STAGES"),
+            _element("img-left-a2", "left-image", EditorialElementType.IMAGE, asset_id="left-asset"),
+            _element("img-right-a3", "right-image", EditorialElementType.IMAGE, asset_id="right-asset"),
+            _element("cap-left-a4", "left-label", EditorialElementType.TEXT, text="BEFORE"),
+            _element("cap-right-a5", "right-label", EditorialElementType.TEXT, text="AFTER"),
+            _element("cut-a6", "divider", EditorialElementType.LINE),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.SLIDE_IN_LEFT, target="img-left-a2"),
+            EditorialEvent(time=0.6, action=MotionPrimitive.SLIDE_IN_RIGHT, target="img-right-a3"),
+            EditorialEvent(time=1.2, action=MotionPrimitive.DRAW_LINE, target="cut-a6"),
+            EditorialEvent(time=1.8, action=MotionPrimitive.HARD_CUT, target="head-a1"),
+        ],
+    )
+    html = compile_edit_plan_html(
+        EditPlan(project_id="p", compositions=[composition]),
+        asset_url_resolver=lambda asset: f"/assets/{asset.id}",
+    )
+    assert 'id="head-a1" class="comparison-headline editorial-element editorial-type"' in html
+    assert 'id="img-left-a2" class="comparison-card left-card editorial-element"' in html
+    assert 'id="img-right-a3" class="comparison-card right-card editorial-element"' in html
+    assert 'id="cap-left-a4" class="comparison-label left-label editorial-element editorial-type"' in html
+    assert 'id="cap-right-a5" class="comparison-label right-label editorial-element editorial-type"' in html
+    assert 'id="cut-a6" class="divider-line draw editorial-element" data-draw-axis="y"' in html
+    assert ">TWO STAGES<" in html and ">BEFORE<" in html and ">AFTER<" in html
+    assert 'src="/assets/left-asset"' in html and 'src="/assets/right-asset"' in html
+
+
+def test_illustration_canvas_binds_roles_to_layout_regions() -> None:
+    composition = _composition(
+        "ill-comp", EditorialTemplate.ILLUSTRATION_CANVAS, duration=5,
+        assets=[EditorialAsset(id="hero-asset", type=EditorialAssetType.GENERATED_IMAGE, asset_id="hero-asset")],
+        elements=[
+            _element("hero-b1", "illustration", EditorialElementType.IMAGE, asset_id="hero-asset"),
+            _element("head-b2", "headline", EditorialElementType.TEXT, text="MARS MAP"),
+            _element(
+                "copy-b3", "supporting-text", EditorialElementType.TEXT,
+                text="A technical reading of the plate.",
+            ),
+            _element("rule-b4", "technical-line", EditorialElementType.LINE),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.SCALE_IN, target="hero-b1"),
+            EditorialEvent(time=1.2, action=MotionPrimitive.DRAW_LINE, target="rule-b4"),
+            EditorialEvent(time=1.8, action=MotionPrimitive.FADE_UP, target="head-b2"),
+            EditorialEvent(time=2.6, action=MotionPrimitive.FADE, target="copy-b3"),
+        ],
+    )
+    # The resolver sees EditorialAsset objects; project code keys off asset_id.
+    html = compile_edit_plan_html(
+        EditPlan(project_id="p", compositions=[composition]),
+        asset_url_resolver=lambda asset: f"/images/{asset.asset_id}",
+    )
+    assert 'id="hero-b1" class="illustration-frame editorial-element"' in html
+    assert 'id="head-b2" class="illustration-headline editorial-element editorial-type"' in html
+    assert 'id="copy-b3" class="supporting-copy editorial-element editorial-type"' in html
+    assert 'id="rule-b4" class="technical-rule draw editorial-element"' in html
+    assert ">MARS MAP<" in html and ">A technical reading of the plate.<" in html
+    assert 'src="/images/hero-asset"' in html
+
+
+def test_big_text_reveal_binds_roles_to_layout_regions() -> None:
+    composition = _composition(
+        "big-comp", EditorialTemplate.BIG_TEXT_REVEAL, duration=5,
+        elements=[
+            _element("kicker-c1", "kicker", EditorialElementType.TEXT, text="1949"),
+            _element("headline-c2", "headline", EditorialElementType.TEXT, text="ELON"),
+            _element("blackout-c3", "blackout", EditorialElementType.BLACK_SCREEN),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.FADE, target="kicker-c1"),
+            EditorialEvent(time=0.7, action=MotionPrimitive.HARD_CUT, target="headline-c2"),
+            EditorialEvent(time=3.5, action=MotionPrimitive.FADE, target="blackout-c3"),
+        ],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+    assert 'id="kicker-c1" class="big-kicker editorial-element editorial-type"' in html
+    assert 'id="headline-c2" class="big-headline editorial-element editorial-type"' in html
+    assert 'id="blackout-c3" class="blackout editorial-element"' in html
+    assert ">1949<" in html and ">ELON<" in html
+    # This template carries no imagery and therefore no resolved URLs.
+    assert "src=" not in html
+
+
+@pytest.mark.parametrize(("template", "placeholder"), [
+    (EditorialTemplate.DOCUMENT_REVEAL, "source-sheet"),
+    (EditorialTemplate.COMPARISON_CANVAS, "photo-art"),
+    (EditorialTemplate.ILLUSTRATION_CANVAS, "illustration-art"),
+])
+def test_new_templates_without_asset_urls_render_placeholders_not_broken_images(
+    template: EditorialTemplate, placeholder: str,
+) -> None:
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[
+        _template_composition(template, cid=template.value),
+    ]))
+    assert "<img" not in html
+    assert placeholder in html
+
+
+def test_new_templates_resolve_asset_urls_through_the_resolver_only() -> None:
+    url = '/api/projects/p/assets/a1/file?ref="scan"&n=2'
+    composition = _composition(
+        "asset-comp", EditorialTemplate.DOCUMENT_REVEAL,
+        assets=[_asset("scan-x"), _asset("photo-x")],
+        elements=[
+            _element("sheet-x", "document", EditorialElementType.DOCUMENT, asset_id="scan-x"),
+            _element("photo-xe", "context-image", EditorialElementType.IMAGE, asset_id="photo-x"),
+        ],
+    )
+    html = compile_edit_plan_html(
+        EditPlan(project_id="p", compositions=[composition]),
+        asset_url_resolver=lambda asset: url if asset.id == "photo-x" else None,
+    )
+    assert f'src="{escape(url, quote=True)}"' in html
+    assert url not in html
+    # Only the resolved asset emits an <img>; the other stays on the fallback.
+    assert html.count("<img") == 1
+
+
+def test_new_templates_render_plan_text_escaped_and_never_as_markup() -> None:
+    payload = '"><img src=x onerror=alert(1)>'
+    variants = [
+        _composition(
+            "esc-dr", EditorialTemplate.DOCUMENT_REVEAL,
+            assets=[_asset("scan-e")],
+            elements=[
+                _element("esc-doc", "document", EditorialElementType.DOCUMENT, text=payload, asset_id="scan-e"),
+                _element("esc-title", "title", EditorialElementType.TEXT, text=payload),
+                _element("esc-note", "annotation", EditorialElementType.TEXT, text=payload),
+            ],
+        ),
+        _composition(
+            "esc-cc", EditorialTemplate.COMPARISON_CANVAS,
+            assets=[_asset("la-e"), _asset("ra-e")],
+            elements=[
+                _element("esc-head", "headline", EditorialElementType.TEXT, text=payload),
+                _element("la-e2", "left-image", EditorialElementType.IMAGE, asset_id="la-e"),
+                _element("ra-e2", "right-image", EditorialElementType.IMAGE, asset_id="ra-e"),
+                _element("esc-ll", "left-label", EditorialElementType.TEXT, text=payload),
+                _element("esc-rl", "right-label", EditorialElementType.TEXT, text=payload),
+            ],
+        ),
+        _composition(
+            "esc-ic", EditorialTemplate.ILLUSTRATION_CANVAS,
+            assets=[_asset("hero-e")],
+            elements=[
+                _element("hero-e2", "illustration", EditorialElementType.IMAGE, asset_id="hero-e"),
+                _element("esc-ih", "headline", EditorialElementType.TEXT, text=payload),
+                _element("esc-copy", "supporting-text", EditorialElementType.TEXT, text=payload),
+            ],
+        ),
+        _composition(
+            "esc-bt", EditorialTemplate.BIG_TEXT_REVEAL,
+            elements=[
+                _element("esc-kick", "kicker", EditorialElementType.TEXT, text=payload),
+                _element("esc-bh", "headline", EditorialElementType.TEXT, text=payload),
+            ],
+        ),
+    ]
+    for composition in variants:
+        html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+        assert "<img src=x" not in html
+        assert payload not in html
+        assert "&lt;img src=x onerror=alert(1)&gt;" in html
+        # The only script tag in the document is the trusted runtime; plan
+        # text is embedded as escaped data, never as markup.
+        assert html.count("<script>") == 1
+        assert html.count("</script>") == 1
+
+
+def test_all_motion_primitives_are_plannable_and_compiled() -> None:
+    raw = [
+        (0.0, MotionPrimitive.FADE, "year-m", None),
+        (0.6, MotionPrimitive.FADE_UP, "year-m", None),
+        (1.2, MotionPrimitive.SLIDE_IN_LEFT, "photo-m", None),
+        (1.8, MotionPrimitive.SLIDE_IN_RIGHT, "paper-m", None),
+        (2.4, MotionPrimitive.SCALE_IN, "reveal-m", None),
+        (3.0, MotionPrimitive.SLOW_PUSH, "reveal-m", None),
+        (3.6, MotionPrimitive.PAPER_SLIDE, "paper-m", None),
+        (4.2, MotionPrimitive.UNDERLINE, "mark-m", None),
+        (4.8, MotionPrimitive.HIGHLIGHT, "mark-m", None),
+        (5.4, MotionPrimitive.DRAW_LINE, "mark-m", None),
+        (6.0, MotionPrimitive.STAGGER_IN, "rulers-m", None),
+        (7.2, MotionPrimitive.DIM_OTHERS, "rulers-m", 4),
+        (7.2, MotionPrimitive.FOCUS_ONE, "rulers-m", 4),
+        (8.4, MotionPrimitive.COLLAPSE_TO_BLACK, "canvas", None),
+        (9.6, MotionPrimitive.HARD_CUT, "reveal-m", None),
+    ]
+    composition = _composition(
+        "motions", EditorialTemplate.ARCHIVE_CANVAS, duration=12,
+        assets=[_asset("ph-m"), _asset("pd-m", EditorialAssetType.DOCUMENT)],
+        elements=[
+            _element("year-m", "year", EditorialElementType.TEXT, text="1949"),
+            _element("photo-m", "archive-photo", EditorialElementType.IMAGE, asset_id="ph-m"),
+            _element("paper-m", "paper", EditorialElementType.DOCUMENT, text="DOC", asset_id="pd-m"),
+            _element("mark-m", "document-mark", EditorialElementType.UNDERLINE),
+            _element("rulers-m", "ruler-grid", EditorialElementType.RULER_NODES, count=10),
+            _element("reveal-m", "reveal", EditorialElementType.TEXT, text="ELON"),
+        ],
+        events=[EditorialEvent(time=t, action=a, target=tr, value=v) for t, a, tr, v in raw],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+    for name in MOTION_NAMES:
+        assert f"case '{name}':" in html
+    payload = _plan_payload(html)
+    assert [event["action"] for event in payload["compositions"][0]["events"]] == [
+        item[1].value for item in raw
+    ]
+
+
+def test_multi_template_plan_embeds_seek_data_and_isolates_layouts() -> None:
+    compositions = [
+        _composition(
+            "comp-a", EditorialTemplate.ARCHIVE_CANVAS, start=0.0, duration=3.0,
+            elements=[_element("ya", "year", EditorialElementType.TEXT, text="1949")],
+        ),
+        _composition(
+            "comp-b", EditorialTemplate.DOCUMENT_REVEAL, start=3.0, duration=4.0,
+            assets=[_asset("sb")],
+            elements=[
+                _element("db", "document", EditorialElementType.DOCUMENT, asset_id="sb"),
+                _element("tb", "title", EditorialElementType.TEXT, text="DOC"),
+            ],
+        ),
+        _composition(
+            "comp-c", EditorialTemplate.COMPARISON_CANVAS, start=7.0, duration=3.0,
+            assets=[_asset("lc"), _asset("rc")],
+            elements=[
+                _element("lc2", "left-image", EditorialElementType.IMAGE, asset_id="lc"),
+                _element("rc2", "right-image", EditorialElementType.IMAGE, asset_id="rc"),
+                _element("dc", "divider", EditorialElementType.LINE),
+            ],
+        ),
+        _composition(
+            "comp-d", EditorialTemplate.BIG_TEXT_REVEAL, start=10.0, duration=4.0,
+            elements=[
+                _element("hd", "headline", EditorialElementType.TEXT, text="END"),
+                _element("bo", "blackout", EditorialElementType.BLACK_SCREEN),
+            ],
+        ),
+    ]
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=compositions))
+
+    payload = _plan_payload(html)
+    assert [(c["template"], c["start"], c["duration"]) for c in payload["compositions"]] == [
+        ("archiveCanvas", 0, 3), ("documentReveal", 3, 4),
+        ("comparisonCanvas", 7, 3), ("bigTextReveal", 10, 4),
+    ]
+    assert payload["editorial_text_enabled"] is True
+    assert payload["captions_enabled"] is True
+
+    # Each layout's unique draft label sits inside its own section, in plan order.
+    sections = [
+        ("comp-a", "EVIDENCE MAP"),
+        ("comp-b", "SOURCE READING"),
+        ("comp-c", "FIG. 03"),
+        ("comp-d", "FIG. 05"),
+    ]
+    starts = [html.index(f'data-composition="{cid}"') for cid, _ in sections]
+    assert starts == sorted(starts)
+    ends = [html.index(marker) for _, marker in sections]
+    boundaries = starts[1:] + [html.index("</main>")]
+    for start, end, boundary in zip(starts, ends, boundaries):
+        assert start < end < boundary
+
+
+@pytest.mark.parametrize(("template", "typed_node", "kept_node"), [
+    (EditorialTemplate.ARCHIVE_CANVAS,
+     'class="year editorial-element editorial-type"',
+     'class="archive-photo editorial-element"'),
+    (EditorialTemplate.DOCUMENT_REVEAL,
+     'class="document-title editorial-element editorial-type"',
+     'class="source-sheet editorial-element"'),
+    (EditorialTemplate.COMPARISON_CANVAS,
+     'class="comparison-headline editorial-element editorial-type"',
+     'class="comparison-card left-card editorial-element"'),
+    (EditorialTemplate.ILLUSTRATION_CANVAS,
+     'class="illustration-headline editorial-element editorial-type"',
+     'class="illustration-frame editorial-element"'),
+    (EditorialTemplate.BIG_TEXT_REVEAL,
+     'class="big-headline editorial-element editorial-type"',
+     'class="blackout editorial-element"'),
+])
+def test_typography_disable_hides_type_but_keeps_imagery_and_caption_data(
+    template: EditorialTemplate, typed_node: str, kept_node: str,
+) -> None:
+    composition = _template_composition(template, cid=template.value)
+    plan = EditPlan(
+        project_id="p",
+        compositions=[composition],
+        editorial_text_enabled=False,
+        captions_enabled=True,
+    )
+    html = compile_edit_plan_html(
+        plan,
+        asset_url_resolver=lambda asset: f"/m/{asset.id}",
+    )
+    assert '<body class="editorial-text-disabled">' in html
+    assert '"captions_enabled":true' in html
+    assert ".editorial-text-disabled .editorial-type{visibility:hidden}" in html
+    assert ".editorial-text-disabled .ruler-node span{visibility:hidden}" in html
+    # Typography nodes are flagged; imagery and graphic nodes are not.
+    assert typed_node in html
+    assert kept_node in html
+    # Resolved imagery still renders (and the resolved URL stays escaped-safe).
+    if template is not EditorialTemplate.BIG_TEXT_REVEAL:
+        assert '<img class="asset-image' in html
+        assert "src=" in html
