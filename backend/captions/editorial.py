@@ -131,12 +131,15 @@ CAPTION_REGIONS: dict[
     EditorialTemplate.BIG_TEXT_REVEAL: {
         "portrait": {
             "kicker": (72, 604, 936, 50),
-            "headline": (40, 712, 1000, 270),
+            # BigText headlines may wrap to several lines. Reserve the full
+            # hero-title band so captions move above it instead of crossing
+            # through long deterministic typography.
+            "headline": (40, 712, 1000, 1050),
             "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
             "kicker": (70, 330, 1780, 46),
-            "headline": (70, 430, 1780, 250),
+            "headline": (70, 430, 1780, 500),
             "draft-label": (82, 1046, 320, 28),
         },
     },

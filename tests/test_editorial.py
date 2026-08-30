@@ -950,6 +950,33 @@ def test_big_text_reveal_binds_roles_to_layout_regions() -> None:
     assert "src=" not in html
 
 
+def test_big_text_reveal_assigns_deterministic_responsive_type_tiers() -> None:
+    medium = _composition(
+        "medium", EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[
+            _element(
+                "medium-head", "headline", EditorialElementType.TEXT,
+                text="COINCIDENCE?",
+            ),
+        ],
+    )
+    long = _composition(
+        "long", EditorialTemplate.BIG_TEXT_REVEAL, start=4.0,
+        elements=[
+            _element(
+                "long-head", "headline", EditorialElementType.TEXT,
+                text="THE STORY GOES DEEPER",
+            ),
+        ],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[medium, long]))
+    assert 'class="big-headline big-headline-medium editorial-element editorial-type"' in html
+    assert 'class="big-headline big-headline-long editorial-element editorial-type"' in html
+    assert ".big-headline-medium{font-size:130px" in html
+    assert ".big-headline-long{font-size:170px" in html
+    assert "white-space:nowrap;font-size:170px" in html
+
+
 @pytest.mark.parametrize(("template", "placeholder"), [
     (EditorialTemplate.DOCUMENT_REVEAL, "source-sheet"),
     (EditorialTemplate.COMPARISON_CANVAS, "photo-art"),
