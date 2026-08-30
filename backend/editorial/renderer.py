@@ -28,7 +28,7 @@ from .models import (
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
-EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v2"
+EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v3-responsive"
 
 
 def _script_json(value: Any) -> str:
@@ -300,6 +300,13 @@ def compile_edit_plan_html(
         for item in plan.compositions
     )
     payload = _script_json(plan.model_dump(mode="json"))
+    landscape = plan.width >= plan.height
+    design_width, design_height = ((1920, 1080) if landscape else (1080, 1920))
+    design_scale = min(plan.width / design_width, plan.height / design_height)
+    stage_left = (plan.width - design_width * design_scale) / 2
+    stage_top = (plan.height - design_height * design_scale) / 2
+    orientation = "landscape" if landscape else "portrait"
+    text_class = "editorial-text-enabled" if plan.editorial_text_enabled else "editorial-text-disabled"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -307,7 +314,7 @@ def compile_edit_plan_html(
 :root{{--charcoal:#111315;--charcoal-2:#1b1d1f;--ivory:#e9dfc6;--rust:#b9532f;--blue:#6f91a6;--ink:#25211d}}
 *{{box-sizing:border-box}} html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000}}
 body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
-#stage{{position:relative;width:{plan.width}px;height:{plan.height}px;overflow:hidden;background:#000}}
+#stage{{position:absolute;left:{stage_left:.4f}px;top:{stage_top:.4f}px;width:{design_width}px;height:{design_height}px;overflow:hidden;background:#000;transform:scale({design_scale:.8f});transform-origin:top left}}
 .composition{{position:absolute;inset:0;display:none;overflow:hidden;background:var(--charcoal);color:var(--ivory)}}
 .research-layer{{position:absolute;inset:0;transform-origin:50% 50%}}
 .grain{{position:absolute;inset:0;z-index:80;pointer-events:none;opacity:.11;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E")}}
@@ -371,10 +378,36 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .kicker-rule{{position:absolute;left:50%;top:560px;width:120px;height:2px;margin-left:-60px;background:var(--rust)}}
 .big-kicker{{position:absolute;left:72px;right:72px;top:604px;text-align:center;font-size:34px;font-weight:700;letter-spacing:12px;text-transform:uppercase;color:var(--blue)}}
 .big-headline{{position:absolute;left:40px;right:40px;top:712px;text-align:center;font-size:250px;font-weight:900;line-height:.95;letter-spacing:4px;color:var(--ivory);text-shadow:0 10px 40px #000a}}
+.landscape .line-a{{left:70px;top:72px;height:920px}} .landscape .line-b{{left:70px;right:70px;top:1000px}}
+.landscape .year{{left:70px;top:62px;font-size:154px}}
+.landscape .archive-photo{{left:82px;top:270px;width:650px;height:610px}}
+.landscape .document{{right:82px;top:170px;width:780px;height:720px}}
+.landscape .ruler-grid{{left:780px;right:82px;bottom:74px;grid-template-columns:repeat(5,1fr);gap:14px}}
+.landscape .ruler-node{{height:58px}} .landscape .draft-label{{left:82px;bottom:34px}}
+.landscape .elon{{font-size:230px}}
+.landscape .document-title{{left:80px;right:80px;top:52px;font-size:82px}}
+.landscape .source-sheet{{left:90px;right:760px;top:180px;height:790px}}
+.landscape .connector-line{{left:1230px;top:300px;width:570px}}
+.landscape .annotation{{left:1230px;top:340px;width:570px}}
+.landscape .context-photo{{right:90px;top:540px;width:520px;height:420px}}
+.landscape .context-photo-image{{height:340px}}
+.landscape .comparison-headline{{top:52px;font-size:76px}}
+.landscape .comparison-card{{top:210px;width:760px;height:650px}}
+.landscape .left-card{{left:80px}} .landscape .right-card{{right:80px}}
+.landscape .comparison-left-image,.landscape .comparison-right-image{{height:570px}}
+.landscape .comparison-label{{top:890px;width:760px;font-size:32px}}
+.landscape .left-label{{left:80px}} .landscape .right-label{{right:80px}}
+.landscape .divider-line{{left:959px;top:230px;height:690px}}
+.landscape .illustration-frame{{left:70px;right:730px;top:120px;height:850px}}
+.landscape .technical-rule{{left:1270px;right:70px;top:330px}}
+.landscape .illustration-headline{{left:1270px;right:70px;top:380px;font-size:82px}}
+.landscape .supporting-copy{{left:1270px;right:70px;top:570px}}
+.landscape .kicker-rule{{top:290px}} .landscape .big-kicker{{top:330px}}
+.landscape .big-headline{{top:430px;font-size:230px}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
 .editorial-text-disabled .ruler-node span{{visibility:hidden}}
-</style></head><body class="{'editorial-text-enabled' if plan.editorial_text_enabled else 'editorial-text-disabled'}"><main id="stage">{markup}</main>
+</style></head><body class="{text_class} {orientation}"><main id="stage">{markup}</main>
 <script>
 "use strict";
 const PLAN={payload};
