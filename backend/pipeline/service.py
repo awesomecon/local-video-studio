@@ -94,7 +94,9 @@ from backend.editorial.models import (
     EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
-from backend.editorial.renderer import EditorialRenderer, compile_edit_plan_html
+from backend.editorial.renderer import (
+    EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
+)
 from backend.schemas import (
     Asset,
     AssetType,
@@ -7512,7 +7514,7 @@ class PipelineService:
                     digest = self._incremental_hash(candidate)
             asset_files.append({"id": asset.id, "source": asset.source, "sha256": digest})
         return self._editorial_hash({
-            "workflow_version": "editorial-composition-render-v1",
+            "workflow_version": EDITORIAL_RENDER_WORKFLOW_VERSION,
             "plan": plan.model_dump(mode="json", exclude={"created_at"}),
             "asset_files": asset_files,
         })
