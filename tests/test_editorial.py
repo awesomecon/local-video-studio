@@ -309,6 +309,70 @@ def test_editorial_planner_resolves_verified_asset_without_trusting_llm_source()
     assert planned_asset.evidence_class.value == "evidence" and planned_asset.locked
 
 
+def test_single_composition_regeneration_preserves_clock_neighbors_and_protected_asset() -> None:
+    project = Project(
+        title="Mars", topic="Project Mars", target_duration=14, slug="mars-partial",
+        video_mode=VideoMode.EDITORIAL,
+    )
+    script = _editorial_script(project)
+    scene_id = script.scenes[0].id
+    imported = Asset(
+        id="user-photo", project_id=project.id, scene_id=scene_id,
+        type=AssetType.IMAGE, filepath="scenes/001/imports/user-photo.png",
+        backend="imported_local", model="user-supplied", seed=0,
+    )
+    current = EditorialComposition.model_validate({
+        "id": "target", "start": 0, "duration": 7, "template": "archiveCanvas",
+        "assets": [{
+            "id": "protected-photo", "type": "user_uploaded_image",
+            "asset_id": imported.id, "source": str(imported.filepath), "locked": False,
+        }],
+        "elements": [
+            {"id": "old-year", "type": "text", "text": "1949", "role": "year"},
+            {"id": "photo-slot", "type": "image", "asset_id": "protected-photo", "role": "archive-photo"},
+        ],
+        "events": [
+            {"time": 0, "action": "fadeUp", "target": "old-year"},
+            {"time": 1, "action": "slideInLeft", "target": "photo-slot"},
+        ],
+        "narration_refs": [scene_id],
+    })
+    neighbor = EditorialComposition.model_validate({
+        "id": "next", "start": 7, "duration": 7, "template": "bigTextReveal",
+        "elements": [{
+            "id": "next-title", "type": "text", "text": "ELON", "role": "headline",
+        }],
+        "events": [{"time": 0, "action": "fadeUp", "target": "next-title"}],
+        "narration_refs": [scene_id],
+    })
+    plan = EditPlan(project_id=project.id, compositions=[current, neighbor])
+    llm = _PlannerLLM({"composition": {
+        "id": "attempted-id", "start": 2, "duration": 5,
+        "template": "archiveCanvas",
+        "elements": [
+            {"id": "new-year", "type": "text", "text": "A NEW ANGLE", "role": "year"},
+        ],
+        "events": [{"time": 0, "action": "scaleIn", "target": "new-year"}],
+        "narration_refs": [scene_id],
+    }})
+
+    regenerated, draft = EditorialPlanner(llm).regenerate_composition(
+        project, script, plan, "target", assets=[imported],
+    )
+
+    assert draft is not None
+    assert (regenerated.id, regenerated.start, regenerated.duration) == ("target", 0, 7)
+    assert regenerated.template is EditorialTemplate.ARCHIVE_CANVAS
+    assert regenerated.narration_refs == [scene_id]
+    assert next(item for item in regenerated.assets if item.id == "protected-photo") == current.assets[0]
+    assert next(item for item in regenerated.elements if item.role == "archive-photo") == current.elements[1]
+    assert any(event.target == "photo-slot" for event in regenerated.events)
+    context = json.loads(llm.calls[0]["messages"][1]["content"])
+    assert context["regenerate_only"]["id"] == "target"
+    assert context["next_composition"]["id"] == "next"
+    assert context["protected_asset_ids"] == ["protected-photo"]
+
+
 def test_editorial_planner_rejects_model_authored_sources_and_unknown_refs() -> None:
     project = Project(
         title="Mars", topic="Project Mars", target_duration=14, slug="mars-reject",

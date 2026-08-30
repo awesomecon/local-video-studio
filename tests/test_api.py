@@ -89,6 +89,34 @@ def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Pa
     assert client.post(f"/api/projects/{project_id}/editorial/plan").json() == generated.json()
 
 
+def test_editorial_composition_regeneration_is_explicit_and_scoped(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={
+        "title": "Partial Editorial", "topic": "One composition",
+        "target_duration": 14, "video_mode": "editorial",
+    }).json()["project"]["id"]
+    assert client.post(f"/api/projects/{project_id}/plan", json={}).status_code == 200
+    plan = client.post(f"/api/projects/{project_id}/editorial/plan").json()
+    composition_id = plan["compositions"][0]["id"]
+
+    regenerated = client.post(
+        f"/api/projects/{project_id}/editorial/compositions/{composition_id}/regenerate"
+    )
+
+    assert regenerated.status_code == 200
+    assert regenerated.json()["compositions"] == plan["compositions"]
+    assert client.post(
+        f"/api/projects/{project_id}/editorial/compositions/missing/regenerate"
+    ).status_code == 404
+
+
 def test_editorial_plan_staleness_is_additive_and_non_destructive(tmp_path: Path) -> None:
     app = create_app(
         load_config(environ={}),

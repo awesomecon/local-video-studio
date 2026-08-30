@@ -27,6 +27,12 @@ class EditorialPlanDraft(DomainModel):
     compositions: list[EditorialComposition] = Field(min_length=1, max_length=32)
 
 
+class EditorialCompositionDraft(DomainModel):
+    """One LLM-authored replacement used for explicit partial regeneration."""
+
+    composition: EditorialComposition
+
+
 class EditorialPlanner:
     """Decide what happens while keeping layout and motion implementation trusted."""
 
@@ -91,6 +97,85 @@ class EditorialPlanner:
             draft = self._complete(messages, schema)
         return self._materialize(project, script, draft, assets, word_timings), draft
 
+    def regenerate_composition(
+        self,
+        project: Project,
+        script: ProjectPlan,
+        plan: EditPlan,
+        composition_id: str,
+        *,
+        assets: Sequence[Asset] = (),
+        word_timings: Sequence[CaptionWord] = (),
+        mock_mode: bool = False,
+    ) -> tuple[EditorialComposition, EditorialCompositionDraft | None]:
+        """Regenerate one composition without changing its timeline or protected media."""
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise ValueError("the Editorial Planner requires an Editorial Mode project")
+        if script.project_id != project.id or plan.project_id != project.id:
+            raise ValueError("Editorial regeneration inputs do not belong to the project")
+        try:
+            index = next(
+                i for i, composition in enumerate(plan.compositions)
+                if composition.id == composition_id
+            )
+        except StopIteration as exc:
+            raise ValueError(f"unknown Editorial composition {composition_id!r}") from exc
+        current = plan.compositions[index]
+        if mock_mode or self.llm is None:
+            return current, None
+
+        context = self._context(project, script, assets, word_timings)
+        context.update({
+            "regenerate_only": current.model_dump(mode="json"),
+            "previous_composition": (
+                plan.compositions[index - 1].model_dump(mode="json") if index else None
+            ),
+            "next_composition": (
+                plan.compositions[index + 1].model_dump(mode="json")
+                if index + 1 < len(plan.compositions) else None
+            ),
+            "fixed_fields": [
+                "id", "start", "duration", "template", "narration_refs", "caption_refs",
+            ],
+            "protected_asset_ids": [
+                item.id for item in current.assets if self._asset_is_protected(item, assets)
+            ],
+        })
+        messages = [
+            {"role": "system", "content": self._system_prompt() + (
+                " Regenerate only regenerate_only. Keep its fixed_fields unchanged. "
+                "Protected assets and their bound element slots are immutable; return them "
+                "unchanged. Use neighboring compositions for continuity, not as output."
+            )},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ]
+        schema = EditorialCompositionDraft.model_json_schema()
+        try:
+            draft = self._complete_composition(messages, schema)
+        except BackendError as exc:
+            if exc.code is not BackendErrorCode.INVALID_RESPONSE:
+                raise
+            messages.append({
+                "role": "user",
+                "content": (
+                    "The replacement failed validation. Return one corrected composition, "
+                    "preserving every fixed field and protected asset binding exactly."
+                ),
+            })
+            draft = self._complete_composition(messages, schema)
+        authored = draft.composition.model_copy(update={
+            "id": current.id,
+            "start": current.start,
+            "duration": current.duration,
+            "template": current.template,
+            "narration_refs": current.narration_refs,
+            "caption_refs": current.caption_refs,
+        })
+        resolved = self._materialize_composition(
+            project, script, authored, assets, word_timings,
+        )
+        return self._restore_protected_content(current, resolved, assets), draft
+
     def _complete(
         self,
         messages: list[dict[str, str]],
@@ -108,6 +193,26 @@ class EditorialPlanner:
         )
         return payload if isinstance(payload, EditorialPlanDraft) else EditorialPlanDraft.model_validate(payload)
 
+    def _complete_composition(
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+    ) -> EditorialCompositionDraft:
+        assert self.llm is not None
+        payload = self.llm.complete(
+            messages=messages,
+            structured=True,
+            json_schema=schema,
+            validator=EditorialCompositionDraft.model_validate,
+            max_tokens=self.MAX_COMPLETION_TOKENS,
+            temperature=0.2,
+            thinking_budget_tokens=self.THINKING_BUDGET_TOKENS,
+        )
+        return (
+            payload if isinstance(payload, EditorialCompositionDraft)
+            else EditorialCompositionDraft.model_validate(payload)
+        )
+
     def _materialize(
         self,
         project: Project,
@@ -116,45 +221,12 @@ class EditorialPlanner:
         assets: Sequence[Asset],
         word_timings: Sequence[CaptionWord],
     ) -> EditPlan:
-        registered = {asset.id: asset for asset in assets}
         if any(asset.project_id != project.id for asset in assets):
             raise ValueError("available Editorial assets must belong to the project")
-        known_narration = {scene.id for scene in script.scenes}
-        duration = self._timeline_duration(script.scenes, word_timings)
-        compositions: list[EditorialComposition] = []
-        for authored in draft.compositions:
-            if not authored.elements or not authored.events:
-                raise ValueError("each Editorial composition requires elements and timed events")
-            if authored.start + authored.duration > duration + 0.1:
-                raise ValueError("Editorial composition extends beyond the narration timeline")
-            if not authored.narration_refs:
-                raise ValueError("Editorial composition requires narration references")
-            if any(ref not in known_narration for ref in authored.narration_refs):
-                raise ValueError("Editorial composition references unknown narration")
-            resolved_assets = []
-            for planned_asset in authored.assets:
-                if planned_asset.source is not None:
-                    raise ValueError("the Editorial Planner cannot author asset source paths or URLs")
-                registered_asset = (
-                    registered.get(planned_asset.asset_id)
-                    if planned_asset.asset_id is not None else None
-                )
-                if planned_asset.asset_id is not None and registered_asset is None:
-                    raise ValueError("Editorial composition references an unknown project asset")
-                if planned_asset.type is EditorialAssetType.EXISTING_ASSET and registered_asset is None:
-                    raise ValueError("existing_asset recommendations require a registered asset_id")
-                if planned_asset.evidence_class is EvidenceClass.EVIDENCE:
-                    if registered_asset is None or registered_asset.backend != "imported_local":
-                        raise ValueError(
-                            "only verified user-imported local media may be planned as evidence"
-                        )
-                resolved_assets.append(planned_asset.model_copy(update={
-                    "source": str(registered_asset.filepath) if registered_asset else None,
-                }))
-            compositions.append(EditorialComposition.model_validate({
-                **authored.model_dump(mode="python"),
-                "assets": resolved_assets,
-            }))
+        compositions = [
+            self._materialize_composition(project, script, authored, assets, word_timings)
+            for authored in draft.compositions
+        ]
         return EditPlan(
             project_id=project.id,
             width=project.resolution[0],
@@ -162,6 +234,101 @@ class EditorialPlanner:
             fps=project.fps,
             compositions=compositions,
         )
+
+    def _materialize_composition(
+        self,
+        project: Project,
+        script: ProjectPlan,
+        authored: EditorialComposition,
+        assets: Sequence[Asset],
+        word_timings: Sequence[CaptionWord],
+    ) -> EditorialComposition:
+        if any(asset.project_id != project.id for asset in assets):
+            raise ValueError("available Editorial assets must belong to the project")
+        if not authored.elements or not authored.events:
+            raise ValueError("each Editorial composition requires elements and timed events")
+        duration = self._timeline_duration(script.scenes, word_timings)
+        if authored.start + authored.duration > duration + 0.1:
+            raise ValueError("Editorial composition extends beyond the narration timeline")
+        known_narration = {scene.id for scene in script.scenes}
+        if not authored.narration_refs:
+            raise ValueError("Editorial composition requires narration references")
+        if any(ref not in known_narration for ref in authored.narration_refs):
+            raise ValueError("Editorial composition references unknown narration")
+        registered = {asset.id: asset for asset in assets}
+        resolved_assets = []
+        for planned_asset in authored.assets:
+            if planned_asset.source is not None:
+                raise ValueError("the Editorial Planner cannot author asset source paths or URLs")
+            registered_asset = (
+                registered.get(planned_asset.asset_id)
+                if planned_asset.asset_id is not None else None
+            )
+            if planned_asset.asset_id is not None and registered_asset is None:
+                raise ValueError("Editorial composition references an unknown project asset")
+            if planned_asset.type is EditorialAssetType.EXISTING_ASSET and registered_asset is None:
+                raise ValueError("existing_asset recommendations require a registered asset_id")
+            if planned_asset.evidence_class is EvidenceClass.EVIDENCE:
+                if registered_asset is None or registered_asset.backend != "imported_local":
+                    raise ValueError(
+                        "only verified user-imported local media may be planned as evidence"
+                    )
+            resolved_assets.append(planned_asset.model_copy(update={
+                "source": str(registered_asset.filepath) if registered_asset else None,
+            }))
+        return EditorialComposition.model_validate({
+            **authored.model_dump(mode="python"),
+            "assets": resolved_assets,
+        })
+
+    @staticmethod
+    def _asset_is_protected(planned_asset, assets: Sequence[Asset]) -> bool:
+        registered = {asset.id: asset for asset in assets}
+        linked = registered.get(planned_asset.asset_id or "")
+        return bool(
+            planned_asset.locked
+            or planned_asset.type is EditorialAssetType.USER_UPLOADED_IMAGE
+            or planned_asset.metadata.get("manual_replacement") is True
+            or (linked is not None and linked.backend == "imported_local")
+        )
+
+    def _restore_protected_content(
+        self,
+        current: EditorialComposition,
+        replacement: EditorialComposition,
+        assets: Sequence[Asset],
+    ) -> EditorialComposition:
+        protected = {
+            item.id: item for item in current.assets if self._asset_is_protected(item, assets)
+        }
+        if not protected:
+            return replacement
+        protected_elements = [
+            item for item in current.elements if item.asset_id in protected
+        ]
+        protected_ids = {item.id for item in protected_elements}
+        protected_roles = {item.role for item in protected_elements}
+        merged_assets = [item for item in replacement.assets if item.id not in protected]
+        merged_assets.extend(protected.values())
+        merged_elements = [
+            item for item in replacement.elements
+            if item.id not in protected_ids and item.role not in protected_roles
+        ]
+        merged_elements.extend(protected_elements)
+        event_targets = {event.target for event in replacement.events}
+        restored_events = [
+            event for event in current.events
+            if event.target in protected_ids and event.target not in event_targets
+        ]
+        merged_events = sorted(
+            [*replacement.events, *restored_events], key=lambda event: event.time,
+        )
+        return EditorialComposition.model_validate({
+            **replacement.model_dump(mode="python"),
+            "assets": merged_assets,
+            "elements": merged_elements,
+            "events": merged_events,
+        })
 
     @classmethod
     def _deterministic_plan(

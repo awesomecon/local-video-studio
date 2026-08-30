@@ -846,6 +846,30 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+    @application.post(
+        "/api/projects/{project_id}/editorial/compositions/{composition_id}/regenerate"
+    )
+    def regenerate_editorial_composition(
+        project_id: str, composition_id: str,
+    ) -> dict[str, Any]:
+        try:
+            return service.regenerate_edit_plan_composition(
+                project_id, composition_id,
+            ).model_dump(mode="json")
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except BackendError as exc:
+            status_code = (
+                status.HTTP_409_CONFLICT
+                if exc.code is BackendErrorCode.MODEL_SELECTION_REQUIRED
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(status_code=status_code, detail=exc.as_dict()) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.patch("/api/projects/{project_id}/editorial/settings")
     def update_editorial_settings(
         project_id: str, request: EditorialSettingsEdit,
