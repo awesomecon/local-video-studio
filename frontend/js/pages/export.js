@@ -137,6 +137,23 @@ export function editorialPlanSummary(snap) {
 }
 
 /**
+ * Strict-boolean display settings for the readiness summary. A value is
+ * reported only when it is a strict true/false; missing, null, or malformed
+ * (non-boolean) values are omitted — never guessed. These are the same
+ * switches the Project Details screen PATCHes.
+ *
+ * @param {import("../api.js").ProjectSnapshot | null | undefined} snap
+ * @returns {{captions: boolean | null, editorialText: boolean | null}}
+ */
+export function editorialDisplaySettings(snap) {
+  const editorial = (snap && typeof snap.editorial === "object" && snap.editorial) ? snap.editorial : {};
+  return {
+    captions: typeof editorial.captions_enabled === "boolean" ? editorial.captions_enabled : null,
+    editorialText: typeof editorial.editorial_text_enabled === "boolean" ? editorial.editorial_text_enabled : null,
+  };
+}
+
+/**
  * @param {{name: string, param: string | null}} _route
  * @returns {HTMLElement}
  */
@@ -446,7 +463,8 @@ async function doRender(force, project) {
  * definitive file and provenance validation before it queues a render.
  * Classic / legacy projects count recorded scene visuals; Editorial projects
  * show Edit Plan availability and provenance status instead (there is no
- * scene grid to count there).
+ * scene grid to count there), plus the plan's display settings (Captions /
+ * Editorial text) when the snapshot reports strict boolean values.
  */
 export function renderInputSummary(snap, stages) {
   const editorial = exportVideoMode(snap.project) === "editorial";
@@ -458,6 +476,18 @@ export function renderInputSummary(snap, stages) {
   const captionsReady = Boolean(stages.subtitles && stages.subtitles.status === "completed");
   const musicReady = assets.some((asset) => asset.settings && asset.settings.role === "music");
   const rows = editorial ? editPlanSummaryRow(snap) : sceneVisualsSummaryRow(snap, assets);
+  if (editorial) {
+    // Strict booleans only: malformed values are omitted, never guessed.
+    const display = editorialDisplaySettings(snap);
+    if (display.captions !== null) {
+      rows.push(el("dt", {}, "Captions"),
+        el("dd", {}, display.captions ? "enabled" : "disabled"));
+    }
+    if (display.editorialText !== null) {
+      rows.push(el("dt", {}, "Editorial text"),
+        el("dd", {}, display.editorialText ? "enabled" : "disabled"));
+    }
+  }
   rows.push(
     el("dt", {}, "Narration"),
     el("dd", {}, narrationReady ? "recorded" : "not recorded; backend will verify the local file"),

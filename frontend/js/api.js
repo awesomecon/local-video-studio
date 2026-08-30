@@ -992,6 +992,46 @@ export function generateEditPlan(config, generateUrl, opts = {}) {
   return request(config, generateUrl, { method: "POST", timeoutMs: 600000, ...opts });
 }
 
+/**
+ * PATCH the snapshot-provided editorial settings URL
+ * (`snap.editorial.settings_url`, e.g. "/api/projects/{id}/editorial/settings")
+ * with the single display switch the user just changed. The body carries
+ * exactly one of `captions_enabled` / `editorial_text_enabled`; the backend
+ * rejects anything else, so callers never batch or guess extra fields.
+ *
+ * This is a mutation: `request()` never retries on its own and callers must
+ * not wrap it in a retry loop either (a repeated toggle is a new explicit
+ * user action, not a retry). The response is the updated Edit Plan, which
+ * the UI discards in favor of re-reading the project snapshot. Callers pass
+ * a validated project-local `settings_url` only — the UI omits the controls
+ * entirely when the snapshot URL is malformed.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} settingsUrl — backend-provided path from the snapshot
+ * @param {{captions_enabled?: boolean, editorial_text_enabled?: boolean}} body
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the updated Edit Plan JSON
+ */
+export function patchEditorialSettings(config, settingsUrl, body, opts = {}) {
+  return request(config, settingsUrl, { method: "PATCH", body, timeoutMs: 15000, ...opts });
+}
+
+/**
+ * GET the snapshot-provided editorial edit-plan URL
+ * (`snap.editorial.edit_plan_url`, e.g. "/api/projects/{id}/editorial/edit-plan")
+ * — the full Edit Plan with its compositions. Issued only after an explicit
+ * user action ("Show compositions" on the Project Details screen); it is never
+ * fetched during ordinary rendering, live refresh, or display-setting
+ * mutations. This is a read, but the helper itself never re-issues the
+ * request (a retry is the user clicking the action again).
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} editPlanUrl — backend-provided path from the snapshot
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the Edit Plan JSON
+ */
+export function getEditPlan(config, editPlanUrl, opts = {}) {
+  return request(config, editPlanUrl, { timeoutMs: 30000, ...opts });
+}
+
 /** GET /api/music/models */
 export function musicModels(config, opts = {}) {
   return request(config, "/api/music/models", { timeoutMs: 15000, ...opts });
