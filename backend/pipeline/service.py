@@ -550,13 +550,14 @@ class PipelineService:
         if project.video_mode is not VideoMode.EDITORIAL:
             return []
         plan = self.load_edit_plan(project.id)
+        retimed = self._retimed_editorial_plan(project, plan) or plan
         cues = self._editorial_caption_cues(project, plan)
         if not cues or not plan.compositions:
             return []
         design_width, design_height = (
             (1920, 1080) if plan.width >= plan.height else (1080, 1920)
         )
-        compositions = plan.compositions
+        compositions = retimed.compositions
         total = compositions[-1].start + compositions[-1].duration
         placed: list[dict[str, Any]] = []
         for cue in cues:
@@ -572,6 +573,18 @@ class PipelineService:
                 place_caption_cues([cue], composition, design_width, design_height)
             )
         return placed
+
+    def retimed_editorial_plan(self, project_id: str) -> EditPlan | None:
+        """The stored Edit Plan snapped onto the real narration clock.
+
+        Returns None when the real audio clock is unavailable so callers keep
+        rendering the stored plan on the planned clock.
+        """
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            return None
+        plan = self.store.load_edit_plan(project.slug)
+        return self._retimed_editorial_plan(project, plan)
 
     def update_editorial_asset_lock(
         self,
@@ -1150,6 +1163,7 @@ class PipelineService:
                 script,
                 assets=assets,
                 word_timings=words,
+                scene_clock=self._narration_scene_clock(project),
                 mock_mode=self.mock_mode,
             )
             edit_plan_path = self.store.save_edit_plan(project.slug, edit_plan)
@@ -1214,6 +1228,7 @@ class PipelineService:
             composition_id,
             assets=assets,
             word_timings=words,
+            scene_clock=self._narration_scene_clock(project),
             mock_mode=self.mock_mode,
         )
         with self._lock:
@@ -1314,6 +1329,7 @@ class PipelineService:
             composition_id=composition_id,
             assets=assets,
             word_timings=words,
+            scene_clock=self._narration_scene_clock(project),
             mock_mode=self.mock_mode,
         )
         proposed = proposed.model_copy(update={"created_at": utc_now()})
@@ -1542,24 +1558,164 @@ class PipelineService:
                 "Stored narration word timings are invalid; regenerate caption alignment."
             ) from exc
 
+    def _narration_scene_bounds(self, project: Project) -> dict[str, tuple[float, float]] | None:
+        """Per-scene (start, end) on the real audio clock, keyed by scene id.
+
+        Scene-rendered takes record each scene's actual spoken duration plus
+        the pause that follows it (``scene_durations``). The narration master
+        is authoritative for timing; without this metadata the planned scene
+        durations are a guess at TTS pacing and drift further from the audio
+        with every scene. Returns None when any precondition fails so callers
+        can fall back to the planned clock.
+        """
+        root = self.store.project_path(project)
+        takes_path = root / "narration" / "takes.json"
+        master = root / "narration" / "master.wav"
+        if not takes_path.is_file() or not master.is_file():
+            return None
+        try:
+            takes = json.loads(takes_path.read_text(encoding="utf-8"))
+            active_file = str(takes.get("active_file") or "")
+            if not active_file:
+                return None
+            meta = json.loads(
+                (root / active_file).with_suffix(".json").read_text(encoding="utf-8"),
+            )
+            settings = meta.get("settings", {})
+            if settings.get("timing_mode") != "scene_audio_v1":
+                return None
+            recorded_duration = float(settings["duration"])
+            actual_duration = wav_duration(master)
+            if abs(recorded_duration - actual_duration) > 0.2:
+                return None
+            by_scene = {
+                str(item["scene_id"]): float(item["duration"])
+                for item in settings.get("scene_durations", [])
+            }
+            bounds: dict[str, tuple[float, float]] = {}
+            cursor = 0.0
+            for scene in self.database.list_scenes(project.id):
+                if not scene.narration.strip() or scene.id not in by_scene:
+                    return None
+                duration = by_scene[scene.id]
+                bounds[scene.id] = (cursor, cursor + duration)
+                cursor += duration
+            return bounds
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _narration_scene_spans(self, project: Project) -> list[tuple[str, float, float]] | None:
+        """Per-scene (narration, start, duration) spans on the real audio clock."""
+        bounds = self._narration_scene_bounds(project)
+        if bounds is None:
+            return None
+        spans: list[tuple[str, float, float]] = []
+        for scene in self.database.list_scenes(project.id):
+            start, end = bounds[scene.id]
+            spans.append((scene.narration, start, end - start))
+        return spans
+
     def _editorial_caption_words(self, project: Project) -> list[CaptionWord]:
         """Word timings for Editorial caption beats.
 
         Audio-aligned timings are preferred; without them the scenes' narration
-        is spread evenly over the planned scene durations so preview and export
-        stay deterministic.
+        is spread evenly over each scene's real spoken duration from the active
+        narration take (falling back to planned durations), so preview and
+        export stay deterministic on the same clock as the audio.
         """
         words = self._editorial_word_timings(project)
         if words:
             return words
-        scenes = self.database.list_scenes(project.id)
-        spans: list[tuple[str, float, float]] = []
-        cursor = 0.0
-        for scene in scenes:
-            if scene.narration.strip():
-                spans.append((scene.narration, cursor, scene.duration))
-            cursor += scene.duration
+        spans = self._narration_scene_spans(project)
+        if spans is None:
+            scenes = self.database.list_scenes(project.id)
+            spans = []
+            cursor = 0.0
+            for scene in scenes:
+                if scene.narration.strip():
+                    spans.append((scene.narration, cursor, scene.duration))
+                cursor += scene.duration
         return synthesize_word_timings(spans)
+
+    def _narration_scene_clock(self, project: Project) -> list[tuple[float, float]] | None:
+        """(start, end) per scene on the real audio clock, for planner context."""
+        spans = self._narration_scene_spans(project)
+        if spans is None:
+            return None
+        clock: list[tuple[float, float]] = []
+        cursor = 0.0
+        for _text, start, duration in spans:
+            clock.append((start, start + duration))
+            cursor += duration
+        return clock
+
+    def _retimed_editorial_plan(self, project: Project, plan: EditPlan) -> EditPlan | None:
+        """Snap stored plan boundaries onto the real narration clock.
+
+        Plans authored before the narration takes exist (or against planned
+        scene durations) place composition boundaries on the planned clock.
+        Snapping those boundaries to the recorded scene edges - splitting a
+        scene shared by several compositions in proportion to its planned
+        durations - keeps compositions, caption beats, and the spoken audio
+        aligned without re-authoring the plan. Returns None when the real
+        clock is unavailable or the plan cannot be fully mapped, in which
+        case callers keep using the stored plan.
+        """
+        bounds = self._narration_scene_bounds(project)
+        if bounds is None:
+            return None
+        claims: dict[str, list[tuple[int, float]]] = {}
+        referenced_by_composition: dict[int, list[str]] = {}
+        for index, composition in enumerate(plan.compositions):
+            referenced = [ref for ref in dict.fromkeys(composition.narration_refs) if ref in bounds]
+            if not referenced:
+                return None
+            referenced_by_composition[index] = referenced
+            for scene_id in referenced:
+                claims.setdefault(scene_id, []).append((index, composition.duration))
+        fps = plan.fps
+
+        def frame_time(seconds: float) -> float:
+            return round(round(seconds * fps) / fps, 6)
+
+        # A scene several compositions reference is divided in plan order,
+        # proportionally to the planned durations, so the authored pacing
+        # still owns how much of the shared audio each moment gets.
+        shares: dict[tuple[int, str], tuple[float, float]] = {}
+        for scene_id, entries in claims.items():
+            start, end = bounds[scene_id]
+            total = sum(duration for _index, duration in entries) or 1.0
+            cursor = start
+            for index, duration in entries:
+                share = (end - start) * (duration / total)
+                shares[(index, scene_id)] = (cursor, cursor + share)
+                cursor += share
+        compositions: list[EditorialComposition] = []
+        cursor = 0.0
+        for index, composition in enumerate(plan.compositions):
+            pieces = [shares[(index, ref)] for ref in referenced_by_composition[index]]
+            start = frame_time(max(min(item[0] for item in pieces), cursor))
+            end = frame_time(max(item[1] for item in pieces))
+            if end - start < 1.0 / fps:
+                end = start + 1.0 / fps
+            duration = end - start
+            scale = duration / composition.duration
+            events = [
+                event.model_copy(update={
+                    "time": min(duration, frame_time(event.time * scale)),
+                })
+                for event in composition.events
+            ]
+            compositions.append(composition.model_copy(update={
+                "start": start,
+                "duration": duration,
+                "events": events,
+            }))
+            cursor = end
+        return EditPlan.model_validate({
+            **plan.model_dump(mode="python"),
+            "compositions": [item.model_dump(mode="python") for item in compositions],
+        })
 
     def _editorial_caption_cues(self, project: Project, plan: EditPlan) -> list[EditorialCaptionCue]:
         """Compute and suppress Editorial caption beats on the narration clock.
@@ -1575,7 +1731,8 @@ class PipelineService:
             plan.caption_style,
             emphasis_texts=[item.text for item in plan.caption_emphasis],
         )
-        return suppress_cues_for_reveals(cues, plan.compositions)
+        retimed = self._retimed_editorial_plan(project, plan)
+        return suppress_cues_for_reveals(cues, (retimed or plan).compositions)
 
     def list_projects(self) -> tuple[list[Project], list[dict[str, Any]]]:
         """List projects reconciling the SQLite index with on-disk directories.
@@ -7796,6 +7953,11 @@ class PipelineService:
             compile_edit_plan_html(plan)
         except ValueError as exc:
             raise PipelineError(f"Cannot render this Editorial Edit Plan: {exc}") from exc
+        # Narration is the master clock: when the plan's boundaries sit on the
+        # planned scene clock, snap them onto the recorded audio clock.
+        retimed = self._retimed_editorial_plan(project, plan)
+        if retimed is not None:
+            plan = retimed
         root = self.store.project_path(project)
         narration = root / "narration" / "master.wav"
         if not narration.is_file():
@@ -7847,7 +8009,7 @@ class PipelineService:
             })
             manifest_path = clips_dir / "manifest.json"
             previous: dict[str, Any] = {}
-            if manifest_path.is_file() and not force:
+            if manifest_path.is_file():
                 try:
                     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
                     if isinstance(payload, dict) and isinstance(payload.get("entries"), dict):
@@ -7886,8 +8048,7 @@ class PipelineService:
                     cached.get("media_sha256") if isinstance(cached, dict) else None
                 )
                 reusable = bool(
-                    not force
-                    and isinstance(cached, dict)
+                    isinstance(cached, dict)
                     and cached.get("sha256") == digest
                     and cached.get("file") == clip_name
                     and clip.is_file()
@@ -7986,17 +8147,22 @@ class PipelineService:
             shutil.copyfile(clips[0], publish)
         else:
             ffmpeg = require_ffmpeg(self.renderer.binaries)
-            command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y"]
-            for clip in clips:
-                command.extend(["-i", str(clip)])
-            inputs = "".join(f"[{index}:v]" for index in range(len(clips)))
-            command.extend([
-                "-filter_complex", f"{inputs}concat=n={len(clips)}:v=1:a=0[outv]",
-                "-map", "[outv]", "-r", str(plan.fps),
-                "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(publish),
-            ])
-            run_media_process(command, timeout=max(120.0, plan.duration * 20))
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix=".editorial-concat-",
+                suffix=".txt", dir=output.parent, delete=False,
+            ) as concat_file:
+                concat_path = Path(concat_file.name)
+                for clip in clips:
+                    escaped = str(clip.resolve()).replace("'", "'\\''")
+                    concat_file.write(f"file '{escaped}'\n")
+            try:
+                run_media_process([
+                    str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_path),
+                    "-an", "-c:v", "copy", "-movflags", "+faststart", str(publish),
+                ], timeout=max(120.0, plan.duration * 2))
+            finally:
+                concat_path.unlink(missing_ok=True)
         os.replace(publish, output)
 
     def _ensure_preview(self, project: Project, *, force: bool) -> Path:

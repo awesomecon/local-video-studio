@@ -59,6 +59,7 @@ class EditorialPlanner:
         *,
         assets: Sequence[Asset] = (),
         word_timings: Sequence[CaptionWord] = (),
+        scene_clock: Sequence[tuple[float, float]] | None = None,
         mock_mode: bool = False,
     ) -> EditPlan:
         return self.plan_with_draft(
@@ -66,6 +67,7 @@ class EditorialPlanner:
             script,
             assets=assets,
             word_timings=word_timings,
+            scene_clock=scene_clock,
             mock_mode=mock_mode,
         )[0]
 
@@ -76,6 +78,7 @@ class EditorialPlanner:
         *,
         assets: Sequence[Asset] = (),
         word_timings: Sequence[CaptionWord] = (),
+        scene_clock: Sequence[tuple[float, float]] | None = None,
         mock_mode: bool = False,
     ) -> tuple[EditPlan, EditorialPlanDraft | None]:
         if project.video_mode is not VideoMode.EDITORIAL:
@@ -83,10 +86,10 @@ class EditorialPlanner:
         if script.project_id != project.id:
             raise ValueError("script plan does not belong to the Editorial project")
         if mock_mode or self.llm is None:
-            return self._deterministic_plan(project, script, word_timings), None
+            return self._deterministic_plan(project, script, word_timings, scene_clock), None
 
         schema = EditorialPlanDraft.model_json_schema()
-        context = self._context(project, script, assets, word_timings)
+        context = self._context(project, script, assets, word_timings, scene_clock)
         messages = [
             {"role": "system", "content": self._system_prompt()},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -105,7 +108,7 @@ class EditorialPlanner:
                 ),
             })
             draft = self._complete(messages, schema)
-        return self._materialize(project, script, draft, assets, word_timings), draft
+        return self._materialize(project, script, draft, assets, word_timings, scene_clock), draft
 
     def regenerate_composition(
         self,
@@ -116,6 +119,7 @@ class EditorialPlanner:
         *,
         assets: Sequence[Asset] = (),
         word_timings: Sequence[CaptionWord] = (),
+        scene_clock: Sequence[tuple[float, float]] | None = None,
         mock_mode: bool = False,
         instruction: str | None = None,
     ) -> tuple[EditorialComposition, EditorialCompositionDraft | None]:
@@ -135,7 +139,7 @@ class EditorialPlanner:
         if mock_mode or self.llm is None:
             return current, None
 
-        context = self._context(project, script, assets, word_timings)
+        context = self._context(project, script, assets, word_timings, scene_clock)
         regenerate_only = current.model_dump(mode="json")
         for item in regenerate_only.get("assets", []):
             if isinstance(item, dict):
@@ -195,7 +199,7 @@ class EditorialPlanner:
             "caption_refs": current.caption_refs,
         })
         resolved = self._materialize_composition(
-            project, script, authored, assets, word_timings,
+            project, script, authored, assets, word_timings, scene_clock,
         )
         return self._restore_protected_content(current, resolved, assets), draft
 
@@ -209,6 +213,7 @@ class EditorialPlanner:
         composition_id: str | None = None,
         assets: Sequence[Asset] = (),
         word_timings: Sequence[CaptionWord] = (),
+        scene_clock: Sequence[tuple[float, float]] | None = None,
         mock_mode: bool = False,
     ) -> tuple[EditPlan, EditorialPlanDraft | EditorialCompositionDraft | None]:
         """Create a validated instruction-led proposal without mutating stored state."""
@@ -229,6 +234,7 @@ class EditorialPlanner:
                 composition_id,
                 assets=assets,
                 word_timings=word_timings,
+                scene_clock=scene_clock,
                 mock_mode=mock_mode,
                 instruction=instruction,
             )
@@ -243,7 +249,7 @@ class EditorialPlanner:
         if mock_mode or self.llm is None:
             return plan, None
 
-        context = self._context(project, script, assets, word_timings)
+        context = self._context(project, script, assets, word_timings, scene_clock)
         current_payload = plan.model_dump(mode="json")
         for composition in current_payload.get("compositions", []):
             if not isinstance(composition, dict):
@@ -299,8 +305,8 @@ class EditorialPlanner:
                 ),
             })
             draft = self._complete(messages, schema)
-        revised = self._materialize(project, script, draft, assets, word_timings)
-        narration_duration = self._timeline_duration(script.scenes, word_timings)
+        revised = self._materialize(project, script, draft, assets, word_timings, scene_clock)
+        narration_duration = self._timeline_duration(script.scenes, word_timings, scene_clock)
         if revised.duration + 0.1 < narration_duration:
             raise ValueError("Editorial revision ends before the narration timeline")
 
@@ -379,11 +385,14 @@ class EditorialPlanner:
         draft: EditorialPlanDraft,
         assets: Sequence[Asset],
         word_timings: Sequence[CaptionWord],
+        scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> EditPlan:
         if any(asset.project_id != project.id for asset in assets):
             raise ValueError("available Editorial assets must belong to the project")
         compositions = [
-            self._materialize_composition(project, script, authored, assets, word_timings)
+            self._materialize_composition(
+                project, script, authored, assets, word_timings, scene_clock,
+            )
             for authored in draft.compositions
         ]
         return EditPlan(
@@ -402,12 +411,13 @@ class EditorialPlanner:
         authored: EditorialComposition,
         assets: Sequence[Asset],
         word_timings: Sequence[CaptionWord],
+        scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> EditorialComposition:
         if any(asset.project_id != project.id for asset in assets):
             raise ValueError("available Editorial assets must belong to the project")
         if not authored.elements or not authored.events:
             raise ValueError("each Editorial composition requires elements and timed events")
-        duration = self._timeline_duration(script.scenes, word_timings)
+        duration = self._timeline_duration(script.scenes, word_timings, scene_clock)
         if authored.start + authored.duration > duration + 0.1:
             raise ValueError("Editorial composition extends beyond the narration timeline")
         known_narration = {scene.id for scene in script.scenes}
@@ -503,8 +513,9 @@ class EditorialPlanner:
         project: Project,
         script: ProjectPlan,
         word_timings: Sequence[CaptionWord],
+        scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> EditPlan:
-        duration = cls._timeline_duration(script.scenes, word_timings)
+        duration = cls._timeline_duration(script.scenes, word_timings, scene_clock)
         refs = [scene.id for scene in script.scenes]
         numeral = re.search(r"\b\d{4}\b", " ".join(scene.narration for scene in script.scenes))
         headline = numeral.group(0) if numeral else project.title.upper()[:18]
@@ -539,10 +550,14 @@ class EditorialPlanner:
 
     @staticmethod
     def _timeline_duration(
-        scenes: Sequence[Scene], word_timings: Sequence[CaptionWord],
+        scenes: Sequence[Scene],
+        word_timings: Sequence[CaptionWord],
+        scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> float:
         if word_timings:
             return max(word.end_seconds for word in word_timings)
+        if scene_clock:
+            return max(end for _start, end in scene_clock)
         return sum(scene.duration for scene in scenes)
 
     @classmethod
@@ -552,21 +567,34 @@ class EditorialPlanner:
         script: ProjectPlan,
         assets: Sequence[Asset],
         word_timings: Sequence[CaptionWord],
+        scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
-        duration = cls._timeline_duration(script.scenes, word_timings)
-        planned_duration = sum(scene.duration for scene in script.scenes) or duration
-        scale = duration / planned_duration
-        cursor = 0.0
-        narration = []
-        for scene in script.scenes:
-            start = cursor * scale
-            cursor += scene.duration
-            narration.append({
-                "ref": scene.id,
-                "text": scene.narration,
-                "start": round(start, 3),
-                "end": round(cursor * scale, 3),
-            })
+        duration = cls._timeline_duration(script.scenes, word_timings, scene_clock)
+        narration: list[dict[str, Any]] = []
+        if scene_clock is not None and len(scene_clock) == len(script.scenes):
+            # Prefer the real per-scene audio clock (from the scene-rendered
+            # takes) so authored composition boundaries match the spoken audio
+            # instead of a global rescale of the planned durations.
+            for scene, (start, end) in zip(script.scenes, scene_clock):
+                narration.append({
+                    "ref": scene.id,
+                    "text": scene.narration,
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                })
+        else:
+            planned_duration = sum(scene.duration for scene in script.scenes) or duration
+            scale = duration / planned_duration
+            cursor = 0.0
+            for scene in script.scenes:
+                start = cursor * scale
+                cursor += scene.duration
+                narration.append({
+                    "ref": scene.id,
+                    "text": scene.narration,
+                    "start": round(start, 3),
+                    "end": round(cursor * scale, 3),
+                })
         return {
             "project": {
                 "title": project.title, "topic": project.topic, "style": project.style,
@@ -630,5 +658,20 @@ class EditorialPlanner:
             "one to five words each). Quote the narration verbatim and set emphasis to "
             "'keyPhrase'; skip ordinary filler and do not emphasize every line. Caption "
             "emphasis is metadata only: the renderer decides how an emphasized phrase looks, "
-            "so never return styling for captions."
+            "so never return styling for captions. "
+            "Before planning, identify editorial duplicates: where the narration restates a "
+            "fact the composition already shows as large deterministic text (a giant year "
+            "numeral, a title card, a kicker, or a fullscreen reveal such as THE ELON). A "
+            "fullscreen reveal owns its moment, so give it room: keep its event timed to the "
+            "spoken beat and do not let another large-text element or an emphasized caption "
+            "crowd it. A fact may appear at most twice on screen (for example one large "
+            "numeral plus one document or image that contains it); a third instance, usually "
+            "a caption, reads as redundant, so do not emphasize a phrase that a dominant "
+            "on-screen element already says, and do not author a second large-text element "
+            "for it. "
+            "When the project is a short that points to a longer video, close the timeline on "
+            "an explicit call to action: a final bigTextReveal composition whose headline "
+            "states the hook and whose cta element names the action (for example WATCH THE "
+            "FULL VIDEO), revealed after the final spoken beat and held to the end of the "
+            "timeline rather than collapsing to black."
         )

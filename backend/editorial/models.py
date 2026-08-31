@@ -35,6 +35,7 @@ class MotionPrimitive(StrEnum):
     STAGGER_IN = "staggerIn"
     DIM_OTHERS = "dimOthers"
     FOCUS_ONE = "focusOne"
+    PROMOTE_NODE = "promoteNode"
     COLLAPSE_TO_BLACK = "collapseToBlack"
     HARD_CUT = "hardCut"
 
@@ -193,6 +194,7 @@ TEMPLATE_ELEMENT_SLOTS: dict[
     EditorialTemplate.BIG_TEXT_REVEAL: {
         "headline": EditorialElementType.TEXT,
         "kicker": EditorialElementType.TEXT,
+        "cta": EditorialElementType.TEXT,
         "blackout": EditorialElementType.BLACK_SCREEN,
     },
 }

@@ -173,6 +173,29 @@ def test_emphasis_span_matching_is_insensitive_and_non_overlapping() -> None:
     assert [cue.highlight for cue in cues] == [True, False]
 
 
+def test_numeric_whisper_token_matches_authored_number_word_emphasis() -> None:
+    words = [
+        CaptionWord(0.0, 0.3, "10"),
+        CaptionWord(0.3, 0.7, "men."),
+    ]
+    cues = build_editorial_caption_cues(
+        words, EditorialCaptionStyle.EDITORIAL_PHRASE,
+        emphasis_texts=["ten men"],
+    )
+    assert len(cues) == 1 and cues[0].highlight is True
+
+
+def test_split_hyphenated_compound_is_presented_without_a_false_space() -> None:
+    words = [
+        CaptionWord(0.0, 0.4, "multi"),
+        CaptionWord(0.4, 0.9, "-planetary."),
+    ]
+    cues = build_editorial_caption_cues(
+        words, EditorialCaptionStyle.EDITORIAL_PHRASE,
+    )
+    assert [cue.text for cue in cues] == ["multi-planetary."]
+
+
 def test_emphasis_phrase_isolated_at_both_boundaries() -> None:
     cues = build_editorial_caption_cues(
         _words("They called Neuralink the voice of Mars."),
@@ -492,7 +515,9 @@ def test_fullscreen_reveal_hides_overlapping_captions_only() -> None:
     assert [cue.text for cue in surviving] == ["The chief ruler", "Elon"]
 
 
-def test_headline_reveal_hides_only_duplicating_captions() -> None:
+def test_headline_reveal_owns_its_full_screen_moment() -> None:
+    """A big-text headline owns the screen: every overlapping caption is hidden
+    so the moment gets room (COINCIDENCE?) instead of sharing it with a beat."""
     composition = EditorialComposition(
         id="moment", start=0.0, duration=10.0,
         template=EditorialTemplate.BIG_TEXT_REVEAL,
@@ -504,11 +529,93 @@ def test_headline_reveal_hides_only_duplicating_captions() -> None:
     )
     cues = [
         _cue(0.5, 1.6, "The year 1949"),       # before the headline window
-        _cue(1.5, 2.4, "Mars is ruled by"),    # overlaps but says something else
+        _cue(1.5, 2.4, "Mars is ruled by"),    # overlaps: the moment owns the screen
         _cue(2.2, 3.2, "Ten men."),            # duplicates the on-screen text
     ]
     surviving = suppress_cues_for_reveals(cues, [composition])
     assert [cue.text for cue in surviving] == ["The year 1949", "Mars is ruled by"]
+    assert surviving[1].end == 1.85
+
+
+def test_caption_crossing_end_of_fullscreen_reveal_resumes_after_cut() -> None:
+    composition = EditorialComposition(
+        id="question", start=0.0, duration=4.0,
+        template=EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[EditorialElement(
+            id="head", type=EditorialElementType.TEXT,
+            text="COINCIDENCE?", role="headline",
+        )],
+        events=[EditorialEvent(
+            time=2.0, action=MotionPrimitive.HARD_CUT, target="head",
+        )],
+    )
+    cue = _cue(3.6, 5.4, "And that is not the end.")
+    surviving = suppress_cues_for_reveals([cue], [composition])
+    assert len(surviving) == 1
+    assert surviving[0].start == 4.0
+
+
+def test_kicker_hides_only_duplicating_captions() -> None:
+    """A kicker shares the frame with ordinary beats: only captions that restate
+    the kicker's words are hidden (PROJECT MARS vs a 'Project Mars.' cue)."""
+    composition = EditorialComposition(
+        id="closing", start=0.0, duration=10.0,
+        template=EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[
+            EditorialElement(
+                id="kick", type=EditorialElementType.TEXT,
+                text="PROJECT MARS", role="kicker",
+            ),
+            EditorialElement(
+                id="head", type=EditorialElementType.TEXT,
+                text="THE FULL STORY GETS STRANGER", role="headline",
+            ),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.FADE_UP, target="kick"),
+            EditorialEvent(time=4.0, action=MotionPrimitive.SCALE_IN, target="head"),
+        ],
+    )
+    cues = [
+        _cue(0.4, 1.4, "isn't even the strangest"),  # shares frame: stays up
+        _cue(3.0, 4.0, "Project Mars."),              # restates the kicker
+        _cue(4.4, 5.4, "The full story gets deeper."),  # headline owns the screen
+    ]
+    surviving = suppress_cues_for_reveals(cues, [composition])
+    assert [cue.text for cue in surviving] == ["isn't even the strangest"]
+
+
+def test_year_numeral_hides_duplicate_captions() -> None:
+    """A giant year numeral owns the year fact: beats that still say the year
+    out loud (even partly) are dropped, so the opening does not show 1949
+    three times."""
+    composition = _archive_composition(reveal_at=None, duration=12.0)
+    cues = [
+        _cue(0.2, 1.0, "What if I told you that in"),
+        _cue(1.0, 1.6, "1949,"),
+        _cue(1.6, 3.0, "a famous rocket scientist wrote"),
+        _cue(3.0, 4.2, "1949, a famous rocket scientist"),
+    ]
+    surviving = suppress_cues_for_reveals(cues, [composition])
+    assert [cue.text for cue in surviving] == [
+        "What if I told you that in", "a famous rocket scientist wrote",
+    ]
+
+
+def test_non_year_numeric_archive_title_does_not_hide_ten_men_caption() -> None:
+    composition = EditorialComposition(
+        id="rulers", start=0.0, duration=8.0,
+        template=EditorialTemplate.ARCHIVE_CANVAS,
+        elements=[EditorialElement(
+            id="title", type=EditorialElementType.TEXT,
+            text="10 RULERS", role="year",
+        )],
+        events=[EditorialEvent(
+            time=0.0, action=MotionPrimitive.FADE_UP, target="title",
+        )],
+    )
+    cue = _cue(2.0, 3.0, "10 men.", highlight=True)
+    assert suppress_cues_for_reveals([cue], [composition]) == [cue]
 
 
 def test_no_reveals_keeps_every_cue() -> None:

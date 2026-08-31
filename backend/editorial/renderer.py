@@ -15,20 +15,20 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
-from backend.rendering.process import run_media_process
+from backend.rendering.process import run_media_process_stream
 
 from .models import (
-    EditPlan, EditorialAsset, EditorialComposition, EditorialElement,
+    EditPlan, EditorialAsset, EditorialComposition, EditorialElement, EvidenceClass,
     EditorialTemplate,
 )
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
-EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v6-responsive-type"
+EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v9-streamed-jpeg"
 
 
 def _script_json(value: Any) -> str:
@@ -68,8 +68,13 @@ def _asset_image(
     source = resolver(asset) if asset is not None and resolver is not None else None
     if not source:
         return ""
+    evidence_class = (
+        " evidence-image"
+        if asset is not None and asset.evidence_class is EvidenceClass.EVIDENCE
+        else ""
+    )
     return (
-        f'<img class="asset-image {escape(class_name)}" '
+        f'<img class="asset-image {escape(class_name)}{evidence_class}" '
         f'src="{escape(source, quote=True)}" alt="">'
     )
 
@@ -114,7 +119,8 @@ def _archive_markup(
     )
     ruler_count = rulers.count if rulers else 10
     nodes = "".join(
-        f'<div class="ruler-node" data-ruler="{index}"><span>{index + 1:02d}</span></div>'
+        f'<div class="ruler-node" data-ruler="{index}"><span>{index + 1:02d}</span>'
+        f'<b class="ruler-chief">CHIEF</b></div>'
         for index in range(ruler_count)
     )
     return f"""
@@ -262,7 +268,15 @@ def _big_text_markup(
 ) -> str:
     headline = _element(composition, "headline")
     kicker = _element(composition, "kicker")
+    cta = _element(composition, "cta")
     blackout = _element(composition, "blackout")
+    if cta is not None:
+        cta_tag = (
+            f'<div id="{escape(cta.id, quote=True)}" class="big-cta editorial-element editorial-type">'
+            f"{escape(cta.text)}</div>"
+        )
+    else:
+        cta_tag = ""
     return f"""
       <section class="composition big-text-reveal" data-composition="{escape(composition.id, quote=True)}">
         <div class="grain"></div>
@@ -270,6 +284,7 @@ def _big_text_markup(
           <div class="kicker-rule"></div>
           <div id="{escape(kicker.id if kicker else 'kicker', quote=True)}" class="big-kicker editorial-element editorial-type">{escape(kicker.text if kicker else "")}</div>
           <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline{_big_headline_class(headline.text if headline else '')} editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          {cta_tag}
           <div class="draft-label editorial-type">FIG. 05 · STATED</div>
         </div>
         <div id="{escape(blackout.id if blackout else 'blackout', quote=True)}" class="blackout editorial-element"></div>
@@ -350,21 +365,29 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .archive-photo .asset-tag{{left:18px;right:18px;bottom:14px}}
 .context-photo .asset-tag,.comparison-card .asset-tag{{left:16px;right:16px;bottom:10px}}
 .document{{position:absolute;right:54px;top:630px;width:590px;height:760px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(2deg)}}
-.document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}} .document>*:not(.document-image):not(.passage):not(.paper-stamp){{position:relative;z-index:2}}
+.document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}}
+.document-image.evidence-image{{object-fit:contain;opacity:.96;filter:sepia(.08) contrast(1.02);background:#e5ddca}}
+.document:has(.document-image.evidence-image)>h2,.document:has(.document-image.evidence-image)>.rule,.document:has(.document-image.evidence-image)>.document-copy,.document:has(.document-image.evidence-image)>p{{display:none}}
+.document>*:not(.document-image):not(.passage):not(.paper-stamp){{position:relative;z-index:2}}
 .paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "DejaVu Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "DejaVu Serif",serif;letter-spacing:3px}}
 .document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "DejaVu Serif",serif;letter-spacing:0}}
 .passage{{position:absolute;left:54px;right:54px;top:508px;height:22px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
 .paper-stamp{{position:absolute;right:38px;bottom:40px;padding:10px 16px;border:4px solid #9f4429;color:#9f4429;font-weight:800;letter-spacing:3px;transform:rotate(-8deg);opacity:.82}}
 .ruler-grid{{position:absolute;left:82px;right:72px;bottom:170px;display:grid;grid-template-columns:repeat(5,1fr);gap:24px}}
-.ruler-node{{height:86px;border:1px solid #6f91a680;position:relative;color:#9db4c0;background:#182027}}
-.ruler-node:before{{content:"";position:absolute;left:12px;right:12px;top:50%;height:1px;background:#6f91a680}} .ruler-node span{{position:absolute;right:10px;top:8px;font:17px monospace}}
+.ruler-node{{height:86px;border:1px solid #6f91a6a8;position:relative;color:#c3d6e2;background:#212d38}}
+.ruler-node:before{{content:"";position:absolute;left:12px;right:12px;top:50%;height:1px;background:#6f91a6a8}} .ruler-node span{{position:absolute;right:10px;top:8px;font:17px monospace}}
+.ruler-node .ruler-chief{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:800;letter-spacing:5px;color:#241f19;opacity:0}}
+.ruler-node.chief{{border-color:var(--rust);background:#f0e5c9;color:#241f19;box-shadow:0 20px 48px #000c,inset 0 0 0 2px #b9532f}}
 .ruler-node.focus{{border-color:var(--rust);background:#4e271d;color:#ffd8bd;box-shadow:inset 0 0 0 3px #b9532f}}
 .draft-label{{position:absolute;left:80px;bottom:64px;font:18px monospace;letter-spacing:3px;color:#6f91a6}}
 .elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;padding:0 48px;text-align:center;white-space:nowrap;font-size:170px;font-weight:900;line-height:.92;letter-spacing:6px;color:var(--ivory);opacity:0}}
 /* documentReveal */
 .document-title{{position:absolute;left:72px;right:72px;top:96px;font-size:104px;font-weight:900;line-height:1.02;letter-spacing:2px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
 .source-sheet{{position:absolute;left:64px;right:64px;top:352px;height:872px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(1deg)}}
-.source-sheet .document-image{{opacity:.18}} .source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp){{position:relative;z-index:2}}
+.source-sheet .document-image{{opacity:.18}}
+.source-sheet .document-image.evidence-image{{object-fit:contain;opacity:.98;filter:contrast(1.03);background:#eee9df}}
+.source-sheet:has(.document-image.evidence-image)>.document-copy{{display:none}}
+.source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp){{position:relative;z-index:2}}
 .source-sheet .paper-index{{margin-top:0}} .source-sheet .document-copy{{font:30px/1.72 "DejaVu Serif",serif;margin:44px 0 0;letter-spacing:0}}
 .passage-mark{{position:absolute;left:56px;right:56px;top:196px;height:34px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
 .connector-line{{position:absolute;left:72px;top:1268px;width:520px;height:2px;background:var(--blue);transform-origin:left center}}
@@ -396,6 +419,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .big-headline{{position:absolute;left:40px;right:40px;top:712px;text-align:center;font-size:250px;font-weight:900;line-height:.95;letter-spacing:4px;color:var(--ivory);text-shadow:0 10px 40px #000a}}
 .big-headline-medium{{font-size:130px;letter-spacing:1px}}
 .big-headline-long{{font-size:170px;line-height:.92;letter-spacing:2px}}
+.big-cta{{position:absolute;left:72px;right:72px;top:1330px;height:120px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:44px;font-weight:800;letter-spacing:6px;text-transform:uppercase;color:var(--ivory);border:3px solid var(--rust);background:#b9532f17;box-shadow:0 18px 50px #000a}}
 .landscape .line-a{{left:70px;top:72px;height:920px}} .landscape .line-b{{left:70px;right:70px;top:1000px}}
 .landscape .year{{left:70px;top:62px;font-size:154px}}
 .landscape .archive-photo{{left:82px;top:270px;width:650px;height:610px}}
@@ -422,6 +446,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .landscape .supporting-copy{{left:1270px;right:70px;top:570px}}
 .landscape .kicker-rule{{top:290px}} .landscape .big-kicker{{top:330px}}
 .landscape .big-headline{{top:430px;font-size:230px}} .landscape .big-headline-medium{{font-size:170px}} .landscape .big-headline-long{{font-size:150px}}
+.landscape .big-cta{{top:930px;height:90px;font-size:36px;letter-spacing:4px}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
 .editorial-text-disabled .ruler-node span{{visibility:hidden}}
@@ -433,10 +458,15 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .caption-style-editorialPhrase .cap,.caption-style-quietDocumentary .cap,.caption-style-oneLine .cap,.caption-style-oneWord .cap{{
 font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif;
 font-weight:600;color:var(--ivory);
-text-shadow:0 2px 9px #000b,0 0 3px #0008;
+text-shadow:0 1px 2px #000f,0 2px 14px #000d;
 line-height:1.3;
 }}
+/* Ordinary beats keep a soft scrim so they stay comfortably readable over
+   bright frames (documents, photographs) while the cream block stays the
+   loud emphasis. */
+.caption-style-editorialPhrase .cap:not(.highlight),.caption-style-quietDocumentary .cap:not(.highlight),.caption-style-oneLine .cap:not(.highlight),.caption-style-oneWord .cap:not(.highlight){{background:rgba(9,10,12,.44);padding:3px 12px}}
 .caption-style-editorialPhrase .cap{{font-size:48px;padding-left:16px;border-left:3px solid var(--rust)}}
+.caption-style-editorialPhrase .cap:not(.highlight){{padding-left:16px}}
 .caption-style-quietDocumentary .cap{{font-size:44px;font-weight:500}}
 .caption-style-oneLine .cap{{font-size:46px;font-weight:500}}
 .caption-style-oneWord .cap{{font-size:44px;font-weight:500}}
@@ -493,7 +523,11 @@ function updateCaptions(t){{
 }}
 function reset(root){{
   root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
-  root.querySelectorAll('.ruler-node').forEach(el=>{{el.style.opacity='0';el.classList.remove('focus')}});
+  root.querySelectorAll('.ruler-node').forEach(el=>{{
+    el.style.opacity='0';el.style.transform='';el.style.zIndex='';el.classList.remove('focus','chief');
+    const number=el.querySelector('span');if(number)number.style.opacity='1';
+    const label=el.querySelector('.ruler-chief');if(label)label.style.opacity='0';
+  }});
   const layer=root.querySelector('.research-layer');if(layer)layer.style.cssText='';
   const blackout=root.querySelector('.blackout');if(blackout)blackout.style.opacity='0';
   root.querySelectorAll('.draw').forEach(el=>{{el.style.transform=el.dataset.drawAxis==='y'?'scaleY(0)':'scaleX(0)'}});
@@ -517,6 +551,7 @@ function applyEvent(root,event,t){{
     case 'staggerIn': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{nodes.forEach((node,i)=>{{const q=ease(clamp(p*1.65-i/nodes.length*.65));node.style.opacity=String(q);node.style.transform=`translateY(${{(1-q)*34}}px)`}});target.style.opacity='1';}}else{{target.style.opacity=String(p);target.style.transform=`translateY(${{(1-p)*40}}px)`;}}break;}}
     case 'dimOthers': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;nodes.forEach((node,i)=>{{node.style.opacity=String(i===focus?1:1-.78*p)}});target.style.opacity='1';}}else{{target.style.filter=`brightness(${{1-.2*p}})`;}}break;}}
     case 'focusOne': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;const node=nodes[focus];if(node&&p>.2)node.classList.add('focus');target.style.opacity='1';}}else{{target.style.opacity='1';if(p>.2)target.classList.add('focus-mark');}}break;}}
+    case 'promoteNode': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const chief=Number(event.value)||0;const rootRect=root.getBoundingClientRect();nodes.forEach((node,i)=>{{const isChief=i===chief;const number=node.querySelector('span');const label=node.querySelector('.ruler-chief');node.style.opacity=String(isChief?1:1-.72*p);if(isChief){{const nodeRect=node.getBoundingClientRect();const dx=rootRect.left+rootRect.width/2-(nodeRect.left+nodeRect.width/2);const dy=rootRect.top+rootRect.height*.36-(nodeRect.top+nodeRect.height/2);node.style.transform=`translate(${{dx*p}}px,${{dy*p}}px) scale(${{1+.32*p}})`;node.style.zIndex='5';node.classList.toggle('chief',p>.35);if(number)number.style.opacity=String(1-clamp(p/.45));if(label)label.style.opacity=String(clamp((p-.35)/.65));}}else{{node.style.transform='';node.style.zIndex='';node.classList.remove('chief');if(number)number.style.opacity='1';if(label)label.style.opacity='0';}}}});target.style.opacity='1';}}else{{target.style.opacity='1';}}break;}}
     case 'collapseToBlack': {{const layer=root.querySelector('.research-layer');if(layer){{layer.style.opacity=String(1-p);layer.style.transform=`scale(${{1-.08*p}})`;}}const blackout=root.querySelector('.blackout');if(blackout)blackout.style.opacity=String(p);break;}}
     case 'hardCut': target.style.opacity='1';break;
   }}
@@ -596,17 +631,16 @@ class EditorialRenderer:
             work = Path(temp_name)
             document = work / "composition.html"
             document.write_text(html, encoding="utf-8")
-            frames = work / "frames"
-            frames.mkdir()
-            self._capture_frames(plan, document, frames, work / "chrome-profile")
             temporary = work / "render.mp4"
             ffmpeg = require_ffmpeg()
-            run_media_process([
-                str(ffmpeg), "-y", "-framerate", str(plan.fps),
-                "-i", str(frames / "frame-%06d.png"),
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            run_media_process_stream([
+                str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "image2pipe", "-framerate", str(plan.fps),
+                "-vcodec", "mjpeg", "-i", "pipe:0",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
-            ], timeout=max(120.0, plan.duration * 20))
+            ], self._capture_frames(plan, document, work / "chrome-profile"),
+                timeout=max(120.0, plan.duration * 20))
             publish = output.with_name(f".{output.name}.editorial.tmp")
             shutil.copyfile(temporary, publish)
             os.replace(publish, output)
@@ -623,10 +657,12 @@ class EditorialRenderer:
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
-    def _capture_frames(self, plan: EditPlan, document: Path, frames: Path, profile: Path) -> None:
+    def _capture_frames(
+        self, plan: EditPlan, document: Path, profile: Path,
+    ) -> Iterator[bytes]:
         profile.mkdir(parents=True)
         args = [
-            str(self.chromium), "--headless=new", "--disable-gpu", "--disable-extensions",
+            str(self.chromium), "--headless=new", "--disable-extensions",
             "--disable-background-networking", "--disable-component-update", "--disable-sync",
             "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
             "--force-device-scale-factor=1", f"--window-size={plan.width},{plan.height}",
@@ -686,9 +722,11 @@ class EditorialRenderer:
                     "expression": f"window.renderAt({timestamp:.12f})", "returnByValue": True,
                 })
                 screenshot = client.command("Page.captureScreenshot", {
-                    "format": "png", "fromSurface": True, "captureBeyondViewport": False,
+                    "format": "jpeg", "quality": 95,
+                    "fromSurface": True, "captureBeyondViewport": False,
+                    "optimizeForSpeed": True,
                 })
-                (frames / f"frame-{frame:06d}.png").write_bytes(base64.b64decode(screenshot["data"]))
+                yield base64.b64decode(screenshot["data"])
         finally:
             if client is not None:
                 client.close()

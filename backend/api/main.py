@@ -1093,6 +1093,9 @@ def create_app(
     def preview_editorial_project(project_id: str) -> HTMLResponse:
         try:
             plan = service.load_edit_plan(project_id)
+            retimed = service.retimed_editorial_plan(project_id)
+            if retimed is not None:
+                plan = retimed
             html = compile_edit_plan_html(
                 plan,
                 asset_url_resolver=lambda asset: (
