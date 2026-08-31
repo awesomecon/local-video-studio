@@ -18,6 +18,7 @@ from backend.rendering.process import (
     MediaProcessError,
     get_active_media_pids,
     run_media_process,
+    run_media_process_stream,
 )
 from backend.rendering.probe import probe_media
 from backend.rendering.qc import MediaQC, QCSeverity, check_subtitle_overflow
@@ -511,6 +512,27 @@ def test_run_media_process_unregisters_reaped_processes() -> None:
         run_media_process(
             [sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5
         )
+    assert get_active_media_pids() == []
+
+
+def test_run_media_process_stream_feeds_lazy_binary_chunks() -> None:
+    consumed: list[bytes] = []
+
+    def chunks():
+        for chunk in (b"ab", b"cd", b"ef"):
+            consumed.append(chunk)
+            yield chunk
+
+    run_media_process_stream([
+        sys.executable,
+        "-c",
+        (
+            "import sys; data=sys.stdin.buffer.read(); "
+            "raise SystemExit(0 if data == b'abcdef' else 3)"
+        ),
+    ], chunks(), timeout=30)
+
+    assert consumed == [b"ab", b"cd", b"ef"]
     assert get_active_media_pids() == []
 
 

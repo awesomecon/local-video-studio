@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
+import tempfile
 import threading
+import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -181,6 +184,91 @@ def run_media_process(
             stderr=stderr_text,
         )
         return result
+    except (MediaProcessError, CanceledError):
+        raise
+    except OSError as exc:
+        raise MediaProcessError(argv, -1, str(exc)) from exc
+
+
+def run_media_process_stream(
+    argv: Sequence[str],
+    chunks: Iterable[bytes],
+    *,
+    timeout: float | None = None,
+    job_id: str | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a tracked media process while incrementally feeding binary stdin.
+
+    Keeping the producer lazy avoids materializing a complete frame sequence in
+    memory or on disk. Stderr goes to a temporary file so FFmpeg can never
+    deadlock on a full stderr pipe while the caller is still producing frames.
+    """
+
+    if not argv:
+        raise ValueError("argv must not be empty")
+    cmd_strs = [str(part) for part in argv]
+    iterator = iter(chunks)
+    started = time.monotonic()
+    try:
+        with tempfile.TemporaryFile() as stderr_file:
+            proc = subprocess.Popen(
+                cmd_strs,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+            )
+            attribution = job_id if job_id is not None else getattr(_current_job, "job_id", None)
+            pid = _register_process(proc, attribution)
+            try:
+                try:
+                    assert proc.stdin is not None
+                    for chunk in iterator:
+                        if timeout is not None and time.monotonic() - started >= timeout:
+                            raise subprocess.TimeoutExpired(cmd=cmd_strs, timeout=timeout)
+                        try:
+                            proc.stdin.write(chunk)
+                        except BrokenPipeError:
+                            break
+                    try:
+                        proc.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    remaining = (
+                        None if timeout is None
+                        else max(0.0, timeout - (time.monotonic() - started))
+                    )
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    raise MediaProcessError(argv, -1, f"timed out after {timeout} seconds") from None
+                except BaseException:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    raise
+            finally:
+                close_iterator = getattr(iterator, "close", None)
+                if callable(close_iterator):
+                    close_iterator()
+                if proc.poll() is not None:
+                    _unregister_process(pid)
+
+            stderr_file.seek(0)
+            stderr_text = stderr_file.read().decode("utf-8", errors="replace")
+            returncode = proc.returncode if proc.returncode is not None else 0
+            if returncode < 0:
+                raise CanceledError(argv, returncode, stderr_text)
+            if returncode != 0:
+                raise MediaProcessError(argv, returncode, stderr_text)
+            return subprocess.CompletedProcess(
+                args=cmd_strs, returncode=returncode, stdout=b"", stderr=stderr_text.encode(),
+            )
     except (MediaProcessError, CanceledError):
         raise
     except OSError as exc:

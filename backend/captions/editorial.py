@@ -135,11 +135,13 @@ CAPTION_REGIONS: dict[
             # hero-title band so captions move above it instead of crossing
             # through long deterministic typography.
             "headline": (40, 712, 1000, 1050),
+            "cta": (72, 1330, 936, 120),
             "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
             "kicker": (70, 330, 1780, 46),
             "headline": (70, 430, 1780, 500),
+            "cta": (80, 930, 1760, 90),
             "draft-label": (82, 1046, 320, 28),
         },
     },
@@ -149,13 +151,20 @@ CAPTION_REGIONS: dict[
 # A reveal must overlap a caption by at least this much to take the screen:
 # a caption that merely lingers into the first moment of a reveal stays up.
 REVEAL_OVERLAP_MIN_SECONDS = 0.25
+# Roles whose on-screen text dominates the frame. Fullscreen moments (the ELON
+# reveal, big-text headlines such as COINCIDENCE? or a closing CTA) hide every
+# overlapping caption; the other dominant text roles hide captions that merely
+# duplicate them (e.g. a "1949" cue under a giant 1949).
 _REVEAL_ROLES: dict[EditorialTemplate, tuple[str, ...]] = {
-    EditorialTemplate.ARCHIVE_CANVAS: ("reveal",),
-    EditorialTemplate.BIG_TEXT_REVEAL: ("headline",),
+    EditorialTemplate.ARCHIVE_CANVAS: ("reveal", "year"),
+    EditorialTemplate.DOCUMENT_REVEAL: ("title",),
+    EditorialTemplate.COMPARISON_CANVAS: ("headline",),
+    EditorialTemplate.ILLUSTRATION_CANVAS: ("headline",),
+    EditorialTemplate.BIG_TEXT_REVEAL: ("headline", "kicker"),
 }
 _FULL_SCREEN_REVEALS: dict[EditorialTemplate, frozenset[str]] = {
     EditorialTemplate.ARCHIVE_CANVAS: frozenset({"reveal"}),
-    EditorialTemplate.BIG_TEXT_REVEAL: frozenset(),
+    EditorialTemplate.BIG_TEXT_REVEAL: frozenset({"headline"}),
 }
 
 
@@ -169,15 +178,21 @@ class _Unit:
 
     @property
     def text(self) -> str:
-        return " ".join(word.text.strip() for word in self.words)
+        return _words_text(self.words)
 
 
 def _token(text: str) -> str:
-    return "".join(char for char in text.casefold() if char.isalnum())
+    token = "".join(char for char in text.casefold() if char.isalnum())
+    # Whisper commonly normalizes spoken number words to digits. Treat the
+    # two forms as the same token so planner-authored emphasis remains stable.
+    return {"10": "ten"}.get(token, token)
 
 
 def _words_text(words: Sequence[CaptionWord]) -> str:
-    return " ".join(word.text.strip() for word in words)
+    text = " ".join(word.text.strip() for word in words)
+    # Whisper can split a compound into ``multi`` and ``-planetary``. Preserve
+    # its timestamps while presenting the authored compound naturally.
+    return re.sub(r"\s+(-[\w])", r"\1", text)
 
 
 def _validate_words(words: Iterable[CaptionWord]) -> list[CaptionWord]:
@@ -187,7 +202,23 @@ def _validate_words(words: Iterable[CaptionWord]) -> list[CaptionWord]:
         for previous, current in zip(ordered, ordered[1:])
     ):
         raise ValueError("caption words must be ordered by start time")
-    return ordered
+    coalesced: list[CaptionWord] = []
+    for word in ordered:
+        text = word.text.strip()
+        if (
+            text.startswith("-")
+            and coalesced
+            and word.start_seconds - coalesced[-1].end_seconds <= 0.08
+        ):
+            previous = coalesced[-1]
+            coalesced[-1] = CaptionWord(
+                previous.start_seconds,
+                word.end_seconds,
+                f"{previous.text.strip()}{text}",
+            )
+        else:
+            coalesced.append(word)
+    return coalesced
 
 
 def find_emphasis_spans(
@@ -595,6 +626,7 @@ class _RevealWindow:
     end: float
     fullscreen: bool
     tokens: frozenset[str]
+    numeral: bool = False
 
 
 def _reveal_windows(compositions: Sequence[EditorialComposition]) -> list[_RevealWindow]:
@@ -638,42 +670,77 @@ def _reveal_windows(compositions: Sequence[EditorialComposition]) -> list[_Revea
                 end=min(composition.start + to_time, composition.start + composition.duration),
                 fullscreen=role in _FULL_SCREEN_REVEALS.get(composition.template, frozenset()),
                 tokens=frozenset(_token(chunk) for chunk in element.text.split() if _token(chunk)),
+                numeral=(
+                    composition.template is EditorialTemplate.ARCHIVE_CANVAS
+                    and role == "year"
+                    and element.text.strip().isdigit()
+                    and len(element.text.strip()) == 4
+                ),
             ))
     return windows
+
+
+def _clip_cue_around_fullscreen_reveal(
+    cue: EditorialCaptionCue,
+    window: _RevealWindow,
+) -> EditorialCaptionCue | None:
+    """Keep the useful side of a cue that only grazes a fullscreen reveal."""
+    overlap = min(cue.end, window.end) - max(cue.start, window.start)
+    if overlap < REVEAL_OVERLAP_MIN_SECONDS:
+        return cue
+    before = max(0.0, window.start - cue.start)
+    after = max(0.0, cue.end - window.end)
+    if before < MIN_DWELL_SECONDS and after < MIN_DWELL_SECONDS:
+        return None
+    if before >= after:
+        return cue.model_copy(update={"end": window.start})
+    return cue.model_copy(update={"start": window.end})
 
 
 def suppress_cues_for_reveals(
     cues: Sequence[EditorialCaptionCue],
     compositions: Sequence[EditorialComposition],
 ) -> list[EditorialCaptionCue]:
-    """Drop captions that a major editorial reveal must own.
+    """Drop captions that on-screen editorial text must own.
 
-    Fullscreen moments (e.g. the ELON reveal) hide any overlapping caption.
-    Large headlines hide captions that duplicate their words, so the on-screen
-    text carries the moment instead of a second subtitle.
+    Fullscreen moments (the ELON reveal, big-text headlines) hide any
+    overlapping caption so the moment gets the whole screen. Dominant text
+    that shares the frame (giant year numerals, card titles, headlines) hides
+    captions that duplicate its words, so the on-screen text carries the
+    information instead of a second, smaller caption.
     """
     windows = _reveal_windows(compositions)
     if not windows:
         return list(cues)
     surviving: list[EditorialCaptionCue] = []
     for cue in cues:
-        cue_tokens = frozenset(_token(chunk) for chunk in cue.text.split() if _token(chunk))
+        candidate: EditorialCaptionCue | None = cue
         hidden = False
         for window in windows:
-            overlap = min(cue.end, window.end) - max(cue.start, window.start)
+            if candidate is None:
+                break
+            overlap = min(candidate.end, window.end) - max(candidate.start, window.start)
             if overlap < REVEAL_OVERLAP_MIN_SECONDS:
                 continue
             if window.fullscreen:
-                hidden = True
-                break
+                candidate = _clip_cue_around_fullscreen_reveal(candidate, window)
+                continue
+            cue_tokens = frozenset(
+                _token(chunk) for chunk in candidate.text.split() if _token(chunk)
+            )
             if not window.tokens or not cue_tokens:
                 continue
+            if window.numeral and cue_tokens & window.tokens:
+                # A giant year numeral owns the year fact: any beat that still
+                # says the year out loud restates what dominates the frame.
+                hidden = True
+                break
             common = len(cue_tokens & window.tokens)
             if common / len(cue_tokens) >= 0.6:
                 hidden = True
                 break
-        if not hidden:
-            surviving.append(cue)
+        if not hidden and candidate is not None:
+            surviving.append(candidate)
     return surviving
 
 

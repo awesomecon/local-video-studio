@@ -42,6 +42,21 @@ _AUTHORED_IMAGE_MODELS = {item.value for item in ImageModelOption}
 MAX_PROJECT_SCENES = 128
 
 
+# Keep the narration guidance compact enough for the local model to follow while
+# covering the recurring prose habits that make generated scripts sound canned.
+# Project instructions still define the subject, tone, and any deliberate
+# exceptions; this policy supplies the default editorial standard.
+NARRATION_STYLE_POLICY = (
+    "Write narration in direct, natural prose for the stated audience. Cut filler, "
+    "jargon, emphasis crutches, expendable adverbs, and vague claims. Prefer active "
+    "voice; name human actors when the evidence does, and do not give abstractions "
+    "human agency. Avoid 'not X, but Y' reversals, negative-list reveals, instant-answer "
+    "rhetorical questions, dramatic fragments, and routine three-item lists. Use concrete "
+    "nouns and verbs, vary sentence length, and never use em dashes. Preserve nuance, "
+    "uncertainty, quotations, and technical terms; do not trade accuracy for punchiness."
+)
+
+
 def _text_list(value: Any, *, limit: int) -> list[str]:
     """Return a bounded list of nonempty strings from model-authored metadata."""
 
@@ -412,27 +427,23 @@ class DirectorEngine:
             + duration_rule +
             "Give each scene a title, narration at two to three spoken words per second, and a "
             "visual_prompt that describes only visible content—not narration, scene numbers, or overlays. "
+            + NARRATION_STYLE_POLICY + " "
             "Keep one visual idea for roughly 2–4 sentences, 35–75 spoken words, and 15–30 seconds. "
-            "For Krea, specify ONE focal subject, person, or place; never request a montage, collage, grid, "
-            "split-screen, diptych, or multiple locations; do not create a new scene merely because a sentence ended. "
-            "Krea is text-free: no words, signs, labels, logos, documents, captions, or watermarks. "
-            "Supply a negative_prompt forbidding text, extra panels, duplicated subjects, anatomy errors, "
-            "gore, and fabricated documentary evidence. Text routing: use text_overlay_still when a cinematic Krea "
-            "background needs one or two short exact-text regions; put one region per text_in_image line. "
+            "For Krea, specify ONE focal subject or place; no montage, grid, split-screen, or location change; "
+            "do not create a new scene merely because a sentence ended. Krea is text-free: no words, signs, "
+            "logos, documents, captions, or watermarks. In negative_prompt forbid text, extra panels, duplicates, "
+            "anatomy errors, gore, and fabricated evidence. Text routing: use text_overlay_still when a cinematic Krea "
+            "background needs one or two exact-text regions, one per text_in_image line. "
             "Use graphic_screen when typography "
-            "or structured information is the composition—long quotations, Scripture, dates arranged as a timeline, "
-            "charts, comparisons, diagrams, interfaces, or three or more explanatory labels. Supply exact graphic_text "
-            "plus graphic_instructions, never HTML. Do not convert every text-bearing scene to one type: preserve this "
-            "cinematic-overlay versus full-graphic distinction. Use Ideogram 4 for integrated typography/layout in posters, "
-            "signs, covers, labels, or UI, use ideogram4_still plus ideogram4_local and put 1–2 exact "
-            "lines in text_in_image; the builder stores non-overlapping native Precise boxes. Generated "
-            "imagery is never evidence. Use Qwen only for "
-            "non-critical integrated layout text: set image_motion_source=qwen_image_2512; otherwise use "
+            "or structured information is the composition: quotations, timelines, charts, diagrams, interfaces, or "
+            "three or more labels. Supply exact graphic_text and graphic_instructions, never HTML. Use Ideogram 4 for integrated typography/layout "
+            "in posters, signs, covers, labels, or UI: use ideogram4_still plus ideogram4_local and put 1–2 exact "
+            "lines in text_in_image. Generated imagery is never evidence. For non-critical integrated text, set "
+            "image_motion_source=qwen_image_2512; otherwise use "
             "image_motion_source=krea2. For image_motion choose slow push in, slow pull out, pan left, pan "
             "right, drift up, or drift down; always set krea2_still camera_instruction to locked; lock "
-            "ideogram4_still and qwen_image_still too. Reserve minimax_h3 for one continuous motion-led fictional shot, speech, "
-            "or hero action; use 5–8 seconds and no montage or location change. Set continue_previous_h3=true "
-            "only on successors and preserve subject, wardrobe, setting, lens, lighting, and screen direction. "
+            "ideogram4_still and qwen_image_still too. Reserve minimax_h3 for a continuous fictional shot, speech, "
+            "or hero action; use 5–8 seconds. Set continue_previous_h3=true only on successors and preserve continuity. "
             "Include visual_type_description. Use REAL/reused_media for factual people, organizations, "
             "documents, laws, historical events, and editorial footage, with authentic source metadata. "
             "Keep critical H3 text in a Graphic Screen overlay. preferred_image_model may be krea, "

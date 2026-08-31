@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from backend.editorial import (
     EditorialAsset, EditorialAssetType, EditorialCaptionStyle,
-    EditorialImageGeneration,
+    EditorialImageGeneration, EvidenceClass,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
     EditorialPlanner, EditorialTemplate, EditPlan, MotionPrimitive,
     build_project_mars_prototype,
@@ -338,6 +338,92 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert context["template_required_roles"]["comparisonCanvas"] == [
         "left-image", "right-image",
     ]
+
+
+def test_planner_context_uses_recorded_scene_clock() -> None:
+    project = Project(
+        title="Clock", topic="clock work", target_duration=22, slug="clock",
+        video_mode=VideoMode.EDITORIAL, resolution=(1080, 1920), fps=24,
+    )
+    script = ProjectPlan(
+        project_id=project.id, title=project.title, outline=["Opening"],
+        target_duration=22,
+        scenes=[
+            Scene(project_id=project.id, index=index, title=title, duration=5,
+                  narration=f"Beat {title}.")
+            for index, title in enumerate(["A", "B", "C", "D"])
+        ],
+    )
+    clock = [(0.0, 10.0), (10.0, 16.0), (16.0, 20.0), (20.0, 22.0)]
+    context = EditorialPlanner._context(
+        project, script, assets=(), word_timings=(), scene_clock=clock,
+    )
+    assert context["project"]["duration"] == 22.0
+    assert [
+        (entry["start"], entry["end"])
+        for entry in context["narration"]
+    ] == clock
+    # Without the recorded clock the planned durations stay the fallback.
+    fallback = EditorialPlanner._context(
+        project, script, assets=(), word_timings=(), scene_clock=None,
+    )
+    assert [entry["end"] for entry in fallback["narration"]] == [
+        5.0, 10.0, 15.0, 20.0,
+    ]
+
+
+def test_promote_node_lifts_one_unnumbered_chief_node() -> None:
+    composition = _composition(
+        "chief", EditorialTemplate.ARCHIVE_CANVAS, duration=8,
+        elements=[
+            _element("chief-grid", "ruler-grid", EditorialElementType.RULER_NODES, count=10),
+            _element("chief-title", "year", EditorialElementType.TEXT, text="10 RULERS"),
+        ],
+        events=[
+            EditorialEvent(time=0.0, action=MotionPrimitive.FADE_UP, target="chief-title"),
+            EditorialEvent(time=1.0, action=MotionPrimitive.STAGGER_IN, target="chief-grid"),
+            EditorialEvent(
+                time=3.0, action=MotionPrimitive.PROMOTE_NODE,
+                target="chief-grid", duration=1.1, value=4,
+            ),
+        ],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+    # Every node carries the CHIEF label so promotion removes the number
+    # instead of singling a numbered box out.
+    assert html.count('class="ruler-chief"') == 10
+    assert ".ruler-node.chief{border-color:var(--rust);background:#f0e5c9" in html
+    assert "case 'promoteNode':" in html
+    assert "rootRect.height*.36" in html
+    assert "translate(${dx*p}px,${dy*p}px)" in html
+    assert "-104*(1-p)" not in html
+    payload = _plan_payload(html)
+    event = payload["compositions"][0]["events"][-1]
+    assert event["action"] == "promoteNode" and event["value"] == 4
+
+
+def test_evidence_documents_render_legibly_instead_of_as_texture() -> None:
+    composition = _composition(
+        "source", EditorialTemplate.DOCUMENT_REVEAL,
+        assets=[EditorialAsset(
+            id="page", type=EditorialAssetType.DOCUMENT,
+            source="editorial/assets/chapter.png",
+            evidence_class=EvidenceClass.EVIDENCE, locked=True,
+        )],
+        elements=[_element(
+            "source-page", "document", EditorialElementType.DOCUMENT,
+            asset_id="page",
+        )],
+        events=[EditorialEvent(
+            time=0, action=MotionPrimitive.PAPER_SLIDE, target="source-page",
+        )],
+    )
+    html = compile_edit_plan_html(
+        EditPlan(project_id="p", compositions=[composition]),
+        asset_url_resolver=lambda _asset: "data:image/png;base64,AA==",
+    )
+    assert 'class="asset-image document-image evidence-image"' in html
+    assert ".source-sheet .document-image.evidence-image{object-fit:contain;opacity:.98" in html
 
 
 def test_editorial_planner_resolves_verified_asset_without_trusting_llm_source() -> None:
@@ -676,6 +762,13 @@ def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path:
 
     pipeline._ensure_editorial_visual(project, force=False)
     assert [call[0].compositions[0].id for call in synthetic.calls] == ["first", "second"]
+    synthetic.calls.clear()
+
+    # Force rebuilds the visual master and stage record, but unchanged,
+    # content-addressed composition clips remain valid intermediates.
+    pipeline._ensure_editorial_visual(project, force=True)
+    assert synthetic.calls == []
+
     changed_second = second.model_copy(update={
         "elements": [second.elements[0].model_copy(update={"text": "SECOND REVISED"})],
     })
@@ -685,9 +778,7 @@ def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path:
 
     pipeline._ensure_editorial_visual(project, force=False)
 
-    assert [call[0].compositions[0].id for call in synthetic.calls] == [
-        "first", "second", "second",
-    ]
+    assert [call[0].compositions[0].id for call in synthetic.calls] == ["second"]
     manifest = json.loads(
         (root / "editorial" / "compositions" / "manifest.json").read_text(encoding="utf-8")
     )
@@ -700,6 +791,119 @@ def test_editorial_visual_cache_rerenders_only_the_changed_composition(tmp_path:
     pipeline._ensure_editorial_visual(project, force=False)
     assert [call[0].compositions[0].id for call in synthetic.calls][-1] == "first"
     assert probe_media(first_clip, pipeline.renderer.binaries).has_video
+
+
+def test_pipeline_retimes_stored_plan_to_recorded_scene_clock(tmp_path: Path) -> None:
+    """Plans authored on the planned scene clock snap to the recorded audio clock."""
+    import wave
+
+    pipeline = PipelineService(
+        load_config(environ={}),
+        database_path=tmp_path / "app" / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "app" / "tmp",
+        mock_mode=True,
+    )
+    project = pipeline.create_project(ProjectCreate(
+        title="Clock Snap", topic="scene clock", target_duration=3,
+        resolution=(320, 568), fps=12, video_mode=VideoMode.EDITORIAL,
+    ))
+    pipeline.ensure_plan(project.id)
+    project = pipeline._project(project.id)
+    root = pipeline.store.project_path(project)
+    scenes = pipeline.database.list_scenes(project.id)
+    assert len(scenes) >= 2
+    # Recorded takes disagree with the planned durations: the first scene was
+    # spoken slowly, the rest quickly. The master matches the recorded sum.
+    recorded = [10.0, 6.0, 6.0][: len(scenes)]
+    if len(scenes) > 3:
+        recorded.extend(2.0 for _ in scenes[3:])
+    total = sum(recorded)
+    master = root / "narration" / "master.wav"
+    with wave.open(str(master), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24000)
+        handle.writeframes(b"\x00\x00" * int(total * 24000))
+    take_dir = root / "narration" / "takes" / "mock_tts"
+    take_dir.mkdir(parents=True, exist_ok=True)
+    (take_dir / "take-1.json").write_text(
+        json.dumps({
+            "settings": {
+                "timing_mode": "scene_audio_v1",
+                "duration": total,
+                "scene_durations": [
+                    {"scene_id": scene.id, "scene_index": i, "duration": duration}
+                    for i, (scene, duration) in enumerate(zip(scenes, recorded))
+                ],
+            },
+        }),
+        encoding="utf-8",
+    )
+    (root / "narration" / "takes.json").write_text(
+        json.dumps({
+            "version": 2,
+            "active_file": "narration/takes/mock_tts/take-1.wav",
+        }),
+        encoding="utf-8",
+    )
+    first, second = scenes[0], scenes[1]
+    plan = EditPlan(
+        project_id=project.id, width=320, height=568, fps=12,
+        compositions=[
+            EditorialComposition(
+                id="first-moment", start=0, duration=first.duration,
+                template=EditorialTemplate.ARCHIVE_CANVAS,
+                elements=[EditorialElement(
+                    id="first-title", type=EditorialElementType.TEXT,
+                    text="FIRST", role="year",
+                )],
+                events=[
+                    EditorialEvent(time=0, action=MotionPrimitive.FADE_UP, target="first-title"),
+                    EditorialEvent(
+                        time=first.duration / 2,
+                        action=MotionPrimitive.SCALE_IN,
+                        target="first-title",
+                    ),
+                ],
+                narration_refs=[first.id],
+            ),
+            EditorialComposition(
+                id="second-moment", start=first.duration,
+                duration=sum(scene.duration for scene in scenes[1:]),
+                template=EditorialTemplate.BIG_TEXT_REVEAL,
+                elements=[EditorialElement(
+                    id="second-title", type=EditorialElementType.TEXT,
+                    text="SECOND", role="headline",
+                )],
+                events=[EditorialEvent(time=0, action=MotionPrimitive.FADE_UP, target="second-title")],
+                narration_refs=[scene.id for scene in scenes[1:]],
+            ),
+        ],
+    )
+    pipeline.save_edit_plan(project.id, plan)
+
+    retimed = pipeline.retimed_editorial_plan(project.id)
+    assert retimed is not None
+    by_id = {item.id: item for item in retimed.compositions}
+    assert by_id["first-moment"].start == 0
+    assert by_id["first-moment"].duration == 10.0
+    assert by_id["second-moment"].start == 10.0
+    assert by_id["second-moment"].duration == total - 10.0
+    # Elements, events, and settings survive retiming untouched.
+    assert by_id["second-moment"].elements[0].text == "SECOND"
+    assert [event.action for event in by_id["first-moment"].events] == [
+        MotionPrimitive.FADE_UP, MotionPrimitive.SCALE_IN,
+    ]
+    assert by_id["first-moment"].events[1].time == 5.0
+    assert retimed.duration == total
+
+    # A plan that already sits on the recorded clock retimes to itself.
+    again = pipeline._retimed_editorial_plan(project, retimed)
+    assert again is not None
+    assert [(item.start, item.duration) for item in again.compositions] == [
+        (item.start, item.duration) for item in retimed.compositions
+    ]
 # Deterministic template library: renderer-owned layout for all five templates
 # ---------------------------------------------------------------------------
 
@@ -933,21 +1137,27 @@ def test_big_text_reveal_binds_roles_to_layout_regions() -> None:
         elements=[
             _element("kicker-c1", "kicker", EditorialElementType.TEXT, text="1949"),
             _element("headline-c2", "headline", EditorialElementType.TEXT, text="ELON"),
-            _element("blackout-c3", "blackout", EditorialElementType.BLACK_SCREEN),
+            _element("cta-c3", "cta", EditorialElementType.TEXT, text="WATCH THE FULL VIDEO"),
+            _element("blackout-c4", "blackout", EditorialElementType.BLACK_SCREEN),
         ],
         events=[
             EditorialEvent(time=0.0, action=MotionPrimitive.FADE, target="kicker-c1"),
             EditorialEvent(time=0.7, action=MotionPrimitive.HARD_CUT, target="headline-c2"),
-            EditorialEvent(time=3.5, action=MotionPrimitive.FADE, target="blackout-c3"),
+            EditorialEvent(time=2.5, action=MotionPrimitive.FADE_UP, target="cta-c3"),
+            EditorialEvent(time=3.5, action=MotionPrimitive.FADE, target="blackout-c4"),
         ],
     )
     html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
     assert 'id="kicker-c1" class="big-kicker editorial-element editorial-type"' in html
     assert 'id="headline-c2" class="big-headline editorial-element editorial-type"' in html
-    assert 'id="blackout-c3" class="blackout editorial-element"' in html
-    assert ">1949<" in html and ">ELON<" in html
+    assert 'id="cta-c3" class="big-cta editorial-element editorial-type"' in html
+    assert 'id="blackout-c4" class="blackout editorial-element"' in html
+    assert ">1949<" in html and ">ELON<" in html and ">WATCH THE FULL VIDEO<" in html
     # This template carries no imagery and therefore no resolved URLs.
     assert "src=" not in html
+    # The CTA box sits below the hero band in both orientations.
+    assert ".big-cta{position:absolute;left:72px;right:72px;top:1330px" in html
+    assert ".landscape .big-cta{top:930px" in html
 
 
 def test_big_text_reveal_assigns_deterministic_responsive_type_tiers() -> None:
@@ -1078,6 +1288,7 @@ def test_all_motion_primitives_are_plannable_and_compiled() -> None:
         (6.0, MotionPrimitive.STAGGER_IN, "rulers-m", None),
         (7.2, MotionPrimitive.DIM_OTHERS, "rulers-m", 4),
         (7.2, MotionPrimitive.FOCUS_ONE, "rulers-m", 4),
+        (7.2, MotionPrimitive.PROMOTE_NODE, "rulers-m", 4),
         (8.4, MotionPrimitive.COLLAPSE_TO_BLACK, "canvas", None),
         (9.6, MotionPrimitive.HARD_CUT, "reveal-m", None),
     ]

@@ -76,6 +76,9 @@ def test_director_sends_dedicated_schema_and_materializes_domain_plan() -> None:
     assert llm.arguments["thinking_budget_tokens"] == 10_000
     director_prompt = llm.arguments["messages"][0]["content"]
     assert "provided response schema" in director_prompt
+    assert "Write narration in direct, natural prose" in director_prompt
+    assert "never use em dashes" in director_prompt
+    assert "do not trade accuracy for punchiness" in director_prompt
     assert "roughly 2–4 sentences, 35–75 spoken words, and 15–30 seconds" in director_prompt
     assert "do not create a new scene merely because a sentence ended" in director_prompt
 
@@ -338,9 +341,8 @@ def test_system_prompt_is_concise_and_does_not_duplicate_schema() -> None:
 
     assert "provided response schema" in prompt
     assert '"properties"' not in prompt
-    # Raised from 2_000 when image-model routing (Ideogram 4 vs Qwen vs Krea)
-    # rules were added to the director contract; still a hard concision bound.
-    assert len(prompt) < 2_700
+    # Image routing and the narration style policy share one compact contract.
+    assert len(prompt) < 3_000
     assert "Use Ideogram 4 for integrated typography/layout" in prompt
     assert "Krea is text-free" in prompt
     assert "use text_overlay_still when a cinematic Krea background" in prompt
