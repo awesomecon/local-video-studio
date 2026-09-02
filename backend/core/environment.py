@@ -373,12 +373,6 @@ def inspect_environment(config: AppConfig | None = None, *,
         recommendations.append(
             "Configure model/cache roots on a larger mounted drive before downloading weights."
         )
-    recommendations.append(
-        "Reuse the existing PyTorch only for adapters whose declared versions are compatible."
-    )
-    recommendations.append(
-        "Use backend-specific environments/services for H3, ComfyUI, and conflicting model stacks."
-    )
     if incompatible or not ffmpeg.available:
         classification = EnvironmentClassification.ISOLATION_REQUIRED
     elif warnings or conflicts:

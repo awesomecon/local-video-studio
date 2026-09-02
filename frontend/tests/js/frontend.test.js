@@ -90,6 +90,22 @@
  *                                only for strict booleans (malformed values
  *                                are omitted, never guessed); classic and
  *                                legacy screens are unchanged.
+ *  13. Editorial workspace screen  - the dedicated Editorial screen routes
+ *                                to the workspace page: classic projects get
+ *                                a pointer state with no plan fetch, the
+ *                                no-plan state exposes the guarded Generate
+ *                                action (one bodyless POST, then the screen
+ *                                lands in the workspace), a plan renders the
+ *                                time-proportional sequence strip, the
+ *                                selected composition's strict detail
+ *                                controls, and an embedded preview that is
+ *                                mounted only behind the explicit toggle and
+ *                                only for the mounted project's exact
+ *                                project-local preview path (anything else
+ *                                degrades to an unavailable note); template
+ *                                labels and the preview aspect-ratio helper
+ *                                degrade malformed input to readable
+ *                                fallbacks.
  */
 
 import {
@@ -102,6 +118,12 @@ import {
   sceneHasExplicitShots,
 } from "../../js/shots.js";
 import { parseRoute, sceneEditorHash } from "../../js/router.js";
+import {
+  renderEditorial,
+  safeEditorialPreviewUrl,
+  templateLabel,
+  previewAspectRatio,
+} from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { state } from "../../js/state.js";
 import {
@@ -2126,6 +2148,229 @@ record("export: classic and legacy summaries never show display settings", () =>
   const legacy = renderInputSummary(exportSnapshot(LEGACY_EXPORT_PROJECT, undefined), {});
   eq([...legacy.querySelectorAll("dt")].map((n) => n.textContent),
     ["Scene visuals", "Narration", "Optional inputs"], "legacy rows unchanged");
+});
+
+/* --- 13. Editorial workspace screen --------------------------------------- */
+
+const WS_PROJECT = { ...LEGACY_PROJECT, id: "proj-ws", video_mode: "editorial" };
+const WS_CLASSIC_PROJECT = { ...LEGACY_PROJECT, id: "proj-wc", video_mode: "classic" };
+const WS_META = {
+  has_edit_plan: true,
+  plan_status: "current",
+  stale: false,
+  stale_reasons: [],
+  edit_plan_url: "/api/projects/proj-ws/editorial/edit-plan",
+  preview_url: "/api/projects/proj-ws/editorial/preview",
+  settings_url: "/api/projects/proj-ws/editorial/settings",
+  captions_enabled: true,
+  editorial_text_enabled: true,
+  caption_style: "editorialPhrase",
+};
+const WS_PLAN = {
+  schema_version: 1,
+  project_id: "proj-ws",
+  width: 1080, height: 1920, fps: 30,
+  captions_enabled: true,
+  editorial_text_enabled: true,
+  compositions: [
+    {
+      id: "c1", start: 0, duration: 4, template: "bigTextReveal",
+      assets: [],
+      elements: [{ id: "e1", type: "text", text: "OPEN", role: "headline" }],
+      events: [{ time: 0, action: "fade", target: "canvas" }],
+      narration_refs: [],
+    },
+    {
+      id: "c2", start: 4, duration: 6, template: "archiveCanvas",
+      assets: [{ id: "a1", type: "historical_photo", evidence_class: "evidence", locked: true, label: "Archive" }],
+      elements: [], events: [], narration_refs: ["n1"],
+    },
+  ],
+};
+
+record("editorial-workspace: parser resolves the dedicated route", () => {
+  window.location.hash = "#/editorial";
+  eq(parseRoute().name, "editorial");
+  window.location.hash = "#/timeline";
+  eq(parseRoute().name, "timeline", "the adjacent route is unaffected");
+  window.location.hash = "#/";
+});
+
+record("editorial-workspace: template labels are readable, unknown values pass through", () => {
+  eq(templateLabel("archiveCanvas"), "Archive canvas");
+  eq(templateLabel("documentReveal"), "Document reveal");
+  eq(templateLabel("comparisonCanvas"), "Comparison canvas");
+  eq(templateLabel("illustrationCanvas"), "Illustration canvas");
+  eq(templateLabel("bigTextReveal"), "Big text reveal");
+  eq(templateLabel("inventedTemplate"), "inventedTemplate", "unknown stays identifiable");
+  eq(templateLabel(42), "—");
+  eq(templateLabel(null), "—");
+});
+
+record("editorial-workspace: preview URL is trusted only for the mounted project's exact path", () => {
+  const preview = "/api/projects/proj-ws/editorial/preview";
+  eq(safeEditorialPreviewUrl(preview, "proj-ws"), preview, "exact project-local path accepted");
+  eq(safeEditorialPreviewUrl("http" + "s://remote.example/preview", "proj-ws"), null, "remote rejected");
+  eq(safeEditorialPreviewUrl("//cdn.example.com/preview", "proj-ws"), null, "protocol-relative rejected");
+  eq(safeEditorialPreviewUrl("/api/projects/other/editorial/preview", "proj-ws"), null, "cross-project rejected");
+  eq(safeEditorialPreviewUrl("/api/projects/proj-ws/editorial/edit-plan", "proj-ws"), null, "wrong endpoint rejected");
+  eq(safeEditorialPreviewUrl(preview + "?ts=1", "proj-ws"), null, "query junk rejected");
+  eq(safeEditorialPreviewUrl(preview + "#f", "proj-ws"), null, "fragment rejected");
+  eq(safeEditorialPreviewUrl("/\\host/preview", "proj-ws"), null, "backslash rejected");
+  eq(safeEditorialPreviewUrl("  " + preview, "proj-ws"), null, "surrounding whitespace rejected");
+  eq(safeEditorialPreviewUrl(preview, null), null, "no mounted project -> no preview");
+  eq(safeEditorialPreviewUrl(42, "proj-ws"), null);
+  eq(safeEditorialPreviewUrl(null, "proj-ws"), null);
+});
+
+record("editorial-workspace: preview aspect prefers the plan, then project ratio, then portrait", () => {
+  eq(previewAspectRatio({ width: 1080, height: 1920 }, {}),
+    { css: "1080 / 1920", number: 0.5625 });
+  eq(previewAspectRatio({ width: 0, height: 1920 }, { aspect_ratio: "16:9" }),
+    { css: "16 / 9", number: 16 / 9 }, "non-positive plan size falls back");
+  eq(previewAspectRatio(null, { aspect_ratio: "1:1" }), { css: "1 / 1", number: 1 });
+  eq(previewAspectRatio(null, { aspect_ratio: "weird" }),
+    { css: "9 / 16", number: 9 / 16 }, "unparsable ratio falls back");
+  eq(previewAspectRatio(null, {}), { css: "9 / 16", number: 9 / 16 }, "Editorial portrait default");
+});
+
+await recordAsync("editorial-workspace: classic project gets the pointer state and no plan fetch", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-wc";
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-wc") {
+      return { payload: projectSnapshot(WS_CLASSIC_PROJECT) };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderEditorial({ name: "editorial", param: null });
+  await flush();
+  assert(screen.textContent.includes("Classic project"), "classic pointer state shown");
+  assert(!screen.querySelector(".ed-strip"), "no sequence strip for classic projects");
+  assert(!screen.querySelector("iframe"), "no preview frame for classic projects");
+  assert(!calls.some((c) => c.url.includes("/editorial/")), "no Edit Plan or preview traffic");
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-workspace: no-plan state exposes the guarded Generate action and lands in the workspace", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-ws";
+  let planExists = false;
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws") {
+      const meta = planExists
+        ? WS_META
+        : {
+          has_edit_plan: false,
+          generate_url: "/api/projects/proj-ws/editorial/plan",
+          edit_plan_url: WS_META.edit_plan_url,
+          preview_url: WS_META.preview_url,
+        };
+      return { payload: projectSnapshot(WS_PROJECT, meta) };
+    }
+    if (call.method === "POST" && call.url === "/api/projects/proj-ws/editorial/plan") {
+      planExists = true;
+      return { payload: WS_PLAN };
+    }
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws/editorial/edit-plan") {
+      return { payload: WS_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderEditorial({ name: "editorial", param: null });
+  await flush();
+  assert(screen.textContent.includes("No Edit Plan yet"), "no-plan empty state shown");
+  const gen = [...screen.querySelectorAll("button")].find((b) => b.textContent === "Generate Edit Plan");
+  assert(gen, "Generate Edit Plan action present");
+  assert(!screen.querySelector(".ed-strip"), "no workspace before the plan exists");
+  gen.click();
+  gen.click(); // a second click while pending must be ignored
+  await flush();
+  const posts = calls.filter((c) => c.method === "POST" && c.url === "/api/projects/proj-ws/editorial/plan");
+  eq(posts.length, 1, "exactly one bodyless generation POST");
+  eq(posts[0].body, null, "no request body and no force flag");
+  assert(screen.querySelector(".ed-strip"), "the screen lands in the workspace after generation");
+  assert(screen.textContent.includes("Big text reveal"), "strip renders the plan's compositions");
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-workspace: plan renders strip, detail, and a preview gated behind the toggle", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-ws";
+  let planFetches = 0;
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws") {
+      return { payload: projectSnapshot(WS_PROJECT, WS_META) };
+    }
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws/editorial/edit-plan") {
+      planFetches += 1;
+      return { payload: WS_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderEditorial({ name: "editorial", param: null });
+  await flush();
+  eq(planFetches, 1, "the plan is read exactly once on load");
+  const strip = screen.querySelector(".ed-strip");
+  assert(strip, "the sequence strip rendered");
+  const cards = [...strip.querySelectorAll(".ed-card")];
+  eq(cards.length, 2, "one card per composition");
+  assert(screen.textContent.includes("Big text reveal"), "readable template label (1)");
+  assert(screen.textContent.includes("Archive canvas"), "readable template label (2)");
+  assert(screen.textContent.includes("0:00–0:04"), "first timing range");
+  assert(screen.textContent.includes("0:04–0:10"), "second timing range");
+  assert(screen.textContent.includes("1 locked"), "locked asset count surfaced on the card");
+  // The detail panel opens on the first composition by default.
+  assert(screen.textContent.includes("c1"), "first composition selected by default");
+  assert(screen.querySelector('[data-ed-text="e1"]'), "deterministic text control exposed");
+  assert(screen.querySelector('[data-ed-regen="c1"]'), "per-composition Regenerate available");
+  // Selecting another card repaints the detail without any request.
+  cards[1].click();
+  await flush(2);
+  eq(planFetches, 1, "selection issues no fetch");
+  assert(screen.querySelector('[data-ed-regen="c2"]'), "detail follows the selection");
+  const selectedCard = strip.querySelector(".ed-card.selected");
+  assert(selectedCard && selectedCard.getAttribute("data-ed-comp-card") === "c2", "strip highlight follows the selection");
+  // The embedded preview stays off until the explicit toggle.
+  const toggle = screen.querySelector("[data-ed-preview-toggle]");
+  assert(toggle, "the preview toggle is present");
+  assert(!screen.querySelector("iframe"), "no iframe before the explicit toggle");
+  toggle.click();
+  await flush(2);
+  const frame = screen.querySelector("iframe.ed-preview-frame");
+  assert(frame, "the iframe mounts on toggle");
+  assert(String(frame.getAttribute("src")).startsWith("/api/projects/proj-ws/editorial/preview?ts="),
+    "the frame loads the validated preview URL with a cache stamp");
+  assert(!calls.some((c) => c.method !== "GET"), "no mutations are ever issued passively");
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-workspace: an untrusted preview_url degrades to the unavailable note", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-ws";
+  stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws") {
+      return { payload: projectSnapshot(WS_PROJECT, {
+        ...WS_META,
+        preview_url: "/api/projects/other/editorial/preview",
+      }) };
+    }
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws/editorial/edit-plan") {
+      return { payload: WS_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderEditorial({ name: "editorial", param: null });
+  await flush();
+  assert(screen.querySelector(".ed-strip"), "the workspace still renders");
+  assert(screen.textContent.includes("Preview is unavailable"), "cross-project preview URL surfaces the note");
+  assert(!screen.querySelector("[data-ed-preview-toggle]"), "no toggle for an untrusted preview URL");
+  assert(!screen.querySelector("iframe"), "no iframe is ever pointed at the untrusted URL");
+  screen.remove();
+  state.currentProjectId = null;
 });
 
 /* --- report -------------------------------------------------------------- */

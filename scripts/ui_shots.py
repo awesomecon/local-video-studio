@@ -58,6 +58,7 @@ ROUTES = [
     ("voice", "#/voice"),
     ("music", "#/music"),
     ("captions", "#/captions"),
+    ("editorial", "#/editorial"),
     ("timeline", "#/timeline"),
     ("export", "#/export"),
     ("jobs", "#/jobs"),

@@ -1545,6 +1545,8 @@ class PipelineService:
             return []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if not self._word_timings_match_narration(project, payload):
+                return []
             return [
                 CaptionWord(
                     start_seconds=float(item["start_seconds"]),
@@ -1557,6 +1559,19 @@ class PipelineService:
             raise PipelineError(
                 "Stored narration word timings are invalid; regenerate caption alignment."
             ) from exc
+
+    def _word_timings_match_narration(
+        self, project: Project, payload: Mapping[str, Any],
+    ) -> bool:
+        """Return whether audio-derived timing metadata belongs to the active master WAV."""
+        recorded_hash = payload.get("input_audio_sha256")
+        master = self.store.project_path(project) / "narration" / "master.wav"
+        return bool(
+            isinstance(recorded_hash, str)
+            and len(recorded_hash) == 64
+            and master.is_file()
+            and self._incremental_hash(master) == recorded_hash
+        )
 
     def _narration_scene_bounds(self, project: Project) -> dict[str, tuple[float, float]] | None:
         """Per-scene (start, end) on the real audio clock, keyed by scene id.
@@ -1582,22 +1597,35 @@ class PipelineService:
                 (root / active_file).with_suffix(".json").read_text(encoding="utf-8"),
             )
             settings = meta.get("settings", {})
-            if settings.get("timing_mode") != "scene_audio_v1":
+            timing_mode = settings.get("timing_mode")
+            if timing_mode not in {"scene_audio_v1", "recorded_master_v1"}:
                 return None
             recorded_duration = float(settings["duration"])
             actual_duration = wav_duration(master)
             if abs(recorded_duration - actual_duration) > 0.2:
                 return None
-            by_scene = {
-                str(item["scene_id"]): float(item["duration"])
-                for item in settings.get("scene_durations", [])
-            }
+            scenes = self.database.list_scenes(project.id)
+            if timing_mode == "recorded_master_v1":
+                planned_total = sum(scene.duration for scene in scenes)
+                if not scenes or planned_total <= 0:
+                    return None
+                by_scene = {
+                    scene.id: actual_duration * scene.duration / planned_total
+                    for scene in scenes
+                }
+            else:
+                by_scene = {
+                    str(item["scene_id"]): float(item["duration"])
+                    for item in settings.get("scene_durations", [])
+                }
             bounds: dict[str, tuple[float, float]] = {}
             cursor = 0.0
-            for scene in self.database.list_scenes(project.id):
+            for index, scene in enumerate(scenes):
                 if not scene.narration.strip() or scene.id not in by_scene:
                     return None
                 duration = by_scene[scene.id]
+                if timing_mode == "recorded_master_v1" and index == len(scenes) - 1:
+                    duration = actual_duration - cursor
                 bounds[scene.id] = (cursor, cursor + duration)
                 cursor += duration
             return bounds
@@ -8522,17 +8550,29 @@ class PipelineService:
     def _subtitle_cues(self, project: Project) -> list[SubtitleCue]:
         word_timings = self.store.project_path(project) / "subtitles" / "word-timings.json"
         if word_timings.is_file():
-            return self._audio_derived_cues(word_timings)
+            try:
+                payload = json.loads(word_timings.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if self._word_timings_match_narration(project, payload):
+                return self._audio_derived_cues(word_timings)
         cues: list[SubtitleCue] = []
+        bounds = self._narration_scene_bounds(project)
         cursor = 0.0
         for scene in self.database.list_scenes(project.id):
             lines = textwrap.wrap(scene.narration, width=42, break_long_words=False) or [""]
             chunks = ["\n".join(lines[index:index + 2]) for index in range(0, len(lines), 2)]
-            chunk_duration = scene.duration / len(chunks)
+            if bounds is not None and scene.id in bounds:
+                scene_start, scene_end = bounds[scene.id]
+                cursor = scene_start
+                scene_duration = scene_end - scene_start
+            else:
+                scene_duration = scene.duration
+            chunk_duration = scene_duration / len(chunks)
             for index, text in enumerate(chunks):
                 start = cursor + index * chunk_duration
                 cues.append(SubtitleCue(start, start + chunk_duration, text))
-            cursor += scene.duration
+            cursor += scene_duration
         return cues
 
     def _mock_generate(

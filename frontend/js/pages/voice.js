@@ -5,7 +5,8 @@ import { state, needsProject } from "../state.js";
 import {
   activateNarrationTake, clearPerformanceTags, editProject, generateNarration,
   generatePerformanceTags, getPerformanceTags, getProject,
-  listNarrationTakes, listVoiceProfiles, regenerateNarrationChunk, regeneratePerformanceSegment,
+  importRecordedNarration, listNarrationTakes, listVoiceProfiles,
+  regenerateNarrationChunk, regeneratePerformanceSegment,
   savePerformanceTags,
   ttsModels, setNarrationTakeGain, unloadTtsProvider, uploadVoiceProfile,
 } from "../api.js";
@@ -271,6 +272,73 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const enhanceRow = el("label", { class: "check-row" }, enhance,
     " Preserve Qwen audio and run a Step expressive-edit pass");
   const performance = performancePanel(project, current, tags, provider, script, refresh);
+
+  let recordedBlob = null;
+  let recordedUrl = null;
+  const recordedName = el("input", {
+    type: "text", class: "input", maxlength: "100", value: "My recorded voiceover",
+  });
+  const recordedLabel = el("span", { class: "muted small" }, "No recording chosen yet.");
+  const recordedPreview = el("audio", { controls: true, preload: "metadata", hidden: true });
+  const setRecordedSource = (blob, label) => {
+    if (recordedUrl) URL.revokeObjectURL(recordedUrl);
+    recordedBlob = blob;
+    recordedUrl = URL.createObjectURL(blob);
+    recordedPreview.src = recordedUrl;
+    recordedPreview.hidden = false;
+    recordedLabel.textContent = label;
+  };
+  const plannedScript = (snapshot.scenes || [])
+    .map((scene) => String(scene.narration || "").trim()).filter(Boolean).join("\n\n");
+  const recordVoiceover = el("button", { class: "source-card", type: "button" },
+    el("span", { class: "sc-icon" }, icon("mic", 20)),
+    el("span", { class: "sc-body" },
+      el("span", { class: "sc-title" }, "Record full voiceover"),
+      el("span", { class: "sc-desc" },
+        "Read the complete project narration and use the recording directly — no voice cloning.")));
+  recordVoiceover.onclick = () => openVoiceRecorder({
+    language: current.language || "en",
+    purpose: "voiceover",
+    promptText: plannedScript,
+    maxSeconds: Math.max(300, Math.min(3600, Math.ceil(Number(project.target_duration || 0) * 2))),
+    onUse: (take) => setRecordedSource(
+      take.blob, `Recorded voiceover · ${fmtDuration(take.seconds)}`),
+  });
+  const recordedFile = el("input", {
+    type: "file", accept: ".wav,audio/wav", class: "sr-only",
+    "aria-label": "Choose a complete recorded voiceover WAV",
+  });
+  recordedFile.onchange = () => {
+    const file = recordedFile.files?.[0];
+    if (!file) return;
+    setRecordedSource(file, `${file.name} · ${fmtBytes(file.size)}`);
+    if (recordedName.value === "My recorded voiceover") {
+      recordedName.value = file.name.replace(/\.wav$/i, "") || recordedName.value;
+    }
+  };
+  const importVoiceover = el("button", { class: "source-card", type: "button" },
+    el("span", { class: "sc-icon" }, icon("folder", 20)),
+    el("span", { class: "sc-body" },
+      el("span", { class: "sc-title" }, "Import full voiceover"),
+      el("span", { class: "sc-desc" }, "Use a complete PCM WAV you recorded elsewhere.")));
+  importVoiceover.onclick = () => recordedFile.click();
+  const useRecording = el("button", { class: "btn btn-primary", type: "button" },
+    "Use recorded voiceover");
+  useRecording.onclick = async () => {
+    if (!recordedBlob || !recordedName.value.trim()) {
+      toast("critical", "Voiceover required", "Record or import a complete WAV and give it a name.");
+      return;
+    }
+    useRecording.disabled = true;
+    try {
+      await importRecordedNarration(
+        state.config, project.id, recordedBlob, recordedName.value.trim());
+      toast("good", "Recorded voiceover selected",
+        "Classic and Editorial renders will now use this recording. Rebuild captions for exact timing.");
+      refresh();
+    } catch (err) { toastError(err, "use recorded voiceover"); }
+    finally { useRecording.disabled = false; }
+  };
   const syncProviderControls = () => {
     const chatterbox = provider.value === "chatterbox";
     const qwen = provider.value === "qwen_tts";
@@ -381,7 +449,16 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, "Audio never leaves this machine.")),
       savedVoicesPanel(voices)),
-    section("2. Generate narration",
+    section("2. Use your recorded voiceover",
+      el("p", { class: "muted small" },
+        "This becomes the master narration without running TTS or cloning your voice. "
+        + "Both Classic and Editorial modes follow its real duration."),
+      el("div", { class: "source-grid" }, recordVoiceover, importVoiceover, recordedFile),
+      el("div", { class: "vp-preview" },
+        el("div", { class: "row" }, recordedLabel), recordedPreview),
+      field("Take name", recordedName, "Shown in the narration-take library."),
+      el("div", { class: "row" }, useRecording)),
+    section("3. Generate narration with a local model",
       el("div", { class: "pref-grid" },
         field("TTS model", provider, "Worker readiness is shown in the label."),
         field("Voice", voice,
@@ -700,7 +777,7 @@ function takeLibraryPanel(projectId, takes, activeId, stage, refresh) {
     return el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "Narration takes"),
       el("div", { class: "panel-body" },
-        el("p", { class: "muted small" }, "No generated narration yet.")));
+        el("p", { class: "muted small" }, "No narration takes yet.")));
   }
   const groups = new Map();
   for (const take of [...takes].reverse()) {
@@ -739,6 +816,7 @@ function takeCard(projectId, take, active, refresh) {
     finally { choose.disabled = false; }
   };
   const voice = settings.voice_profile_id ||
+    settings.display_name ||
     (settings.built_in_voice ? `${settings.speaker || "built-in"}` : "—");
   const takeAudio = take.url
     ? el("audio", { controls: true, preload: "metadata", src: take.url })
@@ -801,7 +879,9 @@ function takeCard(projectId, take, active, refresh) {
         active ? badge("good", "active", false) : "",
         settings.timing_mode === "scene_audio_v1"
           ? badge("good", "scene synced", false)
-          : badge("warning", "legacy timing", false),
+          : settings.timing_mode === "recorded_master_v1"
+            ? badge("neutral", "recorded master", false)
+            : badge("warning", "legacy timing", false),
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, take.created_at ? fmtDate(take.created_at) : "—")),
       el("dl", { class: "kv" },
@@ -883,5 +963,6 @@ function providerLabel(provider) {
     omnivoice: "OmniVoice",
     index_tts_2_5: "IndexTTS 2.5",
     breeze_tts_2: "Breeze TTS 2",
+    recorded_voiceover: "Recorded voiceover",
   })[provider] || String(provider || "Unknown model");
 }

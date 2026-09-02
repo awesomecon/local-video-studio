@@ -171,6 +171,7 @@ def test_voice_screen_compares_and_selects_immutable_narration_takes() -> None:
     assert '"Use this narration"' in source
     assert 'badge("good", "active", false)' in source
     assert "/tts/narrations" in api
+    assert "/tts/narrations/import" in api
     assert "/activate" in api
     assert "regenerateNarrationChunk" in source
     assert '"Regenerate chunk"' in source

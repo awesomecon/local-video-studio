@@ -37,6 +37,7 @@ import { renderSceneEditor } from "./pages/scene-editor.js";
 import { renderVoice } from "./pages/voice.js";
 import { renderMusic } from "./pages/music.js";
 import { renderCaptions } from "./pages/captions.js";
+import { renderEditorial } from "./pages/editorial.js";
 import { renderTimeline } from "./pages/timeline.js";
 import { renderExport } from "./pages/export.js";
 import { renderSettings } from "./pages/settings.js";
@@ -56,6 +57,7 @@ const NAV_PRIMARY = /** @type {NavItem[]} */ ([
   { name: "voice", hash: "#/voice", label: "Voice", icon: "mic" },
   { name: "music", hash: "#/music", label: "Music", icon: "music" },
   { name: "captions", hash: "#/captions", label: "Captions", icon: "captions" },
+  { name: "editorial", hash: "#/editorial", label: "Editorial", icon: "canvas" },
   { name: "timeline", hash: "#/timeline", label: "Timeline", icon: "timeline" },
   { name: "export", hash: "#/export", label: "Export", icon: "export" },
 ]);
@@ -458,6 +460,7 @@ const SCREENS = {
   voice: renderVoice,
   music: renderMusic,
   captions: renderCaptions,
+  editorial: renderEditorial,
   timeline: renderTimeline,
   export: renderExport,
   settings: renderSettings,

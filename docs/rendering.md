@@ -36,6 +36,10 @@ or time-stretching the voice. Shorter narration does not contract the timeline.
 - Finalizer `apad`/`atrim`/`-t` remain as safety boundaries once the timeline is long enough.
   FFmpeg `-shortest` is deliberately not used, because it would make output length depend on
   whichever stream is longest.
+- A complete user-recorded PCM WAV can be selected directly from the Voice screen. It becomes an
+  immutable narration take without TTS or voice cloning. Editorial Mode proportionally maps the
+  current scene clock onto the recording so the canvas and voiceover end together; local Whisper
+  alignment supplies exact word timing for captions when rebuilt.
 
 ## Preview and quality control
 
@@ -50,6 +54,26 @@ or time-stretching the voice. Shorter narration does not contract the timeline.
   clip audio is preview-only by default (narration and music are authoritative), and preserving
   per-clip native audio is a separate, explicit policy choice.
 - `renders/final.mp4` is the delivery output, with final-video frame extraction for review.
+
+### Editorial Archive Dossier renderer
+
+The current Editorial visual system is identified as `archiveDossier`. This names the existing
+cream-paper, research-line, stamp, and archival-photo treatment precisely; it is not a project
+theme selector. Edit Plans continue to choose only renderer-owned composition templates.
+
+- Every fixed text role has an authoring budget for characters and lines. Chromium then measures
+  the rendered glyph bounds with the pinned fonts and reduces the size within that role's allowed
+  range. A composition fails clearly if the copy still cannot fit; factual text is never silently
+  truncated.
+- Noto Sans and Noto Serif are bundled under the SIL Open Font License. Their file hashes form a
+  bundle identity that is embedded in the HTML and included in the Editorial render workflow
+  version, so a font change invalidates cached output deterministically.
+- Generic portrait silhouettes and illustration gradients are preview scaffolding only. Export
+  requires every referenced image or document to resolve to readable project-local media and
+  hides preview placeholders.
+- The renderer emits no automatic `FIG.`/`EVIDENCE MAP` labels or generic generated-image
+  captions. A media caption appears only when meaningful source metadata belongs to an asset
+  classified and locked as evidence.
 
 ## Thumbnails
 

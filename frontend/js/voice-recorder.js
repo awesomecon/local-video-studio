@@ -83,14 +83,22 @@ export function encodeWavPcm16(buffer) {
 }
 
 /**
- * Open the guided recording screen.
+ * Open the guided recording screen. Voiceover mode displays the project
+ * script and permits a longer complete narration take.
  * @param {object} opts
  * @param {string} [opts.language]
+ * @param {"reference"|"voiceover"} [opts.purpose]
+ * @param {string} [opts.promptText]
+ * @param {number} [opts.maxSeconds]
  * @param {(take: {blob: Blob, url: string, seconds: number, promptText: string,
  *   language: string}) => void} opts.onUse
  * @returns {{close: () => void}}
  */
-export function openVoiceRecorder({ language = "en", onUse }) {
+export function openVoiceRecorder({
+  language = "en", purpose = "reference", promptText = "", maxSeconds = MAX_SECONDS, onUse,
+}) {
+  const voiceover = purpose === "voiceover";
+  const recordingLimit = Math.max(1, Math.min(3600, Number(maxSeconds) || MAX_SECONDS));
   let stream = null;
   let recorder = null;
   let chunks = [];
@@ -110,7 +118,11 @@ export function openVoiceRecorder({ language = "en", onUse }) {
   langSelect.value = LANGUAGE_PAIRS.some(([code]) => code === language) ? language : "en";
 
   const promptNode = el("p", { class: "rec-prompt" });
-  const syncPrompt = () => { promptNode.textContent = passageForLanguage(langSelect.value); };
+  const syncPrompt = () => {
+    promptNode.textContent = voiceover
+      ? (promptText.trim() || "Record your complete voiceover, then stop when you are finished.")
+      : passageForLanguage(langSelect.value);
+  };
   langSelect.onchange = syncPrompt;
   syncPrompt();
 
@@ -140,7 +152,9 @@ export function openVoiceRecorder({ language = "en", onUse }) {
     langSelect.disabled = phase === "recording" || phase === "processing";
     dot.classList.toggle("live", phase === "recording");
     if (phase === "recording") {
-      statusText.textContent = "Recording — read the passage aloud at a natural pace.";
+      statusText.textContent = voiceover
+        ? "Recording — read the full voiceover at a natural pace."
+        : "Recording — read the passage aloud at a natural pace.";
     } else if (phase === "processing") {
       levelBar.style.width = "0%";
       statusText.textContent = "Processing take…";
@@ -148,7 +162,7 @@ export function openVoiceRecorder({ language = "en", onUse }) {
       levelBar.style.width = "0%";
       timer.textContent = take ? fmtDuration(take.seconds) : "0:00";
       statusText.textContent = take
-        ? `Take ready (${Math.round(take.seconds)} s${capped ? `, ${MAX_SECONDS} s limit` : ""}). Listen below, or record again.`
+        ? `Take ready (${Math.round(take.seconds)} s${capped ? `, ${recordingLimit} s limit` : ""}). Listen below, or record again.`
         : "Ready.";
     } else {
       statusText.textContent = "Ready when you are.";
@@ -230,7 +244,7 @@ export function openVoiceRecorder({ language = "en", onUse }) {
         blob: wav,
         url: URL.createObjectURL(wav),
         seconds: buffer.duration,
-        promptText: passageForLanguage(langSelect.value),
+        promptText: voiceover ? promptText.trim() : passageForLanguage(langSelect.value),
         language: langSelect.value,
       };
       preview.src = take.url;
@@ -290,7 +304,7 @@ export function openVoiceRecorder({ language = "en", onUse }) {
     capTimer = window.setTimeout(() => {
       capped = true;
       stopRecording();
-    }, MAX_SECONDS * 1000);
+    }, recordingLimit * 1000);
     recorder.start(250);
     setPhase("recording");
   };
@@ -327,7 +341,9 @@ export function openVoiceRecorder({ language = "en", onUse }) {
     el("div", { class: "field" },
       el("label", {}, "Reading language"),
       langSelect,
-      el("div", { class: "hint" }, "The passage follows the language you pick.")),
+      el("div", { class: "hint" }, voiceover
+        ? "Language is saved with this recording."
+        : "The passage follows the language you pick.")),
     promptNode,
     statusRow,
     errorBox,
@@ -338,12 +354,12 @@ export function openVoiceRecorder({ language = "en", onUse }) {
       `Set input level with the microphone and Ubuntu; a quiet room matters more than cleanup.`));
 
   const modal = openModal({
-    title: "Record a reference voice",
+    title: voiceover ? "Record your complete voiceover" : "Record a reference voice",
     body: content,
     actions: [
       { label: "Cancel", onClick: (done) => done() },
       {
-        label: "Use this take", kind: "primary",
+        label: voiceover ? "Use as narration" : "Use this take", kind: "primary",
         onClick: (done) => {
           if (!take) return;
           onUse({

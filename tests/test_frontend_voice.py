@@ -17,7 +17,7 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
     assert 'const breezeGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("2. Generate narration"')
+    panel_start = source.index('section("3. Generate narration with a local model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "breezeGrid," in source[panel_start:panel_end]
 
@@ -25,9 +25,9 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
 def test_delivery_tags_panel_is_fish_only_and_wired_into_generation() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
-    # The panel is built and attached to the "2. Generate narration" section.
+    # The panel is built and attached to the local-model narration section.
     assert "performancePanel(project, current, tags, provider, script, refresh)" in source
-    panel_start = source.index('section("2. Generate narration"')
+    panel_start = source.index('section("3. Generate narration with a local model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]
 
@@ -47,3 +47,18 @@ def test_delivery_tags_panel_is_fish_only_and_wired_into_generation() -> None:
     assert '"Regenerate"' in source
     assert "result.tag_count" in source
     assert "result.script.tag_count" not in source
+
+
+def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+    api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")
+    recorder = (VOICE_JS.parent.parent / "voice-recorder.js").read_text(encoding="utf-8")
+
+    assert 'section("2. Use your recorded voiceover"' in source
+    assert 'purpose: "voiceover"' in source
+    assert '"Record full voiceover"' in source
+    assert '"Import full voiceover"' in source
+    assert "importRecordedNarration" in source
+    assert "/tts/narrations/import" in api
+    assert 'voiceover ? "Record your complete voiceover"' in recorder
+    assert "Math.min(3600" in recorder

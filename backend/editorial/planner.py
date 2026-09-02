@@ -25,6 +25,7 @@ from .models import (
     MotionPrimitive,
     TEMPLATE_ELEMENT_SLOTS,
     TEMPLATE_REQUIRED_ROLES,
+    TEMPLATE_TEXT_CONSTRAINTS,
 )
 
 
@@ -614,6 +615,16 @@ class EditorialPlanner:
                 template.value: sorted(roles)
                 for template, roles in TEMPLATE_REQUIRED_ROLES.items()
             },
+            "template_text_constraints": {
+                template.value: {
+                    role: {
+                        "max_characters": constraint.max_characters,
+                        "max_lines": constraint.max_lines,
+                    }
+                    for role, constraint in constraints.items()
+                }
+                for template, constraints in TEMPLATE_TEXT_CONSTRAINTS.items()
+            },
             "approved_motion_primitives": [item.value for item in MotionPrimitive],
             "approved_image_models": ["krea", "qwen_image", "ideogram4_local"],
         }
@@ -643,6 +654,8 @@ class EditorialPlanner:
             "images. Choose only an approved template and use only that template's exact unique "
             "element roles and types from template_slots; omit unused optional roles but include "
             "the core visual roles implied by the template. Element ids may be concise unique slugs; "
+            "Respect every role's max_characters and max_lines from template_text_constraints; "
+            "rewrite copy to fit rather than truncating a quotation, name, date, or factual claim. "
             "events target those ids. Use only supplied narration refs and registered asset ids. "
             "Set source=null: the application resolves registered assets. A missing visual may be "
             "recommended as generated_image with evidence_class=illustration. For each such asset, "

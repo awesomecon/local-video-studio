@@ -14,6 +14,7 @@ import threading
 import wave
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from backend.models import GenerationRequest, GenerationResult
 from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
@@ -99,6 +100,59 @@ class TTSManager:
             except (OSError, ValueError) as exc:
                 logger.warning("Skipping unreadable voice profile %s: %s", path, exc)
         return profiles
+
+    def import_narration_take(
+        self,
+        project_id: str,
+        *,
+        audio: bytes,
+        name: str = "Recorded voiceover",
+    ) -> Asset:
+        """Store and activate a user-recorded PCM WAV as an immutable narration take."""
+        project = self.pipeline._project(project_id)
+        if not audio or len(audio) > 500 * 1024 * 1024:
+            raise ValueError("recorded voiceover must be between 1 byte and 500 MB")
+        self._validate_wav(audio, label="recorded voiceover")
+        take_id = str(uuid4())
+        root = self.pipeline.store.project_path(project)
+        take = root / "narration" / "takes" / "recorded" / f"{take_id}.wav"
+        take.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_bytes(take, audio)
+        try:
+            duration = wav_duration(take)
+            result = GenerationResult(
+                outputs=(take,),
+                metadata={
+                    "backend": "recorded_voiceover",
+                    "model": "User recording",
+                    "model_version": "original",
+                    "workflow_version": "recorded-narration-v1",
+                    "seed": 0,
+                    "settings": {
+                        "role": "narration_take",
+                        "provider": "recorded_voiceover",
+                        "source_kind": "recorded_voiceover",
+                        "display_name": name.strip() or "Recorded voiceover",
+                        "duration": duration,
+                        # A single full-length recording has no exact scene cuts.
+                        # Editorial derives a proportional scene clock from the
+                        # current script while the original audio stays untouched.
+                        "timing_mode": "recorded_master_v1",
+                        "scene_script_sha256": self._scene_script_hash(project_id),
+                        "chunks": [],
+                    },
+                },
+            )
+        except Exception:
+            take.unlink(missing_ok=True)
+            raise
+        asset = self.pipeline._record_asset(
+            project, None, take, AssetType.NARRATION, result,
+            role="narration_take", record_attempt=False,
+        )
+        self._atomic_json(take.with_suffix(".json"), asset.model_dump(mode="json"))
+        self.activate_take(project_id, asset.id, stage_job_id=f"import:{asset.id}")
+        return asset
 
     def get_voice_profile(self, project_id: str, profile_id: str) -> VoiceProfile:
         if not profile_id or any(char not in "0123456789abcdef-" for char in profile_id.lower()):
@@ -742,7 +796,7 @@ class TTSManager:
                 project, "narration", [master], stage_job_id or f"activation:{asset.id}",
             )
             self.pipeline._invalidate_stages(project, {
-                "subtitles", "timeline", "render_preview", "quality_control",
+                "subtitles", "editorial_visual", "timeline", "render_preview", "quality_control",
                 "render_final", "thumbnails", "metadata",
             })
         return master
@@ -1300,7 +1354,7 @@ class TTSManager:
         return result
 
     @staticmethod
-    def _validate_wav(audio: bytes) -> None:
+    def _validate_wav(audio: bytes, *, label: str = "reference audio") -> None:
         descriptor, name = tempfile.mkstemp(suffix=".wav")
         path = Path(name)
         try:
@@ -1308,9 +1362,11 @@ class TTSManager:
                 handle.write(audio)
             with wave.open(str(path), "rb") as source:
                 if source.getnframes() <= 0 or source.getframerate() <= 0:
-                    raise ValueError("reference WAV contains no audio")
+                    raise ValueError(f"{label} WAV contains no audio")
+                if source.getcomptype() != "NONE":
+                    raise ValueError(f"{label} must be an uncompressed PCM WAV")
         except (wave.Error, EOFError) as exc:
-            raise ValueError("reference audio must be a valid PCM WAV") from exc
+            raise ValueError(f"{label} must be a valid PCM WAV") from exc
         finally:
             path.unlink(missing_ok=True)
 

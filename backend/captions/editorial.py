@@ -58,9 +58,8 @@ _FONT_SIZES: dict[str, dict[EditorialCaptionStyle, tuple[int, int]]] = {
 }
 
 # Renderer-owned layout regions in design space (x, y, w, h), mirroring the
-# composition CSS in backend/editorial/renderer.py. ``draft-label`` is
-# renderer-authored and always present. Thin rules and fullscreen moment
-# overlays are intentionally not listed: moments hide captions instead.
+# composition CSS in backend/editorial/renderer.py. Thin rules and fullscreen
+# moment overlays are intentionally not listed: moments hide captions instead.
 CAPTION_REGIONS: dict[
     EditorialTemplate, dict[str, dict[str, tuple[int, int, int, int]]]
 ] = {
@@ -70,62 +69,54 @@ CAPTION_REGIONS: dict[
             "archive-photo": (76, 420, 610, 610),
             "paper": (436, 630, 590, 760),
             "ruler-grid": (82, 1554, 926, 196),
-            "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
             "year": (70, 62, 380, 180),
             "archive-photo": (82, 270, 650, 610),
             "paper": (1058, 170, 780, 720),
             "ruler-grid": (780, 876, 1058, 130),
-            "draft-label": (82, 1046, 320, 28),
         },
     },
     EditorialTemplate.DOCUMENT_REVEAL: {
         "portrait": {
-            "title": (72, 96, 936, 208),
+            "title": (72, 96, 936, 230),
             "document": (64, 352, 952, 872),
-            "annotation": (72, 1308, 500, 120),
+            "annotation": (72, 1308, 500, 230),
             "context-image": (628, 1288, 380, 520),
-            "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
-            "title": (80, 52, 1760, 100),
+            "title": (80, 52, 1760, 120),
             "document": (90, 180, 1070, 790),
-            "annotation": (1230, 340, 570, 110),
+            "annotation": (1230, 340, 570, 170),
             "context-image": (1310, 540, 520, 420),
-            "draft-label": (82, 1046, 320, 28),
         },
     },
     EditorialTemplate.COMPARISON_CANVAS: {
         "portrait": {
-            "headline": (72, 110, 936, 112),
+            "headline": (72, 110, 936, 280),
             "left-image": (72, 420, 440, 560),
             "right-image": (568, 420, 440, 560),
             "left-label": (72, 1032, 440, 96),
             "right-label": (568, 1032, 440, 96),
-            "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
-            "headline": (80, 52, 1760, 90),
+            "headline": (80, 52, 1760, 135),
             "left-image": (80, 210, 760, 650),
             "right-image": (1080, 210, 760, 650),
             "left-label": (80, 890, 760, 60),
             "right-label": (1080, 890, 760, 60),
-            "draft-label": (82, 1046, 320, 28),
         },
     },
     EditorialTemplate.ILLUSTRATION_CANVAS: {
         "portrait": {
             "illustration": (72, 300, 936, 980),
-            "headline": (72, 1396, 936, 100),
-            "supporting-text": (72, 1548, 936, 100),
-            "draft-label": (80, 1856, 320, 30),
+            "headline": (72, 1396, 936, 145),
+            "supporting-text": (72, 1548, 936, 250),
         },
         "landscape": {
             "illustration": (70, 120, 1120, 850),
-            "headline": (1270, 380, 580, 90),
-            "supporting-text": (1270, 570, 580, 100),
-            "draft-label": (82, 1046, 320, 28),
+            "headline": (1270, 380, 580, 175),
+            "supporting-text": (1270, 570, 580, 300),
         },
     },
     EditorialTemplate.BIG_TEXT_REVEAL: {
@@ -134,15 +125,13 @@ CAPTION_REGIONS: dict[
             # BigText headlines may wrap to several lines. Reserve the full
             # hero-title band so captions move above it instead of crossing
             # through long deterministic typography.
-            "headline": (40, 712, 1000, 1050),
+            "headline": (40, 712, 1000, 570),
             "cta": (72, 1330, 936, 120),
-            "draft-label": (80, 1856, 320, 30),
         },
         "landscape": {
             "kicker": (70, 330, 1780, 46),
-            "headline": (70, 430, 1780, 500),
+            "headline": (70, 430, 1780, 465),
             "cta": (80, 930, 1760, 90),
-            "draft-label": (82, 1046, 320, 28),
         },
     },
 }
@@ -488,7 +477,6 @@ def composition_present_roles(composition: EditorialComposition) -> set[str]:
             EditorialElementType.RULER_NODES,
         }:
             roles.add(element.role)
-    roles.add("draft-label")
     return roles
 
 

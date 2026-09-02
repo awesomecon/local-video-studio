@@ -1201,6 +1201,31 @@ def create_app(
             payload.append(item)
         return {"takes": payload, "active_asset_id": active_asset_id}
 
+    @application.post(
+        "/api/projects/{project_id}/tts/narrations/import",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def import_recorded_narration(
+        project_id: str,
+        request: Request,
+        name: str = Query(default="Recorded voiceover", min_length=1, max_length=100),
+    ) -> dict[str, Any]:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"audio/wav", "audio/x-wav", "audio/wave"}:
+            raise HTTPException(status_code=415, detail="recorded voiceover must be PCM WAV")
+        try:
+            asset = service.tts.import_narration_take(
+                project_id, audio=await request.body(), name=name,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        payload = asset.model_dump(mode="json")
+        payload["url"] = f"/api/projects/{project_id}/assets/{asset.id}/file"
+        payload["active"] = True
+        return {"take": payload, "active_asset_id": asset.id}
+
     @application.put(
         "/api/projects/{project_id}/tts/narrations/{asset_id}/gain",
     )
