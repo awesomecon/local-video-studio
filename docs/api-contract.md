@@ -16,6 +16,8 @@ Core endpoints:
 - `POST /api/projects/{project_id}/plan`
 - `POST /api/projects/{project_id}/script`
 - `POST /api/projects/{project_id}/render`
+- `POST /api/projects/{project_id}/tts/narrations/import?name=...` (PCM WAV body; stores and
+  activates an immutable user-recorded voiceover take)
 - `POST /api/scenes/{scene_id}/generate`
 - `POST /api/scenes/{scene_id}/regenerate`
 - `POST /api/scenes/{scene_id}/approve`
@@ -36,6 +38,12 @@ The endpoint returns `409` before queueing when required existing inputs are mis
 `{"force": true}` rebuilds only the deterministic render stages; it does not regenerate content.
 Queued jobs use `stage: "render"`, `backend: "ffmpeg"`, and expose the active step in
 `parameters.current_stage`.
+
+An imported recorded voiceover is copied to the project-owned narration-take library and activated
+as `narration/master.wav`; the original WAV bytes are never altered. Classic rendering follows its
+measured duration. Editorial rendering derives a proportional scene clock from the current script,
+then retimes the deterministic composition canvas to the same master duration. Rebuild caption
+alignment after selecting a recording when exact word-level caption timing is wanted.
 
 ## Fish S2 Pro delivery tags
 

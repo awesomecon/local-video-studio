@@ -21,7 +21,7 @@ from backend.models import (
 )
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.rendering.mock_media import create_placeholder_image
-from backend.schemas import AssetType, ProjectCreate, Scene, VisualType
+from backend.schemas import AssetType, ProjectCreate, Scene, VideoMode, VisualType
 from backend.tts.audio import join_wav_files
 from backend.tts.chunking import chunk_narration
 from backend.tts.models import NarrationRequest
@@ -305,6 +305,89 @@ def test_voice_profile_gain_boosts_saved_reference_audio(tmp_path: Path) -> None
         content=source, headers={"Content-Type": "audio/wav"},
     )
     assert too_high.status_code == 422
+
+
+@pytest.mark.parametrize("video_mode", [VideoMode.CLASSIC, VideoMode.EDITORIAL])
+def test_recorded_voiceover_import_is_active_and_retimes_both_video_modes(
+    tmp_path: Path, video_mode: VideoMode,
+) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / f"{video_mode.value}.sqlite3",
+        project_root=tmp_path / video_mode.value, temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    service = app.state.service
+    project = service.create_project(ProjectCreate(
+        title=f"Recorded {video_mode.value}", topic="test", target_duration=2,
+        video_mode=video_mode,
+    ))
+    plan = service.ensure_plan(project.id)
+    root = service.store.project_path(project)
+    stale_timings = root / "subtitles" / "word-timings.json"
+    stale_timings.parent.mkdir(parents=True, exist_ok=True)
+    stale_timings.write_text(json.dumps({
+        "input_audio_sha256": "0" * 64,
+        "words": [{"start_seconds": 0, "end_seconds": 2, "text": "stale"}],
+    }), encoding="utf-8")
+    for stage in (
+        "subtitles", "editorial_visual", "timeline", "render_preview",
+        "quality_control", "render_final", "thumbnails", "metadata",
+    ):
+        marker = root / f"{stage}.marker"
+        marker.write_text(stage, encoding="utf-8")
+        service._mark_stage(project, stage, [marker], f"old-{stage}")
+
+    audio = wav_bytes(frames=1200, sample_rate=8000, sample=900)
+    imported = service.tts.import_narration_take(
+        project.id, audio=audio, name="My real take",
+    )
+
+    take = imported.model_dump(mode="json")
+    assert take["backend"] == "recorded_voiceover"
+    assert take["settings"]["display_name"] == "My real take"
+    assert take["settings"]["timing_mode"] == "recorded_master_v1"
+    assert (root / "narration" / "master.wav").read_bytes() == audio
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    assert active_id == take["id"]
+    assert takes[-1].id == take["id"]
+    stages = service._read_stage_state(project)["stages"]
+    assert stages["narration"]["job_id"] == f"import:{take['id']}"
+    assert not ({
+        "subtitles", "editorial_visual", "timeline", "render_preview",
+        "quality_control", "render_final", "thumbnails", "metadata",
+    } & stages.keys())
+
+    bounds = service._narration_scene_bounds(project)
+    assert bounds is not None
+    assert list(bounds) == [scene.id for scene in plan.scenes]
+    assert max(end for _start, end in bounds.values()) == pytest.approx(0.15)
+    assert service._editorial_word_timings(project) == []
+    assert max(cue.end_seconds for cue in service._subtitle_cues(project)) == pytest.approx(0.15)
+
+
+def test_recorded_voiceover_import_rejects_non_wav_without_creating_a_take(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    project = app.state.service.create_project(ProjectCreate(
+        title="Bad recording", topic="test", target_duration=1,
+    ))
+    client = TestClient(app)
+
+    wrong_type = client.post(
+        f"/api/projects/{project.id}/tts/narrations/import",
+        content=b"not audio", headers={"Content-Type": "audio/mpeg"},
+    )
+    corrupt_wav = client.post(
+        f"/api/projects/{project.id}/tts/narrations/import",
+        content=b"not a wav", headers={"Content-Type": "audio/wav"},
+    )
+
+    assert wrong_type.status_code == 415
+    assert corrupt_wav.status_code == 422
+    assert client.get(f"/api/projects/{project.id}/tts/narrations").json()["takes"] == []
 
 
 def test_reference_free_requests_allow_qwen_custom_voice(tmp_path: Path) -> None:

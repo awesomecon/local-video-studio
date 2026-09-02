@@ -27,6 +27,7 @@ const ROUTES = [
   { re: /^#\/voice$/, name: "voice", param: null },
   { re: /^#\/music$/, name: "music", param: null },
   { re: /^#\/captions$/, name: "captions", param: null },
+  { re: /^#\/editorial$/, name: "editorial", param: null },
   { re: /^#\/timeline$/, name: "timeline", param: null },
   { re: /^#\/export$/, name: "export", param: null },
   { re: /^#\/jobs$/, name: "jobs", param: null },

@@ -486,7 +486,7 @@ def test_place_caption_cues_emits_deterministic_payload() -> None:
         assert item["end"] > item["start"]
 
 
-def test_big_text_captions_stay_above_the_full_hero_title_band() -> None:
+def test_big_text_captions_use_space_below_the_fitted_hero_title_band() -> None:
     composition = EditorialComposition(
         id="closing-card", start=0.0, duration=7.0,
         template=EditorialTemplate.BIG_TEXT_REVEAL,
@@ -497,8 +497,8 @@ def test_big_text_captions_stay_above_the_full_hero_title_band() -> None:
     )
     cue = _cue(1.0, 2.0, "The full story gets much deeper.")
     placed = place_caption_cues([cue], composition, 1080, 1920)
-    assert placed[0]["anchor"] == "upper-left"
-    assert placed[0]["y"] == 140
+    assert placed[0]["anchor"] == "lower-left"
+    assert placed[0]["y"] == 1458
 
 
 # --- Reveal suppression -------------------------------------------------------

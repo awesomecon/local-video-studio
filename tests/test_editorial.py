@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-from html import escape
+import re
+import subprocess
+from html import escape, unescape
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -11,13 +14,18 @@ from backend.editorial import (
     EditorialImageGeneration, EvidenceClass,
     EditorialComposition, EditorialElement, EditorialElementType, EditorialEvent,
     EditorialPlanner, EditorialTemplate, EditPlan, MotionPrimitive,
+    EDITORIAL_FONT_BUNDLE_SHA256, EDITORIAL_RENDER_WORKFLOW_VERSION,
+    EDITORIAL_STYLE_ID,
     build_project_mars_prototype,
     compile_edit_plan_html,
+    editorial_font_manifest,
+    validate_export_assets,
 )
 from backend.captions import CaptionWord
 from backend.core import load_config
 from backend.pipeline import PipelineService
 from backend.rendering.binaries import require_ffmpeg
+from backend.graphics.browser import discover_chromium
 from backend.rendering.probe import probe_media
 from backend.rendering.process import run_media_process
 from backend.schemas import Asset, AssetType, Project, ProjectPlan, Scene, VideoMode
@@ -120,14 +128,14 @@ def test_edit_plan_requires_frame_valid_contiguous_compositions() -> None:
 
 def test_compiler_escapes_text_and_emits_seek_contract() -> None:
     plan = EditPlan(project_id="p", compositions=[EditorialComposition(
-        id="c", start=0, duration=2, template=EditorialTemplate.ARCHIVE_CANVAS,
+        id="c", start=0, duration=2, template=EditorialTemplate.BIG_TEXT_REVEAL,
         elements=[
             EditorialElement(
-                id="year", type=EditorialElementType.TEXT,
-                text='</script><script>alert("bad")</script>', role="year",
+                id="headline", type=EditorialElementType.TEXT,
+                text='</script><script>alert("bad")</script>', role="headline",
             ),
         ],
-        events=[EditorialEvent(time=0, action=MotionPrimitive.FADE, target="year")],
+        events=[EditorialEvent(time=0, action=MotionPrimitive.FADE, target="headline")],
     )])
     html = compile_edit_plan_html(plan)
     assert "window.renderAt" in html
@@ -145,7 +153,7 @@ def test_compiler_can_hide_editorial_typography_without_hiding_caption_data() ->
 
     html = compile_edit_plan_html(plan)
 
-    assert '<body class="editorial-text-disabled portrait">' in html
+    assert "archive-dossier preview-placeholders editorial-text-disabled portrait" in html
     assert '"captions_enabled":true' in html
 
 
@@ -338,6 +346,9 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert context["template_required_roles"]["comparisonCanvas"] == [
         "left-image", "right-image",
     ]
+    assert context["template_text_constraints"]["bigTextReveal"]["headline"] == {
+        "max_characters": 60, "max_lines": 4,
+    }
 
 
 def test_planner_context_uses_recorded_scene_clock() -> None:
@@ -912,8 +923,9 @@ THEME_MARKERS = (
     "--ivory:#e9dfc6",
     "--rust:#b9532f",
     "--blue:#6f91a6",
-    '"DejaVu Sans Condensed"',
-    '"DejaVu Serif"',
+    '"LVS Noto Sans"',
+    '"LVS Noto Serif"',
+    'content="archiveDossier"',
     "grain",
     "window.renderAt",
     "__editorialReady",
@@ -980,6 +992,279 @@ def _template_composition(template: EditorialTemplate, *, cid: str = "c1") -> Ed
     ])
 
 
+def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
+    chromium = discover_chromium()
+    if chromium is None:
+        pytest.skip("Chromium is unavailable for Editorial layout verification")
+    document = tmp_path / f"layout-{plan.width}x{plan.height}.html"
+    document.write_text(compile_edit_plan_html(plan), encoding="utf-8")
+    result = subprocess.run(
+        [
+            str(chromium), "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--virtual-time-budget=5000", "--dump-dom", document.resolve().as_uri(),
+        ],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    match = re.search(r'data-layout-report="([^"]+)"', result.stdout)
+    assert match is not None, result.stderr
+    return json.loads(unescape(match.group(1)))
+
+
+def _layout_stress_plan(width: int, height: int) -> EditPlan:
+    starts = iter(range(0, 10, 2))
+    compositions = [
+        _composition(
+            "archive-fit", EditorialTemplate.ARCHIVE_CANVAS,
+            start=float(next(starts)), duration=2.0,
+            elements=[
+                _element("archive-year", "year", EditorialElementType.TEXT, text="TWENTY TWENTY"),
+                _element(
+                    "archive-paper", "paper", EditorialElementType.DOCUMENT,
+                    text="A DOCUMENT TITLE DESIGNED FOR TWO LINES",
+                ),
+                _element(
+                    "archive-reveal", "reveal", EditorialElementType.TEXT,
+                    text="THE FINAL REVEAL",
+                ),
+            ],
+        ),
+        _composition(
+            "document-fit", EditorialTemplate.DOCUMENT_REVEAL,
+            start=float(next(starts)), duration=2.0,
+            elements=[
+                _element(
+                    "document-body", "document", EditorialElementType.DOCUMENT,
+                    text="A source passage with enough detail to exercise deterministic fitting "
+                         "without being silently truncated or colliding with nearby material.",
+                ),
+                _element(
+                    "document-title", "title", EditorialElementType.TEXT,
+                    text="THE DOCUMENT THAT CHANGED THE INVESTIGATION",
+                ),
+                _element(
+                    "document-note", "annotation", EditorialElementType.TEXT,
+                    text="A restrained annotation remains inside its allocated evidence region.",
+                ),
+            ],
+        ),
+        _composition(
+            "comparison-fit", EditorialTemplate.COMPARISON_CANVAS,
+            start=float(next(starts)), duration=2.0,
+            assets=[_asset("comparison-left"), _asset("comparison-right")],
+            elements=[
+                _element(
+                    "comparison-title", "headline", EditorialElementType.TEXT,
+                    text="TWO COMPETING VISIONS OF THE SAME DESTINATION",
+                ),
+                _element(
+                    "comparison-left-image", "left-image", EditorialElementType.IMAGE,
+                    asset_id="comparison-left",
+                ),
+                _element(
+                    "comparison-right-image", "right-image", EditorialElementType.IMAGE,
+                    asset_id="comparison-right",
+                ),
+                _element(
+                    "comparison-left-label", "left-label", EditorialElementType.TEXT,
+                    text="THE ORIGINAL PROPOSAL",
+                ),
+                _element(
+                    "comparison-right-label", "right-label", EditorialElementType.TEXT,
+                    text="THE RECORDED OUTCOME",
+                ),
+            ],
+        ),
+        _composition(
+            "illustration-fit", EditorialTemplate.ILLUSTRATION_CANVAS,
+            start=float(next(starts)), duration=2.0,
+            assets=[_asset("illustration-image")],
+            elements=[
+                _element(
+                    "illustration-image-node", "illustration", EditorialElementType.IMAGE,
+                    asset_id="illustration-image",
+                ),
+                _element(
+                    "illustration-title", "headline", EditorialElementType.TEXT,
+                    text="THE TECHNICAL SYSTEM BEHIND THE ENTIRE STORY",
+                ),
+                _element(
+                    "illustration-copy", "supporting-text", EditorialElementType.TEXT,
+                    text="A supporting explanation can carry context while remaining subordinate "
+                         "to the illustration and clear of the canvas edge.",
+                ),
+            ],
+        ),
+        _composition(
+            "big-fit", EditorialTemplate.BIG_TEXT_REVEAL,
+            start=float(next(starts)), duration=2.0,
+            elements=[
+                _element(
+                    "big-kicker", "kicker", EditorialElementType.TEXT,
+                    text="THE CONSEQUENCE",
+                ),
+                _element(
+                    "big-title", "headline", EditorialElementType.TEXT,
+                    text="EVERYTHING CHANGED AFTER THE VERY FIRST SIGNAL",
+                ),
+                _element(
+                    "big-action", "cta", EditorialElementType.TEXT,
+                    text="WATCH THE COMPLETE FILM",
+                ),
+            ],
+        ),
+    ]
+    return EditPlan(
+        project_id=f"layout-{width}x{height}", width=width, height=height,
+        compositions=compositions,
+    )
+
+
+@pytest.mark.parametrize(("width", "height"), [(1080, 1920), (1920, 1080)])
+def test_browser_fits_bounded_text_without_region_collisions(
+    tmp_path: Path, width: int, height: int,
+) -> None:
+    report = _browser_layout_report(tmp_path, _layout_stress_plan(width, height))
+    assert report and all(item["fit"] for item in report)
+    assert all(item["lines"] <= item["maxLines"] for item in report)
+    by_id = {item["id"]: item for item in report if item["id"]}
+    document_top = 180 if width > height else 352
+    comparison_top = 210 if width > height else 420
+    assert (
+        by_id["archive-paper-title"]["y"] + by_id["archive-paper-title"]["height"]
+        < by_id["archive-paper-copy"]["y"]
+    )
+    assert by_id["document-title"]["y"] + by_id["document-title"]["height"] <= document_top
+    assert by_id["comparison-title"]["y"] + by_id["comparison-title"]["height"] <= comparison_top
+    assert (
+        by_id["illustration-title"]["y"] + by_id["illustration-title"]["height"]
+        <= by_id["illustration-copy"]["y"]
+    )
+    assert by_id["big-title"]["y"] + by_id["big-title"]["height"] <= by_id["big-action-text"]["y"]
+
+
+def test_text_roles_enforce_semantic_copy_budgets() -> None:
+    with pytest.raises(ValidationError, match="allows at most 60 characters"):
+        _composition(
+            "too-long", EditorialTemplate.BIG_TEXT_REVEAL,
+            elements=[_element(
+                "headline", "headline", EditorialElementType.TEXT, text="X" * 61,
+            )],
+        )
+    with pytest.raises(ValidationError, match="allows at most 2 explicit lines"):
+        _composition(
+            "too-many-lines", EditorialTemplate.BIG_TEXT_REVEAL,
+            elements=[_element(
+                "cta", "cta", EditorialElementType.TEXT, text="ONE\nTWO\nTHREE",
+            ), _element("headline", "headline", EditorialElementType.TEXT, text="VALID")],
+        )
+
+
+def test_archive_dossier_fonts_are_bundled_hashed_and_embedded() -> None:
+    manifest = editorial_font_manifest()
+    assert EDITORIAL_STYLE_ID == "archiveDossier"
+    assert len(EDITORIAL_FONT_BUNDLE_SHA256) == 64
+    assert EDITORIAL_FONT_BUNDLE_SHA256[:12] in EDITORIAL_RENDER_WORKFLOW_VERSION
+    for entry in manifest:
+        font = Path("backend/editorial/fonts") / str(entry["file"])
+        assert font.is_file()
+        assert len(str(entry["sha256"])) == 64
+    html = compile_edit_plan_html(EditPlan(
+        project_id="font", compositions=[_template_composition(EditorialTemplate.BIG_TEXT_REVEAL)],
+    ))
+    assert "data:font/ttf;base64," in html
+    assert EDITORIAL_FONT_BUNDLE_SHA256 in html
+    assert "DejaVu" not in html
+
+
+def test_preview_placeholders_never_cross_the_export_boundary(tmp_path: Path) -> None:
+    asset = EditorialAsset(
+        id="image", type=EditorialAssetType.GENERATED_IMAGE,
+        source="editorial/assets/missing.png",
+    )
+    composition = _composition(
+        "missing", EditorialTemplate.ILLUSTRATION_CANVAS,
+        assets=[asset], elements=[_element(
+            "image-node", "illustration", EditorialElementType.IMAGE, asset_id="image",
+        )],
+    )
+    plan = EditPlan(project_id="p", compositions=[composition])
+    preview = compile_edit_plan_html(plan)
+    production = compile_edit_plan_html(plan, show_placeholders=False)
+    assert "preview-placeholders" in preview and "production-render" in production
+    assert "preview-placeholder" in preview
+    with pytest.raises(ValueError, match="preview placeholders cannot be exported"):
+        validate_export_assets(plan, tmp_path)
+
+    media = tmp_path / "editorial" / "assets" / "missing.png"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"registered-local-media")
+    validate_export_assets(plan, tmp_path)
+
+
+def test_final_markup_omits_generic_labels_and_keeps_real_evidence_caption() -> None:
+    illustration = _asset("generated")
+    illustration.label = "Generic generated illustration"
+    evidence = EditorialAsset(
+        id="evidence", type=EditorialAssetType.HISTORICAL_PHOTO,
+        evidence_class=EvidenceClass.EVIDENCE, locked=True,
+        label="NASA image AS11-40-5903",
+    )
+    composition = _composition(
+        "labels", EditorialTemplate.COMPARISON_CANVAS,
+        assets=[illustration, evidence],
+        elements=[
+            _element("left", "left-image", EditorialElementType.IMAGE, asset_id="generated"),
+            _element("right", "right-image", EditorialElementType.IMAGE, asset_id="evidence"),
+        ],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+    rendered_markup = html.split("<script>", 1)[0]
+    assert "Generic generated illustration" not in rendered_markup
+    assert "NASA image AS11-40-5903" in rendered_markup
+    assert 'class="source-caption fit-text editorial-type"' in rendered_markup
+    assert "· EVIDENCE" not in rendered_markup and "FIG." not in rendered_markup
+
+
+def test_document_layout_omits_generic_source_chrome_and_supports_display_modes() -> None:
+    evidence = EditorialAsset(
+        id="modern-photo", type=EditorialAssetType.USER_UPLOADED_IMAGE,
+        evidence_class=EvidenceClass.EVIDENCE, locked=True,
+        source="editorial/assets/elon.jpg", label="Elon Musk · 2024",
+        metadata={"display_mode": "cover"},
+    )
+    composition = _composition(
+        "modern", EditorialTemplate.DOCUMENT_REVEAL,
+        assets=[evidence],
+        elements=[_element(
+            "modern-photo-node", "document", EditorialElementType.DOCUMENT,
+            asset_id="modern-photo",
+        )],
+    )
+    html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
+    rendered_markup = html.split("<script>", 1)[0]
+    assert 'class="source-sheet source-sheet-cover editorial-element"' in rendered_markup
+    assert "SOURCE / DOCUMENT" not in rendered_markup
+    assert 'class="paper-stamp' not in rendered_markup
+    assert ".year{position:absolute;left:72px;right:72px" in rendered_markup
+
+    strip = evidence.model_copy(update={
+        "metadata": {
+            "display_mode": "strip",
+            "display_aspect_ratio": 2.4,
+            "passage_mark_position": 0.3,
+        },
+    })
+    strip_composition = composition.model_copy(update={"assets": [strip]})
+    strip_html = compile_edit_plan_html(EditPlan(
+        project_id="p", compositions=[strip_composition],
+    ))
+    strip_markup = strip_html.split("<script>", 1)[0]
+    assert 'class="composition document-reveal document-reveal-strip"' in strip_markup
+    assert 'class="source-sheet source-sheet-strip editorial-element"' in strip_markup
+    assert "--source-sheet-aspect:2.400000" in strip_markup
+    assert "--passage-mark-position:30.00%" in strip_markup
+
+
 def _plan_payload(html: str) -> dict:
     return json.loads(html.split("const PLAN=")[1].splitlines()[0].rstrip(";"))
 
@@ -992,7 +1277,7 @@ def test_every_template_compiles_with_shared_theme_and_seek_contract() -> None:
         for marker in THEME_MARKERS:
             assert marker in html, (template.value, marker)
         assert f'data-composition="{template.value}"' in html
-        assert '<body class="editorial-text-enabled portrait">' in html
+        assert "archive-dossier preview-placeholders editorial-text-enabled portrait" in html
         # Compositions are isolated: hidden until renderAt activates the interval.
         assert ".composition{position:absolute;inset:0;display:none" in html
         # Every approved motion primitive stays available in the compiled runtime.
@@ -1006,7 +1291,7 @@ def test_renderer_scales_vertical_preview_and_uses_landscape_layout() -> None:
         compositions=[_template_composition(EditorialTemplate.BIG_TEXT_REVEAL)],
     )
     vertical_html = compile_edit_plan_html(vertical)
-    assert '<body class="editorial-text-enabled portrait">' in vertical_html
+    assert "archive-dossier preview-placeholders editorial-text-enabled portrait" in vertical_html
     assert "width:1080px;height:1920px" in vertical_html
     assert "transform:scale(0.29583333)" in vertical_html
 
@@ -1015,7 +1300,7 @@ def test_renderer_scales_vertical_preview_and_uses_landscape_layout() -> None:
         compositions=[_template_composition(EditorialTemplate.COMPARISON_CANVAS)],
     )
     horizontal_html = compile_edit_plan_html(horizontal)
-    assert '<body class="editorial-text-enabled landscape">' in horizontal_html
+    assert "archive-dossier preview-placeholders editorial-text-enabled landscape" in horizontal_html
     assert "width:1920px;height:1080px" in horizontal_html
     assert "transform:scale(1.00000000)" in horizontal_html
     assert ".landscape .comparison-card" in horizontal_html
@@ -1053,9 +1338,9 @@ def test_document_reveal_binds_roles_to_layout_regions() -> None:
         asset_url_resolver=lambda asset: f"/media/{asset.id}",
     )
     assert 'id="sheet-7f" class="source-sheet editorial-element"' in html
-    assert 'id="title-9c" class="document-title editorial-element editorial-type"' in html
+    assert 'id="title-9c" class="document-title fit-text editorial-element editorial-type"' in html
     assert 'id="mark-31" class="passage-mark draw editorial-element"' in html
-    assert 'id="note-b2" class="annotation editorial-element editorial-type"' in html
+    assert 'id="note-b2" class="annotation fit-text editorial-element editorial-type"' in html
     assert 'id="photo-91e" class="context-photo editorial-element"' in html
     assert 'id="join-08" class="connector-line draw editorial-element"' in html
     assert ">ONE PLAN<" in html
@@ -1088,11 +1373,11 @@ def test_comparison_canvas_binds_roles_to_layout_regions() -> None:
         EditPlan(project_id="p", compositions=[composition]),
         asset_url_resolver=lambda asset: f"/assets/{asset.id}",
     )
-    assert 'id="head-a1" class="comparison-headline editorial-element editorial-type"' in html
+    assert 'id="head-a1" class="comparison-headline fit-text editorial-element editorial-type"' in html
     assert 'id="img-left-a2" class="comparison-card left-card editorial-element"' in html
     assert 'id="img-right-a3" class="comparison-card right-card editorial-element"' in html
-    assert 'id="cap-left-a4" class="comparison-label left-label editorial-element editorial-type"' in html
-    assert 'id="cap-right-a5" class="comparison-label right-label editorial-element editorial-type"' in html
+    assert 'id="cap-left-a4" class="comparison-label left-label fit-text editorial-element editorial-type"' in html
+    assert 'id="cap-right-a5" class="comparison-label right-label fit-text editorial-element editorial-type"' in html
     assert 'id="cut-a6" class="divider-line draw editorial-element" data-draw-axis="y"' in html
     assert ">TWO STAGES<" in html and ">BEFORE<" in html and ">AFTER<" in html
     assert 'src="/assets/left-asset"' in html and 'src="/assets/right-asset"' in html
@@ -1124,8 +1409,8 @@ def test_illustration_canvas_binds_roles_to_layout_regions() -> None:
         asset_url_resolver=lambda asset: f"/images/{asset.asset_id}",
     )
     assert 'id="hero-b1" class="illustration-frame editorial-element"' in html
-    assert 'id="head-b2" class="illustration-headline editorial-element editorial-type"' in html
-    assert 'id="copy-b3" class="supporting-copy editorial-element editorial-type"' in html
+    assert 'id="head-b2" class="illustration-headline fit-text editorial-element editorial-type"' in html
+    assert 'id="copy-b3" class="supporting-copy fit-text editorial-element editorial-type"' in html
     assert 'id="rule-b4" class="technical-rule draw editorial-element"' in html
     assert ">MARS MAP<" in html and ">A technical reading of the plate.<" in html
     assert 'src="/images/hero-asset"' in html
@@ -1148,9 +1433,10 @@ def test_big_text_reveal_binds_roles_to_layout_regions() -> None:
         ],
     )
     html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[composition]))
-    assert 'id="kicker-c1" class="big-kicker editorial-element editorial-type"' in html
-    assert 'id="headline-c2" class="big-headline editorial-element editorial-type"' in html
+    assert 'id="kicker-c1" class="big-kicker fit-text editorial-element editorial-type"' in html
+    assert 'id="headline-c2" class="big-headline fit-text editorial-element editorial-type"' in html
     assert 'id="cta-c3" class="big-cta editorial-element editorial-type"' in html
+    assert 'id="cta-c3-text" class="fit-text"' in html
     assert 'id="blackout-c4" class="blackout editorial-element"' in html
     assert ">1949<" in html and ">ELON<" in html and ">WATCH THE FULL VIDEO<" in html
     # This template carries no imagery and therefore no resolved URLs.
@@ -1160,7 +1446,7 @@ def test_big_text_reveal_binds_roles_to_layout_regions() -> None:
     assert ".landscape .big-cta{top:930px" in html
 
 
-def test_big_text_reveal_assigns_deterministic_responsive_type_tiers() -> None:
+def test_big_text_reveal_uses_renderer_measured_type_fitting() -> None:
     medium = _composition(
         "medium", EditorialTemplate.BIG_TEXT_REVEAL,
         elements=[
@@ -1180,11 +1466,13 @@ def test_big_text_reveal_assigns_deterministic_responsive_type_tiers() -> None:
         ],
     )
     html = compile_edit_plan_html(EditPlan(project_id="p", compositions=[medium, long]))
-    assert 'class="big-headline big-headline-medium editorial-element editorial-type"' in html
-    assert 'class="big-headline big-headline-long editorial-element editorial-type"' in html
-    assert ".big-headline-medium{font-size:130px" in html
-    assert ".big-headline-long{font-size:170px" in html
-    assert "white-space:nowrap;font-size:170px" in html
+    assert html.count('class="big-headline fit-text editorial-element editorial-type"') == 2
+    assert 'data-fit-min="50" data-fit-max="250"' in html
+    assert "function fitEditorialText()" in html
+    assert "document.fonts.load" in html
+    assert "pinnedFontsReady.then(()=>document.fonts.ready)" in html
+    assert "big-headline-medium" not in html
+    assert "big-headline-long" not in html
 
 
 @pytest.mark.parametrize(("template", "placeholder"), [
@@ -1280,7 +1568,7 @@ def test_all_motion_primitives_are_plannable_and_compiled() -> None:
         (1.2, MotionPrimitive.SLIDE_IN_LEFT, "photo-m", None),
         (1.8, MotionPrimitive.SLIDE_IN_RIGHT, "paper-m", None),
         (2.4, MotionPrimitive.SCALE_IN, "reveal-m", None),
-        (3.0, MotionPrimitive.SLOW_PUSH, "reveal-m", None),
+        (3.0, MotionPrimitive.SLOW_PUSH, "paper-m", 1.7),
         (3.6, MotionPrimitive.PAPER_SLIDE, "paper-m", None),
         (4.2, MotionPrimitive.UNDERLINE, "mark-m", None),
         (4.8, MotionPrimitive.HIGHLIGHT, "mark-m", None),
@@ -1355,36 +1643,28 @@ def test_multi_template_plan_embeds_seek_data_and_isolates_layouts() -> None:
     assert payload["editorial_text_enabled"] is True
     assert payload["captions_enabled"] is True
 
-    # Each layout's unique draft label sits inside its own section, in plan order.
-    sections = [
-        ("comp-a", "EVIDENCE MAP"),
-        ("comp-b", "SOURCE READING"),
-        ("comp-c", "FIG. 03"),
-        ("comp-d", "FIG. 05"),
-    ]
-    starts = [html.index(f'data-composition="{cid}"') for cid, _ in sections]
+    # Sections remain isolated and ordered without automatic figure labels.
+    sections = ["comp-a", "comp-b", "comp-c", "comp-d"]
+    starts = [html.index(f'data-composition="{cid}"') for cid in sections]
     assert starts == sorted(starts)
-    ends = [html.index(marker) for _, marker in sections]
-    boundaries = starts[1:] + [html.index("</main>")]
-    for start, end, boundary in zip(starts, ends, boundaries):
-        assert start < end < boundary
+    assert "FIG." not in html and "EVIDENCE MAP" not in html
 
 
 @pytest.mark.parametrize(("template", "typed_node", "kept_node"), [
     (EditorialTemplate.ARCHIVE_CANVAS,
-     'class="year editorial-element editorial-type"',
+     'class="year fit-text editorial-element editorial-type"',
      'class="archive-photo editorial-element"'),
     (EditorialTemplate.DOCUMENT_REVEAL,
-     'class="document-title editorial-element editorial-type"',
+     'class="document-title fit-text editorial-element editorial-type"',
      'class="source-sheet editorial-element"'),
     (EditorialTemplate.COMPARISON_CANVAS,
-     'class="comparison-headline editorial-element editorial-type"',
+     'class="comparison-headline fit-text editorial-element editorial-type"',
      'class="comparison-card left-card editorial-element"'),
     (EditorialTemplate.ILLUSTRATION_CANVAS,
-     'class="illustration-headline editorial-element editorial-type"',
+     'class="illustration-headline fit-text editorial-element editorial-type"',
      'class="illustration-frame editorial-element"'),
     (EditorialTemplate.BIG_TEXT_REVEAL,
-     'class="big-headline editorial-element editorial-type"',
+     'class="big-headline fit-text editorial-element editorial-type"',
      'class="blackout editorial-element"'),
 ])
 def test_typography_disable_hides_type_but_keeps_imagery_and_caption_data(
@@ -1401,7 +1681,7 @@ def test_typography_disable_hides_type_but_keeps_imagery_and_caption_data(
         plan,
         asset_url_resolver=lambda asset: f"/m/{asset.id}",
     )
-    assert '<body class="editorial-text-disabled portrait">' in html
+    assert "archive-dossier preview-placeholders editorial-text-disabled portrait" in html
     assert '"captions_enabled":true' in html
     assert ".editorial-text-disabled .editorial-type{visibility:hidden}" in html
     assert ".editorial-text-disabled .ruler-node span{visibility:hidden}" in html

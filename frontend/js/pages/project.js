@@ -48,7 +48,12 @@
  *    placeholders instead of crashing); and a
  *    "Download Edit Plan JSON" link built solely from a valid
  *    project-local /api/projects/ path scoped to this project, with
- *    ?download=true appended for backends that honor it.
+ *    ?download=true appended for backends that honor it. A compact
+ *    "Open workspace" link (has-plan state, an anchor after Open Preview so
+ *    that stays the first link) and a "Open Editorial workspace" button
+ *    (no-plan state) point at the dedicated Editorial screen (#/editorial),
+ *    which is the full composition workspace: sequence strip, inline
+ *    editing, AI revisions, display settings, and an embedded live preview.
  *  - While the composition list is open, every composition that validates
  *    defensively gets inline editing controls, all built from the mounted
  *    snapshot project id and validated plan ids (plan-authored URLs are
@@ -58,7 +63,7 @@
  *    {template} from the five-template allowlist); save deterministic
  *    text of existing text/document elements (PATCH
  *    {text_updates:{elementId:text}}); change existing event actions
- *    (PATCH {event_actions:{eventIndex:motion primitive}} from the 15-primitive
+ *    (PATCH {event_actions:{eventIndex:motion primitive}} from the 16-primitive
  *    allowlist); lock/unlock a planned asset (PATCH the asset endpoint
  *    with {locked}); and replace one planned asset from a user-selected
  *    local image (multipart POST to the asset's /replace endpoint with
@@ -675,14 +680,15 @@ export const EDITORIAL_TEMPLATES = [
 ];
 
 /**
- * The fifteen motion primitives the backend accepts as event actions;
- * anything else in a plan disables that event's control.
+ * The sixteen motion primitives the backend accepts as event actions
+ * (mirrors backend.editorial.models.MotionPrimitive); anything else in a
+ * plan disables that event's control.
  * @type {string[]}
  */
 export const MOTION_PRIMITIVES = [
   "fade", "fadeUp", "slideInLeft", "slideInRight", "scaleIn", "slowPush",
   "paperSlide", "underline", "highlight", "drawLine", "staggerIn",
-  "dimOthers", "focusOne", "collapseToBlack", "hardCut",
+  "dimOthers", "focusOne", "promoteNode", "collapseToBlack", "hardCut",
 ];
 
 /** Element types whose deterministic text the backend allows editing. */
@@ -701,7 +707,7 @@ const COMPOSITION_DURATION_LIMIT = 120;
  * @param {Object | null} editorial — the snapshot's editorial block
  * @returns {{kind: "stale"|"untracked"|"current"|"unknown", reasons: string[]}}
  */
-function editorialPlanState(editorial) {
+export function editorialPlanState(editorial) {
   const planStatus = (editorial && typeof editorial.plan_status === "string")
     ? editorial.plan_status.trim()
     : null;
@@ -725,10 +731,11 @@ function editorialPlanState(editorial) {
 
 /**
  * Non-empty backend-provided string or null; malformed values (numbers,
- * whitespace, objects) never produce a request URL.
+ * whitespace, objects) never produce a request URL. Shared with the
+ * Editorial workspace screen.
  * @param {unknown} value
  */
-function usableUrl(value) {
+export function usableUrl(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
@@ -841,7 +848,7 @@ function ctrlFor(region) {
  * @param {EditorialController | null} [ctrl] — shared in-flight guard
  * @returns {HTMLElement}
  */
-function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl = null) {
+export function buildGeneratePlanButton(generateUrl, errors, onGenerated = null, ctrl = null) {
   const button = el("button", { class: "btn btn-primary", type: "button" }, GENERATE_PLAN_LABEL);
   const ctrlState = (ctrl && typeof ctrl === "object") ? ctrl : createEditorialController();
   let pending = false;
@@ -1209,7 +1216,7 @@ function setListControlsDisabled(listRoot, disabled) {
  * @param {{projectId: string, ctrl: EditorialController, errors: HTMLElement, runMutation: (call: () => Promise<any>, context: string) => Promise<any>}} ctx
  * @returns {HTMLElement | null}
  */
-function buildCompositionControls(data, ctx) {
+export function buildCompositionControls(data, ctx) {
   if (!data.id) return null; // no validated id -> no endpoint -> no controls
   const groups = [
     buildRegenControl(data, ctx),
@@ -1237,8 +1244,12 @@ function revisionCompositionText(item) {
 /**
  * Plain-language, two-phase AI revision control. Preview generation never
  * mutates the Edit Plan; Apply uses only the opaque server-issued revision id.
+ * `data` of null builds the sequence-scoped control (no composition id).
+ * @param {{id: string | null} | null} data
+ * @param {{projectId: string, ctrl: EditorialController, errors: HTMLElement, runMutation: (call: () => Promise<any>, context: string) => Promise<any>}} ctx
+ * @returns {HTMLElement}
  */
-function buildRevisionControl(data, ctx) {
+export function buildRevisionControl(data, ctx) {
   const compositionId = data?.id || null;
   const label = compositionId ? "Revise this composition with AI" : "Revise sequence with AI";
   const placeholder = compositionId
@@ -1753,10 +1764,18 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
   const errors = el("div", { class: "mt" });
   if (!hasPlan) {
     const generateUrl = usableUrl(editorial.generate_url);
+    const actions = generateUrl
+      ? [buildGeneratePlanButton(generateUrl, errors, onGenerated, ctrlState)]
+      : [];
+    actions.push(el("button", {
+      class: "btn", type: "button",
+      title: "Open the dedicated Editorial workspace screen",
+      onclick: () => navigate("#/editorial"),
+    }, "Open Editorial workspace"));
     body.append(emptyState(
       "No Edit Plan yet",
       "This editorial project has no Edit Plan generated yet. Once one exists, a deterministic HTML preview becomes available here.",
-      generateUrl ? [buildGeneratePlanButton(generateUrl, errors, onGenerated, ctrlState)] : [],
+      actions,
     ));
   } else {
     const planState = editorialPlanState(editorial);
@@ -1785,6 +1804,14 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
       }, "Download Edit Plan JSON"));
     }
     body.append(row);
+    // Compact link to the dedicated workspace screen. Anchored after Open
+    // Preview on purpose: Open Preview remains the first (primary) link and
+    // the download link stays last.
+    row.append(el("a", {
+      class: "btn btn-ghost btn-sm",
+      href: "#/editorial",
+      title: "Open the full Editorial composition workspace",
+    }, "Open workspace"));
     const projectId = snap.project && snap.project.id;
     const displayControls = buildEditorialDisplayControls(
       editorial, ctrlState, errors, onGenerated, projectId,

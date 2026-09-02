@@ -783,6 +783,30 @@ export function listNarrationTakes(config, projectId, opts = {}) {
     });
 }
 
+/** Upload and activate a complete user-recorded PCM WAV narration take. */
+export async function importRecordedNarration(config, projectId, file, name = "Recorded voiceover") {
+  const params = new URLSearchParams({ name });
+  const url = apiUrl(config,
+    `/api/projects/${encodeURIComponent(projectId)}/tts/narrations/import?${params.toString()}`);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "audio/wav" }, body: file,
+      credentials: "same-origin",
+    });
+  } catch (err) {
+    throw new ApiErrorInstance(normalizeError(err, { url }));
+  }
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) {
+    const detail = body && typeof body === "object" && "detail" in body ? body.detail : body;
+    throw new ApiErrorInstance(classifyHttpError(response.status, detail));
+  }
+  return body;
+}
+
 /** Select an existing narration take as narration/master.wav. */
 export function activateNarrationTake(config, projectId, assetId, opts = {}) {
   return request(config,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import itertools
 import json
 import mimetypes
@@ -13,6 +14,7 @@ import tempfile
 import time
 import urllib.request
 from collections.abc import Callable, Sequence
+from functools import lru_cache
 from html import escape
 from pathlib import Path
 from typing import Any, Iterator
@@ -28,7 +30,57 @@ from .models import (
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
-EDITORIAL_RENDER_WORKFLOW_VERSION = "editorial-renderer-v9-streamed-jpeg"
+EDITORIAL_STYLE_ID = "archiveDossier"
+_FONT_ROOT = Path(__file__).with_name("fonts")
+_FONT_FILES = (
+    ("LVS Noto Sans", "NotoSans-Regular.ttf", 400),
+    ("LVS Noto Sans", "NotoSans-Bold.ttf", 700),
+    ("LVS Noto Serif", "NotoSerif-Regular.ttf", 400),
+    ("LVS Noto Serif", "NotoSerif-Bold.ttf", 700),
+)
+
+
+@lru_cache(maxsize=1)
+def editorial_font_manifest() -> tuple[dict[str, str | int], ...]:
+    """Return the immutable identity of the renderer's bundled font files."""
+    entries: list[dict[str, str | int]] = []
+    for family, filename, weight in _FONT_FILES:
+        payload = (_FONT_ROOT / filename).read_bytes()
+        entries.append({
+            "family": family,
+            "file": filename,
+            "weight": weight,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        })
+    return tuple(entries)
+
+
+def _font_bundle_digest() -> str:
+    payload = "\n".join(
+        f"{entry['file']}:{entry['sha256']}" for entry in editorial_font_manifest()
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+EDITORIAL_FONT_BUNDLE_SHA256 = _font_bundle_digest()
+EDITORIAL_RENDER_WORKFLOW_VERSION = (
+    f"editorial-archive-dossier-v14-{EDITORIAL_FONT_BUNDLE_SHA256[:12]}"
+)
+
+
+@lru_cache(maxsize=1)
+def _font_face_css() -> str:
+    rules: list[str] = []
+    for family, filename, weight in _FONT_FILES:
+        encoded = base64.b64encode((_FONT_ROOT / filename).read_bytes()).decode("ascii")
+        rules.append(
+            "@font-face{"
+            f'font-family:"{family}";'
+            f'src:url("data:font/ttf;base64,{encoded}") format("truetype");'
+            f"font-style:normal;font-weight:{weight};font-display:block"
+            "}"
+        )
+    return "".join(rules)
 
 
 def _script_json(value: Any) -> str:
@@ -79,24 +131,80 @@ def _asset_image(
     )
 
 
-def _card_tag(asset: EditorialAsset | None, default: str) -> str:
-    label = asset.label if asset and asset.label else default
-    klass = asset.evidence_class.value.upper() if asset else "ILLUSTRATION"
-    return f"{label.upper()} · {klass}"
+def _source_caption(asset: EditorialAsset | None) -> str:
+    """Render only a meaningful label attached to protected factual media."""
+    if (
+        asset is None
+        or asset.evidence_class is not EvidenceClass.EVIDENCE
+        or not asset.label.strip()
+    ):
+        return ""
+    return (
+        f'<div class="source-caption fit-text editorial-type" '
+        f'{_fit_attrs(minimum=10, maximum=20, height=48, lines=2)}>'
+        f'{escape(asset.label.strip())}</div>'
+    )
 
 
 def _portrait_fallback() -> str:
-    return '<div class="photo-art"><div class="portrait-head"></div><div class="portrait-body"></div></div>'
+    return (
+        '<div class="photo-art preview-placeholder" aria-hidden="true">'
+        '<div class="portrait-head"></div><div class="portrait-body"></div></div>'
+    )
 
 
-def _big_headline_class(text: str) -> str:
-    """Choose a deterministic size tier for exact on-screen headlines."""
-    compact_length = len("".join(text.split()))
-    if compact_length >= 18:
-        return " big-headline-long"
-    if compact_length >= 10:
-        return " big-headline-medium"
-    return ""
+def _fit_attrs(
+    *,
+    minimum: int,
+    maximum: int,
+    height: int,
+    lines: int,
+    landscape_minimum: int | None = None,
+    landscape_maximum: int | None = None,
+    landscape_height: int | None = None,
+    landscape_lines: int | None = None,
+) -> str:
+    """Compile trusted fitting bounds consumed by the renderer runtime."""
+    return (
+        f'data-fit-min="{minimum}" data-fit-max="{maximum}" '
+        f'data-fit-height="{height}" data-fit-lines="{lines}" '
+        f'data-fit-landscape-min="{landscape_minimum or minimum}" '
+        f'data-fit-landscape-max="{landscape_maximum or maximum}" '
+        f'data-fit-landscape-height="{landscape_height or height}" '
+        f'data-fit-landscape-lines="{landscape_lines or lines}"'
+    )
+
+
+def validate_export_assets(plan: EditPlan, asset_root: Path | None) -> None:
+    """Reject unresolved authored media before a production render starts."""
+    failures: list[str] = []
+    for composition in plan.compositions:
+        by_id = {asset.id: asset for asset in composition.assets}
+        for element in composition.elements:
+            if not element.asset_id:
+                continue
+            asset = by_id.get(element.asset_id)
+            if asset is None:
+                # The domain model normally catches this; keep the export gate
+                # defensive because it is the last boundary before rendering.
+                failures.append(
+                    f"{composition.id}/{element.role}: unknown asset {element.asset_id}"
+                )
+                continue
+            if asset.source and asset.source.startswith(("http://", "https://")):
+                failures.append(
+                    f"{composition.id}/{element.role}: remote media is not exportable"
+                )
+                continue
+            if asset_root is None or EditorialRenderer._data_asset_url(asset_root, asset) is None:
+                failures.append(
+                    f"{composition.id}/{element.role}: local media is missing or unreadable"
+                )
+    if failures:
+        raise ValueError(
+            "Editorial export requires resolved local media; preview placeholders cannot be "
+            "exported: " + "; ".join(failures)
+        )
 
 
 def _archive_markup(
@@ -111,7 +219,6 @@ def _archive_markup(
     reveal = _element(composition, "reveal")
     photo_asset = _asset(composition, photo)
     document_asset = _asset(composition, document)
-    photo_tag = _card_tag(photo_asset, "ARCHIVE PHOTOGRAPH")
     document_copy = (
         document_asset.label
         if document_asset and document_asset.label
@@ -128,27 +235,23 @@ def _archive_markup(
         <div class="grain"></div>
         <div class="research-layer">
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
-          <div id="{escape(year.id if year else 'year', quote=True)}" class="year editorial-element editorial-type">{escape(year.text if year else "")}</div>
+          <div id="{escape(year.id if year else 'year', quote=True)}" class="year fit-text editorial-element editorial-type" {_fit_attrs(minimum=72, maximum=250, height=250, lines=1, landscape_minimum=56, landscape_maximum=154, landscape_height=160)}>{escape(year.text if year else "")}</div>
           <div id="{escape(photo.id if photo else 'photo', quote=True)}" class="archive-photo editorial-element" data-rest-rotate="-2.4">
             {_asset_image(composition, photo, resolver, class_name="archive-photo-image")}
             {_portrait_fallback()}
-            <div class="asset-tag editorial-type">{escape(photo_tag)}</div>
+            {_source_caption(photo_asset)}
           </div>
           <div id="{escape(document.id if document else 'document', quote=True)}" class="document editorial-element" data-rest-rotate="2">
             {_asset_image(composition, document, resolver, class_name="document-image")}
-            <div class="paper-index editorial-type">ARCHIVE / SOURCE DOCUMENT</div>
-            <h2 class="editorial-type">{escape(document.text if document and document.text else "DOCUMENT")}</h2>
-            <p class="editorial-type">DOCUMENT EXCERPT</p>
+            <h2 id="{escape((document.id if document else 'document') + '-title', quote=True)}" class="fit-text editorial-type" {_fit_attrs(minimum=24, maximum=62, height=150, lines=2, landscape_minimum=24, landscape_maximum=62, landscape_height=140)}>{escape(document.text if document and document.text else "DOCUMENT")}</h2>
             <div class="rule"></div>
-            <p class="document-copy editorial-type">{escape(document_copy)}</p>
+            <p id="{escape((document.id if document else 'document') + '-copy', quote=True)}" class="document-copy fit-text editorial-type" {_fit_attrs(minimum=18, maximum=27, height=220, lines=5)}>{escape(document_copy)}</p>
             <div id="{escape(passage.id if passage else 'passage', quote=True)}" class="passage draw editorial-element"></div>
-            <div class="paper-stamp editorial-type">SOURCE</div>
           </div>
           <div id="{escape(rulers.id if rulers else 'rulers', quote=True)}" class="ruler-grid editorial-element">{nodes}</div>
-          <div class="draft-label editorial-type">FIG. 01 · EVIDENCE MAP</div>
         </div>
         <div class="blackout"></div>
-        <div id="{escape(reveal.id if reveal else 'reveal', quote=True)}" class="elon editorial-element editorial-type">{escape(reveal.text if reveal else "")}</div>
+        <div id="{escape(reveal.id if reveal else 'reveal', quote=True)}" class="elon editorial-element editorial-type"><span class="fit-text" {_fit_attrs(minimum=50, maximum=170, height=240, lines=1, landscape_minimum=60, landscape_maximum=230, landscape_height=280)}>{escape(reveal.text if reveal else "")}</span></div>
       </section>
     """
 
@@ -163,34 +266,59 @@ def _document_reveal_markup(
     annotation = _element(composition, "annotation")
     context = _element(composition, "context-image")
     connector = _element(composition, "connector")
+    document_asset = _asset(composition, document)
+    sheet_class = "source-sheet"
+    section_class = "composition document-reveal"
+    section_style = ""
+    display_mode = document_asset.metadata.get("display_mode") if document_asset else None
+    if display_mode == "cover":
+        sheet_class += " source-sheet-cover"
+    elif display_mode == "strip":
+        try:
+            aspect_ratio = float(document_asset.metadata.get("display_aspect_ratio", 0))
+        except (TypeError, ValueError):
+            aspect_ratio = 0
+        if 1.0 <= aspect_ratio <= 8.0:
+            sheet_class += " source-sheet-strip"
+            section_class += " document-reveal-strip"
+            try:
+                passage_position = float(
+                    document_asset.metadata.get("passage_mark_position", 0.45)
+                )
+            except (TypeError, ValueError):
+                passage_position = 0.45
+            passage_position = min(max(passage_position, 0.1), 0.9)
+            section_style = (
+                f' style="--source-sheet-aspect:{aspect_ratio:.6f};'
+                f'--passage-mark-position:{passage_position * 100:.2f}%"'
+            )
     document_text = document.text.strip() if document and document.text else ""
     document_copy_tag = (
-        f'<p class="document-copy editorial-type">{escape(document_text)}</p>'
+        f'<p class="document-copy fit-text editorial-type" '
+        f'{_fit_attrs(minimum=20, maximum=30, height=650, lines=10, landscape_minimum=18, landscape_maximum=30, landscape_height=650)}>'
+        f'{escape(document_text)}</p>'
         if document_text
         else ""
     )
-    context_tag = _card_tag(_asset(composition, context), "CONTEXT PHOTOGRAPH")
+    context_asset = _asset(composition, context)
     return f"""
-      <section class="composition document-reveal" data-composition="{escape(composition.id, quote=True)}">
+      <section class="{section_class}" data-composition="{escape(composition.id, quote=True)}"{section_style}>
         <div class="grain"></div>
         <div class="research-layer">
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
-          <div id="{escape(title.id if title else 'title', quote=True)}" class="document-title editorial-element editorial-type">{escape(title.text if title else "")}</div>
-          <div id="{escape(document.id if document else 'document', quote=True)}" class="source-sheet editorial-element" data-rest-rotate="1">
+          <div id="{escape(title.id if title else 'title', quote=True)}" class="document-title fit-text editorial-element editorial-type" {_fit_attrs(minimum=46, maximum=104, height=230, lines=3, landscape_minimum=38, landscape_maximum=82, landscape_height=120, landscape_lines=2)}>{escape(title.text if title else "")}</div>
+          <div id="{escape(document.id if document else 'document', quote=True)}" class="{sheet_class} editorial-element" data-rest-rotate="1">
             {_asset_image(composition, document, resolver, class_name="document-image")}
-            <div class="paper-index editorial-type">SOURCE / DOCUMENT</div>
             {document_copy_tag}
             <div id="{escape(mark.id if mark else 'passage-mark', quote=True)}" class="passage-mark draw editorial-element"></div>
-            <div class="paper-stamp editorial-type">SOURCE</div>
           </div>
           <div id="{escape(connector.id if connector else 'connector', quote=True)}" class="connector-line draw editorial-element"></div>
-          <div id="{escape(annotation.id if annotation else 'annotation', quote=True)}" class="annotation editorial-element editorial-type">{escape(annotation.text if annotation else "")}</div>
+          <div id="{escape(annotation.id if annotation else 'annotation', quote=True)}" class="annotation fit-text editorial-element editorial-type" {_fit_attrs(minimum=19, maximum=28, height=230, lines=5, landscape_minimum=18, landscape_maximum=28, landscape_height=170)}>{escape(annotation.text if annotation else "")}</div>
           <div id="{escape(context.id if context else 'context', quote=True)}" class="context-photo editorial-element" data-rest-rotate="-1.6">
             {_asset_image(composition, context, resolver, class_name="context-photo-image")}
             {_portrait_fallback()}
-            <div class="asset-tag editorial-type">{escape(context_tag)}</div>
+            {_source_caption(context_asset)}
           </div>
-          <div class="draft-label editorial-type">FIG. 02 · SOURCE READING</div>
         </div>
         <div class="blackout"></div>
       </section>
@@ -207,28 +335,27 @@ def _comparison_markup(
     left_label = _element(composition, "left-label")
     right_label = _element(composition, "right-label")
     divider = _element(composition, "divider")
-    left_tag = _card_tag(_asset(composition, left_image), "LEFT SOURCE")
-    right_tag = _card_tag(_asset(composition, right_image), "RIGHT SOURCE")
+    left_asset = _asset(composition, left_image)
+    right_asset = _asset(composition, right_image)
     return f"""
       <section class="composition comparison-canvas" data-composition="{escape(composition.id, quote=True)}">
         <div class="grain"></div>
         <div class="research-layer">
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
-          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="comparison-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="comparison-headline fit-text editorial-element editorial-type" {_fit_attrs(minimum=44, maximum=100, height=280, lines=3, landscape_minimum=36, landscape_maximum=76, landscape_height=135, landscape_lines=2)}>{escape(headline.text if headline else "")}</div>
           <div id="{escape(left_image.id if left_image else 'left-image', quote=True)}" class="comparison-card left-card editorial-element" data-rest-rotate="-1.2">
             {_asset_image(composition, left_image, resolver, class_name="comparison-left-image")}
             {_portrait_fallback()}
-            <div class="asset-tag editorial-type">{escape(left_tag)}</div>
+            {_source_caption(left_asset)}
           </div>
           <div id="{escape(right_image.id if right_image else 'right-image', quote=True)}" class="comparison-card right-card editorial-element" data-rest-rotate="1.2">
             {_asset_image(composition, right_image, resolver, class_name="comparison-right-image")}
             {_portrait_fallback()}
-            <div class="asset-tag editorial-type">{escape(right_tag)}</div>
+            {_source_caption(right_asset)}
           </div>
-          <div id="{escape(left_label.id if left_label else 'left-label', quote=True)}" class="comparison-label left-label editorial-element editorial-type">{escape(left_label.text if left_label else "")}</div>
-          <div id="{escape(right_label.id if right_label else 'right-label', quote=True)}" class="comparison-label right-label editorial-element editorial-type">{escape(right_label.text if right_label else "")}</div>
+          <div id="{escape(left_label.id if left_label else 'left-label', quote=True)}" class="comparison-label left-label fit-text editorial-element editorial-type" {_fit_attrs(minimum=23, maximum=40, height=100, lines=2, landscape_minimum=20, landscape_maximum=32, landscape_height=70)}>{escape(left_label.text if left_label else "")}</div>
+          <div id="{escape(right_label.id if right_label else 'right-label', quote=True)}" class="comparison-label right-label fit-text editorial-element editorial-type" {_fit_attrs(minimum=23, maximum=40, height=100, lines=2, landscape_minimum=20, landscape_maximum=32, landscape_height=70)}>{escape(right_label.text if right_label else "")}</div>
           <div id="{escape(divider.id if divider else 'divider', quote=True)}" class="divider-line draw editorial-element" data-draw-axis="y"></div>
-          <div class="draft-label editorial-type">FIG. 03 · COMPARISON</div>
         </div>
         <div class="blackout"></div>
       </section>
@@ -250,12 +377,11 @@ def _illustration_markup(
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
           <div id="{escape(illustration.id if illustration else 'illustration', quote=True)}" class="illustration-frame editorial-element">
             {_asset_image(composition, illustration, resolver, class_name="illustration-image")}
-            <div class="illustration-art"></div>
+            <div class="illustration-art preview-placeholder" aria-hidden="true"></div>
           </div>
           <div id="{escape(rule.id if rule else 'technical-line', quote=True)}" class="technical-rule draw editorial-element"></div>
-          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="illustration-headline editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
-          <div id="{escape(supporting.id if supporting else 'supporting-text', quote=True)}" class="supporting-copy editorial-element editorial-type">{escape(supporting.text if supporting else "")}</div>
-          <div class="draft-label editorial-type">FIG. 04 · ILLUSTRATION</div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="illustration-headline fit-text editorial-element editorial-type" {_fit_attrs(minimum=42, maximum=92, height=145, lines=3, landscape_minimum=34, landscape_maximum=82, landscape_height=175)}>{escape(headline.text if headline else "")}</div>
+          <div id="{escape(supporting.id if supporting else 'supporting-text', quote=True)}" class="supporting-copy fit-text editorial-element editorial-type" {_fit_attrs(minimum=18, maximum=28, height=250, lines=5, landscape_minimum=18, landscape_maximum=28, landscape_height=300)}>{escape(supporting.text if supporting else "")}</div>
         </div>
         <div class="blackout"></div>
       </section>
@@ -272,8 +398,11 @@ def _big_text_markup(
     blackout = _element(composition, "blackout")
     if cta is not None:
         cta_tag = (
-            f'<div id="{escape(cta.id, quote=True)}" class="big-cta editorial-element editorial-type">'
-            f"{escape(cta.text)}</div>"
+            f'<div id="{escape(cta.id, quote=True)}" '
+            f'class="big-cta editorial-element editorial-type">'
+            f'<span id="{escape(cta.id + "-text", quote=True)}" class="fit-text" '
+            f'{_fit_attrs(minimum=22, maximum=44, height=110, lines=2, landscape_minimum=20, landscape_maximum=36, landscape_height=80)}>'
+            f"{escape(cta.text)}</span></div>"
         )
     else:
         cta_tag = ""
@@ -282,10 +411,9 @@ def _big_text_markup(
         <div class="grain"></div>
         <div class="research-layer">
           <div class="kicker-rule"></div>
-          <div id="{escape(kicker.id if kicker else 'kicker', quote=True)}" class="big-kicker editorial-element editorial-type">{escape(kicker.text if kicker else "")}</div>
-          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline{_big_headline_class(headline.text if headline else '')} editorial-element editorial-type">{escape(headline.text if headline else "")}</div>
+          <div id="{escape(kicker.id if kicker else 'kicker', quote=True)}" class="big-kicker fit-text editorial-element editorial-type" {_fit_attrs(minimum=20, maximum=34, height=82, lines=2, landscape_minimum=18, landscape_maximum=34, landscape_height=62)}>{escape(kicker.text if kicker else "")}</div>
+          <div id="{escape(headline.id if headline else 'headline', quote=True)}" class="big-headline fit-text editorial-element editorial-type" {_fit_attrs(minimum=50, maximum=250, height=570, lines=4, landscape_minimum=42, landscape_maximum=230, landscape_height=465)}>{escape(headline.text if headline else "")}</div>
           {cta_tag}
-          <div class="draft-label editorial-type">FIG. 05 · STATED</div>
         </div>
         <div id="{escape(blackout.id if blackout else 'blackout', quote=True)}" class="blackout editorial-element"></div>
       </section>
@@ -306,6 +434,7 @@ def compile_edit_plan_html(
     *,
     asset_url_resolver: AssetURLResolver | None = None,
     captions: Sequence[dict[str, Any]] = (),
+    show_placeholders: bool = True,
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
 
@@ -330,6 +459,7 @@ def compile_edit_plan_html(
     )
     payload = _script_json(plan.model_dump(mode="json"))
     captions_payload = _script_json(list(captions))
+    font_manifest_payload = _script_json(editorial_font_manifest())
     landscape = plan.width >= plan.height
     design_width, design_height = ((1920, 1080) if landscape else (1080, 1920))
     design_scale = min(plan.width / design_width, plan.height / design_height)
@@ -338,21 +468,27 @@ def compile_edit_plan_html(
     orientation = "landscape" if landscape else "portrait"
     text_class = "editorial-text-enabled" if plan.editorial_text_enabled else "editorial-text-disabled"
     caption_class = f" caption-style-{plan.caption_style.value}" if captions else ""
+    placeholder_class = "preview-placeholders" if show_placeholders else "production-render"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="lvs-editorial-style" content="{EDITORIAL_STYLE_ID}">
+<meta name="lvs-editorial-font-bundle-sha256" content="{EDITORIAL_FONT_BUNDLE_SHA256}">
 <style>
+{_font_face_css()}
 :root{{--charcoal:#111315;--charcoal-2:#1b1d1f;--ivory:#e9dfc6;--rust:#b9532f;--blue:#6f91a6;--ink:#25211d}}
 *{{box-sizing:border-box}} html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000}}
-body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
+body{{font-family:"LVS Noto Sans",sans-serif}}
 #stage{{position:absolute;left:{stage_left:.4f}px;top:{stage_top:.4f}px;width:{design_width}px;height:{design_height}px;overflow:hidden;background:#000;transform:scale({design_scale:.8f});transform-origin:top left}}
 .composition{{position:absolute;inset:0;display:none;overflow:hidden;background:var(--charcoal);color:var(--ivory)}}
 .research-layer{{position:absolute;inset:0;transform-origin:50% 50%}}
+.fit-text{{overflow-wrap:normal;word-break:normal}}
+.production-render .preview-placeholder{{display:none!important}}
 .grain{{position:absolute;inset:0;z-index:80;pointer-events:none;opacity:.11;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E")}}
 .technical-line{{position:absolute;background:var(--blue);opacity:.28}} .line-a{{left:74px;top:120px;width:1px;height:1640px}} .line-b{{left:74px;right:74px;top:1704px;height:1px}}
 .blackout{{position:absolute;inset:0;z-index:100;background:#050505;opacity:0}}
 /* archiveCanvas */
-.year{{position:absolute;left:72px;top:105px;font-size:250px;font-weight:900;line-height:.84;letter-spacing:-10px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
+.year{{position:absolute;left:72px;right:72px;top:105px;font-size:250px;font-weight:900;line-height:.84;letter-spacing:-10px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
 .archive-photo{{position:absolute;left:76px;top:420px;width:610px;height:610px;padding:18px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-2.4deg)}}
 .photo-art{{position:absolute;overflow:hidden;background:radial-gradient(circle at 50% 27%,#a59c88 0 12%,transparent 13%),linear-gradient(145deg,#625f57,#b3aa97 46%,#494943)}}
 .archive-photo .photo-art{{inset:18px 18px 72px}}
@@ -361,17 +497,15 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .archive-photo:has(.archive-photo-image) .photo-art{{visibility:hidden}}
 .portrait-head{{position:absolute;left:220px;top:100px;width:130px;height:165px;border-radius:48% 48% 42% 42%;background:#353735;box-shadow:24px 5px 0 #77756c}}
 .portrait-body{{position:absolute;left:120px;top:245px;width:360px;height:340px;border-radius:48% 48% 0 0;background:#292c2c}}
-.asset-tag{{position:absolute;color:#3b3731;font-size:22px;letter-spacing:3px;text-align:center}}
-.archive-photo .asset-tag{{left:18px;right:18px;bottom:14px}}
-.context-photo .asset-tag,.comparison-card .asset-tag{{left:16px;right:16px;bottom:10px}}
-.document{{position:absolute;right:54px;top:630px;width:590px;height:760px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(2deg)}}
+.source-caption{{position:absolute;left:16px;right:16px;bottom:12px;color:#3b3731;font-size:20px;line-height:1.15;letter-spacing:1px;text-align:center}}
+.document{{position:absolute;right:54px;top:630px;width:590px;height:760px;padding:64px 56px;overflow:hidden;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(2deg)}}
 .document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}}
 .document-image.evidence-image{{object-fit:contain;opacity:.96;filter:sepia(.08) contrast(1.02);background:#e5ddca}}
 .document:has(.document-image.evidence-image)>h2,.document:has(.document-image.evidence-image)>.rule,.document:has(.document-image.evidence-image)>.document-copy,.document:has(.document-image.evidence-image)>p{{display:none}}
 .document>*:not(.document-image):not(.passage):not(.paper-stamp){{position:relative;z-index:2}}
-.paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "DejaVu Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "DejaVu Serif",serif;letter-spacing:3px}}
-.document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "DejaVu Serif",serif;letter-spacing:0}}
-.passage{{position:absolute;left:54px;right:54px;top:508px;height:22px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
+.paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "LVS Noto Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "LVS Noto Serif",serif;letter-spacing:3px}}
+.document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "LVS Noto Serif",serif;letter-spacing:0}}
+.passage{{position:absolute;left:54px;right:54px;top:394px;height:8px;border-bottom:5px solid var(--rust);background:transparent;transform-origin:left center}}
 .paper-stamp{{position:absolute;right:38px;bottom:40px;padding:10px 16px;border:4px solid #9f4429;color:#9f4429;font-weight:800;letter-spacing:3px;transform:rotate(-8deg);opacity:.82}}
 .ruler-grid{{position:absolute;left:82px;right:72px;bottom:170px;display:grid;grid-template-columns:repeat(5,1fr);gap:24px}}
 .ruler-node{{height:86px;border:1px solid #6f91a6a8;position:relative;color:#c3d6e2;background:#212d38}}
@@ -379,19 +513,27 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .ruler-node .ruler-chief{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:800;letter-spacing:5px;color:#241f19;opacity:0}}
 .ruler-node.chief{{border-color:var(--rust);background:#f0e5c9;color:#241f19;box-shadow:0 20px 48px #000c,inset 0 0 0 2px #b9532f}}
 .ruler-node.focus{{border-color:var(--rust);background:#4e271d;color:#ffd8bd;box-shadow:inset 0 0 0 3px #b9532f}}
-.draft-label{{position:absolute;left:80px;bottom:64px;font:18px monospace;letter-spacing:3px;color:#6f91a6}}
 .elon{{position:absolute;z-index:110;inset:0;display:flex;align-items:center;justify-content:center;padding:0 48px;text-align:center;white-space:nowrap;font-size:170px;font-weight:900;line-height:.92;letter-spacing:6px;color:var(--ivory);opacity:0}}
+.elon span{{display:block;width:100%}}
 /* documentReveal */
 .document-title{{position:absolute;left:72px;right:72px;top:96px;font-size:104px;font-weight:900;line-height:1.02;letter-spacing:2px;color:var(--ivory);text-shadow:0 8px 28px #0008}}
-.source-sheet{{position:absolute;left:64px;right:64px;top:352px;height:872px;padding:64px 56px;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(1deg)}}
+.source-sheet{{position:absolute;left:64px;right:64px;top:352px;height:872px;padding:64px 56px;overflow:hidden;background:var(--ivory);color:var(--ink);box-shadow:0 35px 95px #000b;transform:rotate(1deg)}}
 .source-sheet .document-image{{opacity:.18}}
 .source-sheet .document-image.evidence-image{{object-fit:contain;opacity:.98;filter:contrast(1.03);background:#eee9df}}
+.source-sheet-cover{{padding:0;background:var(--charcoal-2)}}
+.source-sheet-cover .document-image.evidence-image{{object-fit:cover;opacity:1;filter:contrast(1.03);background:var(--charcoal-2)}}
+.document-reveal-strip{{--source-sheet-height:clamp(300px,calc(952px / var(--source-sheet-aspect)),640px)}}
+.source-sheet-strip{{height:var(--source-sheet-height);padding:0}}
+.source-sheet-strip .passage-mark{{top:var(--passage-mark-position)}}
+.document-reveal-strip .connector-line{{top:calc(396px + var(--source-sheet-height))}}
+.document-reveal-strip .annotation{{top:calc(436px + var(--source-sheet-height))}}
+.document-reveal-strip .context-photo{{top:calc(416px + var(--source-sheet-height))}}
 .source-sheet:has(.document-image.evidence-image)>.document-copy{{display:none}}
 .source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp){{position:relative;z-index:2}}
-.source-sheet .paper-index{{margin-top:0}} .source-sheet .document-copy{{font:30px/1.72 "DejaVu Serif",serif;margin:44px 0 0;letter-spacing:0}}
+.source-sheet .paper-index{{margin-top:0}} .source-sheet .document-copy{{font:30px/1.72 "LVS Noto Serif",serif;margin:44px 0 0;letter-spacing:0}}
 .passage-mark{{position:absolute;left:56px;right:56px;top:196px;height:34px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
 .connector-line{{position:absolute;left:72px;top:1268px;width:520px;height:2px;background:var(--blue);transform-origin:left center}}
-.annotation{{position:absolute;left:72px;top:1308px;width:500px;font:28px/1.6 "DejaVu Serif",serif;color:var(--ivory);border-left:3px solid var(--rust);padding-left:26px}}
+.annotation{{position:absolute;left:72px;top:1308px;width:500px;font:28px/1.6 "LVS Noto Serif",serif;color:var(--ivory);border-left:3px solid var(--rust);padding-left:26px}}
 .context-photo{{position:absolute;right:72px;top:1288px;width:380px;height:520px;padding:16px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-1.6deg)}}
 .context-photo-image{{position:absolute;inset:16px 16px 64px;width:calc(100% - 32px);height:440px;z-index:2;filter:grayscale(.72) sepia(.2) contrast(1.03)}}
 .context-photo:has(.context-photo-image) .photo-art{{visibility:hidden}}
@@ -412,23 +554,23 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .illustration-frame:has(.illustration-image) .illustration-art{{display:none}}
 .technical-rule{{position:absolute;left:72px;right:72px;top:1332px;height:2px;background:var(--blue);transform-origin:left center}}
 .illustration-headline{{position:absolute;left:72px;right:72px;top:1396px;font-size:92px;font-weight:900;line-height:1;letter-spacing:1px;color:var(--ivory)}}
-.supporting-copy{{position:absolute;left:72px;right:72px;top:1548px;font:28px/1.62 "DejaVu Serif",serif;color:#d9d0b2}}
+.supporting-copy{{position:absolute;left:72px;right:72px;top:1548px;font:28px/1.62 "LVS Noto Serif",serif;color:#d9d0b2}}
 /* bigTextReveal */
 .kicker-rule{{position:absolute;left:50%;top:560px;width:120px;height:2px;margin-left:-60px;background:var(--rust)}}
 .big-kicker{{position:absolute;left:72px;right:72px;top:604px;text-align:center;font-size:34px;font-weight:700;letter-spacing:12px;text-transform:uppercase;color:var(--blue)}}
 .big-headline{{position:absolute;left:40px;right:40px;top:712px;text-align:center;font-size:250px;font-weight:900;line-height:.95;letter-spacing:4px;color:var(--ivory);text-shadow:0 10px 40px #000a}}
-.big-headline-medium{{font-size:130px;letter-spacing:1px}}
-.big-headline-long{{font-size:170px;line-height:.92;letter-spacing:2px}}
 .big-cta{{position:absolute;left:72px;right:72px;top:1330px;height:120px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:44px;font-weight:800;letter-spacing:6px;text-transform:uppercase;color:var(--ivory);border:3px solid var(--rust);background:#b9532f17;box-shadow:0 18px 50px #000a}}
+.big-cta span{{display:block;max-width:100%}}
 .landscape .line-a{{left:70px;top:72px;height:920px}} .landscape .line-b{{left:70px;right:70px;top:1000px}}
 .landscape .year{{left:70px;top:62px;font-size:154px}}
 .landscape .archive-photo{{left:82px;top:270px;width:650px;height:610px}}
 .landscape .document{{right:82px;top:170px;width:780px;height:720px}}
 .landscape .ruler-grid{{left:780px;right:82px;bottom:74px;grid-template-columns:repeat(5,1fr);gap:14px}}
-.landscape .ruler-node{{height:58px}} .landscape .draft-label{{left:82px;bottom:34px}}
+.landscape .ruler-node{{height:58px}}
 .landscape .elon{{font-size:230px}}
 .landscape .document-title{{left:80px;right:80px;top:52px;font-size:82px}}
 .landscape .source-sheet{{left:90px;right:760px;top:180px;height:790px}}
+.landscape .source-sheet-strip{{height:clamp(300px,calc(1070px / var(--source-sheet-aspect)),790px)}}
 .landscape .connector-line{{left:1230px;top:300px;width:570px}}
 .landscape .annotation{{left:1230px;top:340px;width:570px}}
 .landscape .context-photo{{right:90px;top:540px;width:520px;height:420px}}
@@ -445,7 +587,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 .landscape .illustration-headline{{left:1270px;right:70px;top:380px;font-size:82px}}
 .landscape .supporting-copy{{left:1270px;right:70px;top:570px}}
 .landscape .kicker-rule{{top:290px}} .landscape .big-kicker{{top:330px}}
-.landscape .big-headline{{top:430px;font-size:230px}} .landscape .big-headline-medium{{font-size:170px}} .landscape .big-headline-long{{font-size:150px}}
+.landscape .big-headline{{top:430px;font-size:230px}}
 .landscape .big-cta{{top:930px;height:90px;font-size:36px;letter-spacing:4px}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
@@ -456,7 +598,7 @@ body{{font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif}}
 #caption-layer{{position:absolute;inset:0;z-index:120;pointer-events:none}}
 .cap{{position:absolute;display:none;opacity:0;will-change:opacity,transform}}
 .caption-style-editorialPhrase .cap,.caption-style-quietDocumentary .cap,.caption-style-oneLine .cap,.caption-style-oneWord .cap{{
-font-family:"DejaVu Sans Condensed","Liberation Sans Narrow",sans-serif;
+font-family:"LVS Noto Sans",sans-serif;
 font-weight:600;color:var(--ivory);
 text-shadow:0 1px 2px #000f,0 2px 14px #000d;
 line-height:1.3;
@@ -479,13 +621,97 @@ background:#f0e5c9;color:#241f19;border-left:none;padding:6px 14px;
 font-size:58px;font-weight:700;text-shadow:none;
 }}
 .landscape .caption-style-editorialPhrase .cap.highlight{{font-size:46px;padding:4px 12px}}
-</style></head><body class="{text_class} {orientation}{caption_class}"><main id="stage">{markup}<div id="caption-layer"></div></main>
+</style></head><body class="archive-dossier {placeholder_class} {text_class} {orientation}{caption_class}"><main id="stage">{markup}<div id="caption-layer"></div></main>
 <script>
 "use strict";
 const PLAN={payload};
 const CAPTIONS={captions_payload};
+const FONT_MANIFEST={font_manifest_payload};
 const clamp=v=>Math.max(0,Math.min(1,v));
 const ease=v=>{{v=clamp(v);return v*v*(3-2*v)}};
+function fitSetting(el,name){{
+  const landscape=document.body.classList.contains('landscape');
+  const key=landscape?'fitLandscape'+name:'fit'+name;
+  return Number(el.dataset[key]);
+}}
+function textMetrics(el){{
+  const range=document.createRange();range.selectNodeContents(el);
+  const fragments=[...range.getClientRects()].filter(rect=>rect.width>0&&rect.height>0);
+  const style=getComputedStyle(el),fontSize=parseFloat(style.fontSize)||16;
+  const parsedLineHeight=parseFloat(style.lineHeight);
+  const lineHeight=Number.isFinite(parsedLineHeight)?parsedLineHeight:fontSize*1.2;
+  const padding=(parseFloat(style.paddingTop)||0)+(parseFloat(style.paddingBottom)||0);
+  const contentHeight=Math.max(0,el.scrollHeight-padding);
+  return {{
+    width:fragments.length?Math.max(...fragments.map(rect=>rect.width)):0,
+    height:contentHeight,
+    lines:Math.max(1,Math.round(contentHeight/lineHeight)),
+    horizontalOverflow:el.scrollWidth>el.clientWidth+1,
+  }};
+}}
+function fitOne(el){{
+  const minimum=fitSetting(el,'Min'),maximum=fitSetting(el,'Max');
+  const maxHeight=fitSetting(el,'Height'),maxLines=fitSetting(el,'Lines');
+  const stage=document.getElementById('stage');
+  const scale=stage.getBoundingClientRect().width/stage.offsetWidth;
+  const fits=size=>{{
+    el.style.fontSize=size+'px';
+    const metrics=textMetrics(el),box=el.getBoundingClientRect();
+    return {{
+      ok:!metrics.horizontalOverflow&&metrics.height<=maxHeight+.75&&metrics.lines<=maxLines,
+      metrics,box,
+    }};
+  }};
+  let low=minimum,high=maximum,best=minimum,bestResult=fits(minimum);
+  if(bestResult.ok){{
+    for(let i=0;i<12;i++){{
+      const middle=(low+high)/2,result=fits(middle);
+      if(result.ok){{best=middle;bestResult=result;low=middle;}}else{{high=middle;}}
+    }}
+  }}
+  const finalResult=fits(best);
+  const stageRect=stage.getBoundingClientRect(),rect=finalResult.box;
+  const withinStage=(
+    rect.left>=stageRect.left-1&&rect.top>=stageRect.top-1&&
+    rect.right<=stageRect.right+1&&rect.bottom<=stageRect.bottom+1
+  );
+  const report={{
+    id:el.id||null,className:el.className,fontSize:Number(best.toFixed(2)),
+    lines:finalResult.metrics.lines,width:Number((rect.width/scale).toFixed(2)),
+    height:Number(finalResult.metrics.height.toFixed(2)),
+    maxLines,maxHeight,
+    x:Number(((rect.left-stageRect.left)/scale).toFixed(2)),
+    y:Number(((rect.top-stageRect.top)/scale).toFixed(2)),
+    fit:finalResult.ok&&withinStage,
+  }};
+  return report;
+}}
+function fitEditorialText(){{
+  const report=[];
+  document.querySelectorAll('.composition').forEach(root=>{{
+    const priorDisplay=root.style.display,priorVisibility=root.style.visibility;
+    const transformed=[...root.querySelectorAll('[data-rest-rotate]')].map(el=>[
+      el,el.style.transform,
+    ]);
+    root.style.display='block';root.style.visibility='hidden';
+    transformed.forEach(([el])=>{{el.style.transform='none';}});
+    root.querySelectorAll('.fit-text').forEach(el=>report.push(fitOne(el)));
+    transformed.forEach(([el,value])=>{{el.style.transform=value;}});
+    root.style.display=priorDisplay;root.style.visibility=priorVisibility;
+  }});
+  window.__editorialLayoutReport=report;
+  document.body.dataset.layoutReport=JSON.stringify(report);
+  const failures=report.filter(item=>!item.fit);
+  if(failures.length){{
+    throw new Error('Editorial text does not fit its renderer-owned region: '+
+      failures.map(item=>item.id||item.className).join(', '));
+  }}
+}}
+function showEditorialError(message){{
+  const node=document.createElement('div');node.id='editorial-render-error';
+  node.style.cssText='position:absolute;inset:0;z-index:999;padding:64px;background:#111315;color:#e9dfc6;font:32px/1.4 sans-serif';
+  node.textContent=message;document.body.appendChild(node);
+}}
 let capNode=null,capKey=null;
 function captionEl(){{
   if(!capNode){{
@@ -523,6 +749,7 @@ function updateCaptions(t){{
 }}
 function reset(root){{
   root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
+  root.querySelectorAll('.document,.source-sheet').forEach(el=>{{el.style.transformOrigin=''}});
   root.querySelectorAll('.ruler-node').forEach(el=>{{
     el.style.opacity='0';el.style.transform='';el.style.zIndex='';el.classList.remove('focus','chief');
     const number=el.querySelector('span');if(number)number.style.opacity='1';
@@ -544,7 +771,15 @@ function applyEvent(root,event,t){{
     case 'slideInLeft': target.style.opacity=String(p);target.style.transform=`translateX(${{(p-1)*520}}px) rotate(${{rest}}deg)`;break;
     case 'slideInRight': target.style.opacity=String(p);target.style.transform=`translateX(${{(1-p)*520}}px)`;break;
     case 'scaleIn': target.style.opacity=String(p);target.style.transform=`scale(${{.78+.22*p}})`;break;
-    case 'slowPush': target.style.opacity='1';target.style.transform=`scale(${{1+.04*p}})`;break;
+    case 'slowPush': {{
+      const requested=Number(event.value);
+      if(target.classList.contains('document')&&Number.isFinite(requested)&&requested>1){{
+        const zoom=Math.max(1,Math.min(2,requested));
+        target.style.opacity='1';target.style.transformOrigin='100% 46%';
+        target.style.transform=`scale(${{1+(zoom-1)*p}}) rotate(${{rest}}deg)`;
+      }}else{{target.style.opacity='1';target.style.transform=`scale(${{1+.04*p}})`;}}
+      break;
+    }}
     case 'paperSlide': target.style.opacity=String(p);target.style.transform=`translate(${{(1-p)*520}}px,${{(1-p)*90}}px) rotate(${{rest*(3.5-2.5*p)}}deg)`;break;
     case 'underline': case 'highlight': target.style.opacity=String(p);target.style.transform=`scaleX(${{p}})`;break;
     case 'drawLine': target.style.opacity=String(p);target.style.transform=(target.dataset.drawAxis==='y')?`scaleY(${{p}})`:`scaleX(${{p}})`;break;
@@ -566,7 +801,16 @@ window.renderAt=function(globalTime){{
   updateCaptions(globalTime);
   return true;
 }};
-window.renderAt(0);window.__editorialReady=true;
+window.__editorialReady=false;window.__editorialError=null;
+const pinnedFontsReady=Promise.all(FONT_MANIFEST.map(entry=>
+  document.fonts.load(`${{entry.weight}} 16px "${{entry.family}}"`)
+));
+pinnedFontsReady.then(()=>document.fonts.ready).then(()=>{{
+  fitEditorialText();window.renderAt(0);window.__editorialReady=true;
+}}).catch(error=>{{
+  window.__editorialError=String(error&&error.message||error);
+  showEditorialError(window.__editorialError);
+}});
 </script></body></html>"""
 
 
@@ -614,6 +858,7 @@ class EditorialRenderer:
     ) -> Path:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
+        validate_export_assets(plan, asset_root)
         output = output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         html = compile_edit_plan_html(
@@ -623,6 +868,7 @@ class EditorialRenderer:
                 if asset_root is not None else None
             ),
             captions=captions,
+            show_placeholders=False,
         )
         if preview_html is not None:
             preview_html.parent.mkdir(parents=True, exist_ok=True)
@@ -707,10 +953,17 @@ class EditorialRenderer:
             })
             client.command("Page.navigate", {"url": document.resolve().as_uri()})
             for _ in range(100):
-                ready = client.command("Runtime.evaluate", {
-                    "expression": "window.__editorialReady === true", "returnByValue": True,
+                state = client.command("Runtime.evaluate", {
+                    "expression": (
+                        "({ready:window.__editorialReady===true,"
+                        "error:window.__editorialError||null})"
+                    ),
+                    "returnByValue": True,
                 })
-                if ready.get("result", {}).get("value") is True:
+                value = state.get("result", {}).get("value", {})
+                if isinstance(value, dict) and value.get("error"):
+                    raise RuntimeError(f"Editorial composition layout failed: {value['error']}")
+                if isinstance(value, dict) and value.get("ready") is True:
                     break
                 time.sleep(0.05)
             else:

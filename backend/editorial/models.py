@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -158,6 +159,14 @@ class EditorialElementType(StrEnum):
     BLACK_SCREEN = "black_screen"
 
 
+@dataclass(frozen=True, slots=True)
+class EditorialTextConstraint:
+    """Renderer-owned copy budget for one fixed-layout text slot."""
+
+    max_characters: int
+    max_lines: int
+
+
 TEMPLATE_ELEMENT_SLOTS: dict[
     EditorialTemplate, dict[str, EditorialElementType]
 ] = {
@@ -196,6 +205,39 @@ TEMPLATE_ELEMENT_SLOTS: dict[
         "kicker": EditorialElementType.TEXT,
         "cta": EditorialElementType.TEXT,
         "blackout": EditorialElementType.BLACK_SCREEN,
+    },
+}
+
+# These are semantic authoring limits, not a substitute for renderer-side
+# measurement. They keep planner output within a range the fixed compositions
+# can reasonably fit; Chromium performs the final font fit with the pinned
+# renderer fonts before a preview or export becomes ready.
+TEMPLATE_TEXT_CONSTRAINTS: dict[
+    EditorialTemplate, dict[str, EditorialTextConstraint]
+] = {
+    EditorialTemplate.ARCHIVE_CANVAS: {
+        "year": EditorialTextConstraint(max_characters=18, max_lines=1),
+        "paper": EditorialTextConstraint(max_characters=42, max_lines=2),
+        "reveal": EditorialTextConstraint(max_characters=24, max_lines=1),
+    },
+    EditorialTemplate.DOCUMENT_REVEAL: {
+        "document": EditorialTextConstraint(max_characters=420, max_lines=10),
+        "title": EditorialTextConstraint(max_characters=48, max_lines=3),
+        "annotation": EditorialTextConstraint(max_characters=140, max_lines=5),
+    },
+    EditorialTemplate.COMPARISON_CANVAS: {
+        "headline": EditorialTextConstraint(max_characters=52, max_lines=3),
+        "left-label": EditorialTextConstraint(max_characters=32, max_lines=2),
+        "right-label": EditorialTextConstraint(max_characters=32, max_lines=2),
+    },
+    EditorialTemplate.ILLUSTRATION_CANVAS: {
+        "headline": EditorialTextConstraint(max_characters=52, max_lines=3),
+        "supporting-text": EditorialTextConstraint(max_characters=180, max_lines=5),
+    },
+    EditorialTemplate.BIG_TEXT_REVEAL: {
+        "headline": EditorialTextConstraint(max_characters=60, max_lines=4),
+        "kicker": EditorialTextConstraint(max_characters=32, max_lines=2),
+        "cta": EditorialTextConstraint(max_characters=32, max_lines=2),
     },
 }
 
@@ -312,6 +354,20 @@ class EditorialComposition(DomainModel):
                 raise ValueError(
                     f"{self.template.value} role {element.role!r} requires type {expected.value}"
                 )
+            constraint = TEMPLATE_TEXT_CONSTRAINTS[self.template].get(element.role)
+            if constraint is not None and element.text:
+                normalized = " ".join(element.text.split())
+                if len(normalized) > constraint.max_characters:
+                    raise ValueError(
+                        f"{self.template.value} role {element.role!r} allows at most "
+                        f"{constraint.max_characters} characters"
+                    )
+                explicit_lines = len(element.text.splitlines()) or 1
+                if explicit_lines > constraint.max_lines:
+                    raise ValueError(
+                        f"{self.template.value} role {element.role!r} allows at most "
+                        f"{constraint.max_lines} explicit lines"
+                    )
         missing_roles = TEMPLATE_REQUIRED_ROLES[self.template] - set(roles)
         if missing_roles:
             raise ValueError(
