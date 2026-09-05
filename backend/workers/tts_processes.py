@@ -88,7 +88,10 @@ class TTSWorkerSupervisor:
     @classmethod
     def from_config(cls, config: AppConfig, *, output_root: Path) -> TTSWorkerSupervisor:
         specs: dict[str, TTSWorkerSpec] = {}
-        for provider in ("qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2"):
+        for provider in (
+            "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
+            "breeze_tts_2", "higgs_tts_3",
+        ):
             item = getattr(config.backends, provider)
             if not item.enabled or not item.managed:
                 continue

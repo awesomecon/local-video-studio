@@ -188,11 +188,14 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     modelOption("voxcpm2", "VoxCPM2 2B", models),
     modelOption("omnivoice", "OmniVoice", models),
     modelOption("fish_s2_pro", "Fish Audio S2 Pro", models),
-    modelOption("breeze_tts_2", "Breeze TTS 2 (≈3.5B)", models));
+    modelOption("breeze_tts_2", "Breeze TTS 2 (≈3.5B)", models),
+    modelOption("higgs_tts_3", "Higgs TTS 3 4B", models));
   provider.value = current.provider || "qwen_tts";
   const chatterboxBuiltIn = "__chatterbox_builtin__";
   const qwenBuiltInPrefix = "__qwen_builtin__:";
+  const higgsBuiltIn = "__higgs_default__";
   const builtInOption = el("option", { value: chatterboxBuiltIn }, "Built-in Chatterbox voice");
+  const higgsBuiltInOption = el("option", { value: higgsBuiltIn }, "Higgs default voice");
   const qwenSpeakers = [
     ["Ryan", "Ryan — dynamic English male"],
     ["Aiden", "Aiden — sunny American male"],
@@ -208,12 +211,14 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     el("option", { value: `${qwenBuiltInPrefix}${value}` }, `Qwen built-in: ${label}`));
   const voice = el("select", { class: "input" },
     builtInOption,
+    higgsBuiltInOption,
     ...qwenOptions,
     el("option", { value: "" }, voices.length ? "Select a saved profile" : "No saved profiles"),
     ...voices.map((item) => el("option", { value: item.id }, item.name)));
   voice.value = current.voice_profile_id ||
     (provider.value === "chatterbox" ? chatterboxBuiltIn :
-      provider.value === "qwen_tts" ? `${qwenBuiltInPrefix}${current.speaker || "Ryan"}` : "");
+      provider.value === "qwen_tts" ? `${qwenBuiltInPrefix}${current.speaker || "Ryan"}` :
+        provider.value === "higgs_tts_3" ? higgsBuiltIn : "");
   const language = languageSelect(current.language || "en");
   const chunk = el("input", { type: "number", class: "input", min: "5", max: "180",
     step: "5", value: current.chunk_seconds || "", placeholder: "Model default" });
@@ -258,6 +263,12 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       "Optional style instruction; keeps your cloned voice but steers tone, pace, and delivery."),
     field("CFG scale", breezeCfg,
       "Blank = auto (1.0 plain clone, 4.0 with voice direction). Raise to follow the direction more strictly."));
+  const higgsNote = el("div", { class: "callout" },
+    el("strong", {}, "Higgs inline controls"),
+    el("p", { class: "muted small" },
+      "Add tokens such as <|emotion:amusement|>, <|style:whispering|>, or "
+      + "<|prosody:long_pause|> directly in the script. Published creator content must "
+      + "prominently credit Boson AI's Higgs Audio under the model license."));
   const voxGrid = el("div", { class: "pref-grid" },
     field("CFG scale", cfgValue,
       "VoxCPM2 cfg_value: higher follows the text more strictly, lower sounds more natural."),
@@ -342,17 +353,26 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const syncProviderControls = () => {
     const chatterbox = provider.value === "chatterbox";
     const qwen = provider.value === "qwen_tts";
+    const higgs = provider.value === "higgs_tts_3";
     const cloneOnly = cloneProviders.includes(provider.value);
     builtInOption.disabled = !chatterbox;
+    higgsBuiltInOption.disabled = !higgs;
     for (const option of qwenOptions) option.disabled = !qwen;
-    if (chatterbox && (!voice.value || voice.value.startsWith(qwenBuiltInPrefix))) {
+    if (chatterbox && (!voice.value || voice.value === higgsBuiltIn ||
+        voice.value.startsWith(qwenBuiltInPrefix))) {
       voice.value = chatterboxBuiltIn;
     }
-    if (qwen && (!voice.value || voice.value === chatterboxBuiltIn)) {
+    if (qwen && (!voice.value || voice.value === chatterboxBuiltIn ||
+        voice.value === higgsBuiltIn)) {
       voice.value = `${qwenBuiltInPrefix}${current.speaker || "Ryan"}`;
     }
-    if ((!chatterbox && !qwen) &&
-        (voice.value === chatterboxBuiltIn || voice.value.startsWith(qwenBuiltInPrefix))) {
+    if (higgs && (!voice.value || voice.value === chatterboxBuiltIn ||
+        voice.value.startsWith(qwenBuiltInPrefix))) {
+      voice.value = higgsBuiltIn;
+    }
+    if ((!chatterbox && !qwen && !higgs) &&
+        (voice.value === chatterboxBuiltIn || voice.value === higgsBuiltIn ||
+          voice.value.startsWith(qwenBuiltInPrefix))) {
       voice.value = voices[0]?.id || "";
     }
     const referenceFreeQwen = qwen && voice.value.startsWith(qwenBuiltInPrefix);
@@ -362,6 +382,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     voxGrid.hidden = provider.value !== "voxcpm2";
     omniGrid.hidden = provider.value !== "omnivoice";
     breezeGrid.hidden = provider.value !== "breeze_tts_2";
+    higgsNote.hidden = !higgs;
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
     // Delivery tags are a Fish S2 Pro feature: hide the panel for every other
@@ -376,9 +397,11 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   generate.onclick = async () => {
     const builtInChatterbox = voice.value === chatterboxBuiltIn;
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
-    const builtIn = builtInChatterbox || builtInQwen;
+    const builtInHiggs = voice.value === higgsBuiltIn;
+    const builtIn = builtInChatterbox || builtInQwen || builtInHiggs;
     if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
-        (builtInQwen && provider.value !== "qwen_tts")) {
+        (builtInQwen && provider.value !== "qwen_tts") ||
+        (builtInHiggs && provider.value !== "higgs_tts_3")) {
       toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
       return;
     }
@@ -464,7 +487,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         field("Voice", voice,
           cloneProviders.includes(provider.value)
             ? "This model clones an authorized saved profile."
-            : "Qwen CustomVoice and Chatterbox include reference-free voices."),
+            : "Qwen, Chatterbox, and Higgs include reference-free voices."),
         field("Language", language, "Generation language."),
         field("Qwen delivery", voiceInstruction, "Optional style instruction for a built-in Qwen voice."),
         field("Chunk seconds", chunk, "Defaults: Qwen 60, Step 20, Chatterbox 45, comparison models 30."),
@@ -474,6 +497,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           ? "Blank uses planned scene narration and enables exact picture sync. Overrides are not mapped to scenes."
           : "This project has no planned narration yet. Enter text here or run planning from Script.")),
       breezeGrid,
+      higgsNote,
       voxGrid,
       omniGrid,
       enhanceRow,
@@ -963,6 +987,7 @@ function providerLabel(provider) {
     omnivoice: "OmniVoice",
     index_tts_2_5: "IndexTTS 2.5",
     breeze_tts_2: "Breeze TTS 2",
+    higgs_tts_3: "Higgs TTS 3 4B",
     recorded_voiceover: "Recorded voiceover",
   })[provider] || String(provider || "Unknown model");
 }

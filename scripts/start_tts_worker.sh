@@ -26,8 +26,14 @@ case "${provider}" in
     port="${LVS_CHATTERBOX_PORT:-8193}"
     extra=()
     ;;
+  higgs_tts_3)
+    python_bin="${LVS_HIGGS_PYTHON:-${HOME}/ai/services/sglang-omni/.venv/bin/python}"
+    model_path="${LVS_HIGGS_MODEL:-${HOME}/ai/models/tts/higgs/bosonai-higgs-tts-3-4b}"
+    port="${LVS_HIGGS_PORT:-8198}"
+    extra=()
+    ;;
   *)
-    echo "usage: $0 {qwen_tts|step_audio_editx|chatterbox}" >&2
+    echo "usage: $0 {qwen_tts|step_audio_editx|chatterbox|higgs_tts_3}" >&2
     exit 2
     ;;
 esac

@@ -22,9 +22,17 @@ from backend.models import (
 from backend.models.registry import BackendRegistry
 from backend.schemas import ProjectCreate, Scene, VisualType
 from backend.tts.models import NarrationRequest
-from services.tts_worker.app import BreezeProvider, GeneratePayload, OmniVoiceProvider
+from services.tts_worker.app import (
+    BreezeProvider,
+    GeneratePayload,
+    HiggsTTS3Provider,
+    OmniVoiceProvider,
+)
 
-COMPARISON_PROVIDERS = ("fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2")
+COMPARISON_PROVIDERS = (
+    "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2",
+    "higgs_tts_3",
+)
 
 
 def wav_bytes(*, frames: int = 800, sample_rate: int = 8000, sample: int = 0) -> bytes:
@@ -136,13 +144,31 @@ def test_comparison_providers_require_an_authorized_voice_profile(
 ) -> None:
     service = narration_service(tmp_path, monkeypatch)
     project = service.create_project(ProjectCreate(title="Consent", topic="t", target_duration=1))
-    for provider in COMPARISON_PROVIDERS:
+    for provider in (item for item in COMPARISON_PROVIDERS if item != "higgs_tts_3"):
         with pytest.raises(ValueError, match="requires an authorized reference voice"):
             service.tts.generate(
                 project.id,
                 NarrationRequest(provider=provider, voice_profile_id=None, text="Hi."),
                 job_id=f"job-{provider}",
             )
+
+
+def test_higgs_allows_its_default_voice_without_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(title="Higgs", topic="t", target_duration=1))
+    backend = RecordingComparisonBackend("higgs_tts_3")
+    service.registry.register(backend, name="higgs_tts_3", replace=True)
+
+    output = service.tts.generate(
+        project.id,
+        NarrationRequest(provider="higgs_tts_3", voice_profile_id=None, text="Hi."),
+        job_id="higgs-default",
+    )
+
+    assert output.is_file()
+    assert backend.calls == ["higgs-default:1"]
 
 
 @pytest.mark.parametrize("provider", COMPARISON_PROVIDERS)
@@ -425,6 +451,71 @@ def test_worker_cli_registers_the_fourth_provider() -> None:
 
     assert "omnivoice" in worker_app.ProviderName.__args__
     assert "breeze_tts_2" in worker_app.ProviderName.__args__
+    assert "higgs_tts_3" in worker_app.ProviderName.__args__
+
+
+def test_higgs_worker_builds_private_voice_clone_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+    from urllib import request as urllib_request
+
+    model_path = tmp_path / "higgs"
+    model_path.mkdir()
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(wav_bytes(sample=1200))
+    provider = HiggsTTS3Provider(model_path)
+    provider.model = True
+    captured: dict = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return wav_bytes(frames=1200, sample_rate=24000, sample=800)
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 1800
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
+    waveform, sample_rate = provider._generate(GeneratePayload(
+        job_id="higgs-job", text="<|emotion:contentment|>Hello.",
+        output_path=tmp_path / "out.wav", reference_audio=reference,
+        reference_text="Reference words.", seed=91, temperature=0.7,
+    ))
+
+    assert sample_rate == 24000
+    assert len(waveform) == 1200
+    assert captured["input"] == "<|emotion:contentment|>Hello."
+    assert captured["temperature"] == 0.7
+    assert captured["top_k"] == 50
+    assert captured["max_new_tokens"] == 1024
+    assert captured["seed"] == 91
+    item = captured["references"][0]
+    assert item["text"] == "Reference words."
+    assert item["audio_path"].startswith("data:audio/wav;base64,")
+    assert base64.b64decode(item["audio_path"].split(",", 1)[1]) == reference.read_bytes()
+
+
+def test_higgs_worker_allows_default_voice(tmp_path: Path) -> None:
+    provider = HiggsTTS3Provider(tmp_path / "higgs")
+    provider.model = True
+    provider._generate = lambda payload: ([0.0] * 100, 24000)  # type: ignore[method-assign]
+
+    result = provider.generate(GeneratePayload(
+        job_id="higgs-default", text="Hello.", output_path=tmp_path / "out.wav",
+    ))
+
+    assert Path(result["output_path"]).is_file()
+    assert result["metrics"]["higgs_reference_mode"] == "default"
 
 
 # ---------------------------------------------------------------------------

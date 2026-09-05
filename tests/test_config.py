@@ -13,10 +13,11 @@ def test_default_configuration_is_local_and_expands_paths() -> None:
     assert config.ports.backend == 8009
     # The external LLM port plus every configured service endpoint (shared and
     # Ideogram ComfyUI, Qwen3-TTS, Step-Audio-EditX, Chatterbox, OmniVoice,
-    # Breeze TTS 2 worker 8195 + official-API children 8196/8197) so selection
+    # Breeze TTS 2 worker 8195 + official-API children 8196/8197, and Higgs TTS
+    # 3 worker 8198 + SGLang-Omni child 8199) so selection
     # never claims one.
     assert config.ports.reserved == [
-        1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197,
+        1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199,
     ]
     assert config.paths.project_root == Path.home() / "ai/projects"
     assert config.cache_environment()["TORCH_HOME"].endswith("/ai/cache/torch")
@@ -30,6 +31,11 @@ def test_default_configuration_is_local_and_expands_paths() -> None:
     assert config.backends.breeze_tts_2.endpoint == "http://127.0.0.1:8195"
     assert config.backends.breeze_tts_2.python_path == Path.home() / "ai/services/breeze-tts/.venv/bin/python"
     assert config.backends.breeze_tts_2.model_path == Path.home() / "ai/models/tts/breeze/Breeze-TTS-2"
+    assert config.backends.higgs_tts_3.enabled is True
+    assert config.backends.higgs_tts_3.managed is True
+    assert config.backends.higgs_tts_3.endpoint == "http://127.0.0.1:8198"
+    assert config.backends.higgs_tts_3.python_path == Path.home() / "ai/services/sglang-omni/.venv/bin/python"
+    assert config.backends.higgs_tts_3.model_path == Path.home() / "ai/models/tts/higgs/bosonai-higgs-tts-3-4b"
 
 
 def test_local_configuration_overlay_is_optional_and_precedes_environment(tmp_path: Path) -> None:

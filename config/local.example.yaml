@@ -11,3 +11,6 @@ backends:
   breeze_tts_2:
     python_path: "/path/to/services/breeze-tts/.venv/bin/python"
     model_path: "/path/to/large-data-volume/models/tts/breeze/Breeze-TTS-2"
+  higgs_tts_3:
+    python_path: "/path/to/services/sglang-omni/.venv/bin/python"
+    model_path: "/path/to/large-data-volume/models/tts/higgs/bosonai-higgs-tts-3-4b"

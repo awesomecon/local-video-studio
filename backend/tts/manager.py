@@ -37,13 +37,13 @@ logger = logging.getLogger(__name__)
 _PROVIDER_DIR = {
     "qwen_tts": "qwen", "step_audio_editx": "step", "chatterbox": "chatterbox",
     "fish_s2_pro": "fish", "voxcpm2": "voxcpm", "omnivoice": "omnivoice",
-    "index_tts_2_5": "index", "breeze_tts_2": "breeze",
+    "index_tts_2_5": "index", "breeze_tts_2": "breeze", "higgs_tts_3": "higgs",
 }
 _DEFAULT_CHUNK = {
     "qwen_tts": 60.0, "step_audio_editx": 20.0, "chatterbox": 45.0,
     "fish_s2_pro": 30.0, "voxcpm2": 30.0, "omnivoice": 30.0, "index_tts_2_5": 30.0,
     # Provisional until the 15/30/45 s chunk benchmark lands (see handoff plan).
-    "breeze_tts_2": 30.0,
+    "breeze_tts_2": 30.0, "higgs_tts_3": 30.0,
 }
 
 
@@ -180,7 +180,7 @@ class TTSManager:
             self.get_voice_profile(project_id, request.voice_profile_id)
             if request.voice_profile_id else None
         )
-        if profile is None and request.provider not in {"chatterbox", "qwen_tts"}:
+        if profile is None and request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3"}:
             raise ValueError(f"{request.provider} requires an authorized reference voice")
         if profile is None and request.enhance_with_step:
             raise ValueError("Step enhancement requires an authorized reference voice")

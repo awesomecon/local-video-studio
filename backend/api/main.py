@@ -410,7 +410,9 @@ class LLMSelectionRequest(BaseModel):
 
 
 _COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "wan_comfyui", "ace_step_comfyui"})
-_TTS_BACKENDS = frozenset({"qwen_tts", "step_audio_editx", "chatterbox"})
+_TTS_BACKENDS = frozenset({
+    "qwen_tts", "step_audio_editx", "chatterbox", "higgs_tts_3",
+})
 
 
 def _model_runtime_status(
@@ -695,7 +697,7 @@ def create_app(
         names = (
             "qwen_tts", "step_audio_editx", "chatterbox",
             "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
-            "breeze_tts_2",
+            "breeze_tts_2", "higgs_tts_3",
         )
         models: dict[str, Any] = {}
         for name in names:
@@ -1302,7 +1304,7 @@ def create_app(
                 raise ValueError("Step enhancement is supported after Qwen generation")
             if request.voice_profile_id:
                 service.tts.get_voice_profile(project_id, request.voice_profile_id)
-            elif request.provider not in {"chatterbox", "qwen_tts"}:
+            elif request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3"}:
                 raise ValueError(f"{request.provider} requires an authorized reference voice")
             elif request.enhance_with_step:
                 raise ValueError("Step enhancement requires an authorized reference voice")

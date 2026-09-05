@@ -194,6 +194,10 @@ class BackendsConfig(StrictModel):
     # breeze_infer.api (one child process per engine mode; see
     # services/tts_worker/app.py BreezeProvider).
     breeze_tts_2: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
+    # Higgs TTS 3 uses an isolated LVS worker which owns a local SGLang-Omni
+    # child process. This keeps the serving stack and its Torch pin outside the
+    # application environment.
+    higgs_tts_3: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
 
 
 class RenderConfig(StrictModel):
@@ -263,7 +267,7 @@ class AppConfig(StrictModel):
         for name in (
             "comfyui", "h3", "qwen_tts", "step_audio_editx", "chatterbox",
             "ace_step", "whisper", "ideogram4_local", "fish_s2_pro", "voxcpm2", "index_tts_2_5",
-            "omnivoice", "breeze_tts_2",
+            "omnivoice", "breeze_tts_2", "higgs_tts_3",
         ):
             backend = getattr(self.backends, name)
             if backend.enabled and backend.endpoint:
@@ -274,7 +278,10 @@ class AppConfig(StrictModel):
                 raise ValueError(
                     f"{name} endpoint must be localhost when allow_remote_backends=false"
                 )
-        for name in ("qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2"):
+        for name in (
+            "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
+            "breeze_tts_2", "higgs_tts_3",
+        ):
             backend = getattr(self.backends, name)
             if backend.managed and not backend.enabled:
                 raise ValueError(f"{name} managed worker requires enabled=true")

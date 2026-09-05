@@ -36,9 +36,10 @@ ports:
   # 1234 is the external local LLM; the rest are the configured service
   # endpoints below (shared ComfyUI, Ideogram ComfyUI, Qwen3-TTS,
   # Step-Audio-EditX, Chatterbox, OmniVoice, Breeze worker 8195 and its
-  # official-API children 8196 eager / 8197 fast) so port selection can never
+  # official-API children 8196 eager / 8197 fast, and Higgs TTS 3 worker 8198
+  # plus SGLang-Omni child 8199) so port selection can never
   # claim a port another configured endpoint points at.
-  reserved: [1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197]
+  reserved: [1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199]
   auto_select_free_port: true
   allowed_range: [8000, 8999]
 
@@ -145,6 +146,17 @@ backends:
     managed: true
     python_path: "~/ai/services/breeze-tts/.venv/bin/python"
     model_path: "~/ai/models/tts/breeze/Breeze-TTS-2"
+    startup_timeout_seconds: 120
+  # Boson AI Higgs TTS 3 4B: the worker on 8198 owns a loopback-only
+  # SGLang-Omni child on 8199. The isolated environment has its own Torch pin.
+  # Weights are research/non-commercial, with a creator-use grant that requires
+  # prominent Boson AI Higgs Audio attribution for published creator content.
+  higgs_tts_3:
+    enabled: true
+    endpoint: "http://127.0.0.1:8198"
+    managed: true
+    python_path: "~/ai/services/sglang-omni/.venv/bin/python"
+    model_path: "~/ai/models/tts/higgs/bosonai-higgs-tts-3-4b"
     startup_timeout_seconds: 120
 
 render:

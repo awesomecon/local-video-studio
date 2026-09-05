@@ -20,6 +20,9 @@ _MODELS = {
     "chatterbox": ("Chatterbox Multilingual V3", "500M", 6.0),
     "omnivoice": ("OmniVoice (k2-fsa)", "0.2.1", 8.0),
     "breeze_tts_2": ("Breeze TTS 2 (≈3.5B)", "breeze-tts ca632ce6 (2026-08-26)", 8.0),
+    "higgs_tts_3": (
+        "Boson AI Higgs TTS 3 4B", "239f63fb7b02 / SGLang-Omni 7989a5ed2735", 20.0,
+    ),
 }
 
 
@@ -54,6 +57,8 @@ class TTSServiceBackend(GeneratorBackend):
             inputs.extend(("voice_instruction", "num_step", "guidance_scale", "speed"))
         if self.backend_name == "breeze_tts_2":
             inputs.extend(("voice_instruction", "guidance_scale", "breeze_mode"))
+        if self.backend_name == "higgs_tts_3":
+            inputs.extend(("inline_control_tokens", "temperature", "max_new_tokens"))
         return BackendDescriptor(
             backend_name=self.backend_name,
             model_name=model,

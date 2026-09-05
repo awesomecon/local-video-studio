@@ -15,6 +15,7 @@ from backend.schemas import utc_now
 TTSProviderName = Literal[
     "qwen_tts", "step_audio_editx", "chatterbox",
     "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2",
+    "higgs_tts_3",
 ]
 QwenSpeaker = Literal[
     "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee",

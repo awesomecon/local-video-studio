@@ -154,3 +154,24 @@ def test_two_managed_providers_sharing_one_port_are_rejected(tmp_path: Path) -> 
             popen_factory=lambda *args, **kwargs: pytest.fail("must not spawn"),
             health_probe=lambda endpoint: None,
         )
+
+
+def test_supervisor_discovers_higgs_managed_worker(tmp_path: Path) -> None:
+    from backend.core import load_config
+
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    model = tmp_path / "higgs-model"
+    model.mkdir()
+    config = load_config(environ={
+        "LOCAL_VIDEO_STUDIO__BACKENDS__HIGGS_TTS_3__PYTHON_PATH": str(python),
+        "LOCAL_VIDEO_STUDIO__BACKENDS__HIGGS_TTS_3__MODEL_PATH": str(model),
+    })
+
+    supervisor = TTSWorkerSupervisor.from_config(config, output_root=tmp_path / "projects")
+
+    assert supervisor.specs["higgs_tts_3"].endpoint == "http://127.0.0.1:8198"
+    assert supervisor._command(supervisor.specs["higgs_tts_3"])[3:5] == [
+        "--provider", "higgs_tts_3",
+    ]

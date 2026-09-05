@@ -214,13 +214,14 @@ class PipelineService:
     _TTS_PROVIDER_NAMES: tuple[str, ...] = (
         "qwen_tts", "step_audio_editx", "chatterbox",
         "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
-        "breeze_tts_2",
+        "breeze_tts_2", "higgs_tts_3",
     )
     # Providers that ship with an isolated worker process supervised by
     # TTSWorkerSupervisor. ComfyUI-backed providers (fish/voxcpm/index) are
     # intentionally excluded: they share the image/video ComfyUI on 8188.
     _TTS_ISOLATED_WORKER_NAMES: frozenset[str] = frozenset({
         "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2",
+        "higgs_tts_3",
     })
 
     def __init__(
@@ -6439,7 +6440,7 @@ class PipelineService:
         """Release a TTS provider's loaded model and stop only the owned worker.
 
         Covers both the isolated-worker providers (qwen_tts, step_audio_editx,
-        chatterbox, omnivoice, breeze_tts_2) and the ComfyUI workflow adapters
+        chatterbox, omnivoice, breeze_tts_2, higgs_tts_3) and the ComfyUI workflow adapters
         (fish_s2_pro, voxcpm2, index_tts_2_5). For isolated workers, ``unload``
         asks the worker process to drop its loaded weights; for ComfyUI-backed
         providers, it posts to ComfyUI's ``/free`` to release cached models and

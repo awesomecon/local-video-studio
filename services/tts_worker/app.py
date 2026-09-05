@@ -7,11 +7,17 @@ never imports model packages and therefore cannot disturb ComfyUI's runtime.
 from __future__ import annotations
 
 import argparse
+import base64
 import gc
 import hashlib
 import http.client
+import io
+import importlib.metadata
 import json
 import os
+import shutil
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -30,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ProviderName = Literal[
     "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2",
+    "higgs_tts_3",
 ]
 
 
@@ -681,6 +688,242 @@ class BreezeProvider(SpeechProvider):
         }
 
 
+class HiggsTTS3Provider(SpeechProvider):
+    """Local adapter for Boson AI Higgs TTS 3 through SGLang-Omni.
+
+    SGLang-Omni has a separate, tightly pinned Torch stack, so the LVS worker
+    starts it as a child of the isolated provider process. Reference clips are
+    passed as data URLs: the child stays loopback-only and receives no blanket
+    permission to read project files.
+    """
+
+    name: ProviderName = "higgs_tts_3"
+    requires_reference = False
+
+    def __init__(self, model_path: Path, tokenizer_path: Path | None = None) -> None:
+        super().__init__(model_path, tokenizer_path)
+        self._child: subprocess.Popen[bytes] | None = None
+        self._runtime_version = "unrecorded"
+        import atexit
+
+        atexit.register(self._stop_child)
+
+    @staticmethod
+    def _port() -> int:
+        return int(os.environ.get("LVS_HIGGS_TTS_ENGINE_PORT", "8199"))
+
+    @staticmethod
+    def _min_free_gb() -> float:
+        return float(os.environ.get("LVS_HIGGS_TTS_MIN_FREE_GB", "18"))
+
+    @staticmethod
+    def _free_vram_gb() -> float | None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                free, _total = torch.cuda.mem_get_info()
+                return free / 1024**3
+        except (ImportError, RuntimeError, OSError):
+            return None
+        return None
+
+    @staticmethod
+    def _server_executable() -> Path:
+        return Path(sys.executable).with_name("sgl-omni")
+
+    def _spawn(self, command: list[str], environment: dict[str, str]) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(
+            command, env=environment, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+
+    def _load(self) -> Any:
+        executable = self._server_executable()
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise FileNotFoundError(
+                f"SGLang-Omni launcher is unavailable: {executable}"
+            )
+        free = self._free_vram_gb()
+        minimum = self._min_free_gb()
+        if free is not None and free < minimum:
+            raise RuntimeError(
+                f"Higgs TTS 3 needs about {minimum:g} GiB free VRAM to start safely "
+                f"({free:.1f} GiB free)."
+            )
+        port = self._port()
+        with socket.socket() as probe:
+            probe.settimeout(0.25)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(
+                    f"Higgs engine port {port} is already occupied; the worker will not "
+                    "reuse or stop an externally owned process."
+                )
+        environment = os.environ.copy()
+        environment["PYTHONUNBUFFERED"] = "1"
+        venv_root = Path(sys.executable).parent.parent
+        bundled_cuda_roots = sorted(
+            (venv_root / "lib").glob("python*/site-packages/nvidia/cu13")
+        )
+        cuda_root_value = os.environ.get("LVS_HIGGS_TTS_CUDA_HOME")
+        if not cuda_root_value and bundled_cuda_roots:
+            cuda_root_value = str(bundled_cuda_roots[0])
+        if cuda_root_value:
+            cuda_root = Path(cuda_root_value).expanduser()
+            bundled_nvcc = cuda_root / "bin" / "nvcc"
+            if bundled_nvcc.is_file():
+                environment["CUDA_HOME"] = str(cuda_root)
+                environment["CUDACXX"] = str(bundled_nvcc)
+                environment["PATH"] = (
+                    f"{cuda_root / 'bin'}{os.pathsep}{environment.get('PATH', '')}"
+                )
+        # FlashInfer compiles CUDA kernels on first load. Prefer a compatible
+        # host compiler when it is installed, while respecting explicit
+        # operator choices on machines with a different CUDA toolchain.
+        compatible_cc = os.environ.get("LVS_HIGGS_TTS_CC") or shutil.which("gcc-13")
+        compatible_cxx = os.environ.get("LVS_HIGGS_TTS_CXX") or shutil.which("g++-13")
+        if compatible_cc and compatible_cxx:
+            environment.setdefault("CC", compatible_cc)
+            environment.setdefault("CXX", compatible_cxx)
+            environment.setdefault("NVCC_CCBIN", compatible_cxx)
+            environment.setdefault("NVCC_PREPEND_FLAGS", f"-ccbin={compatible_cxx}")
+        system_libstdcpp = os.environ.get("LVS_HIGGS_TTS_LIBSTDCXX")
+        if not system_libstdcpp:
+            candidate = Path("/usr/lib/x86_64-linux-gnu/libstdc++.so.6")
+            if candidate.is_file():
+                system_libstdcpp = str(candidate)
+        if system_libstdcpp:
+            environment.setdefault("LD_PRELOAD", system_libstdcpp)
+        command = [
+            str(executable), "serve", "--model-path", str(self.model_path),
+            "--model-name", "higgs_tts_3",
+            "--host", "127.0.0.1", "--port", str(port),
+            "--mem-fraction-static",
+            os.environ.get("LVS_HIGGS_TTS_MEM_FRACTION_STATIC", "0.65"),
+        ]
+        try:
+            self._child = self._spawn(command, environment)
+            self._wait_healthy(port)
+            try:
+                self._runtime_version = importlib.metadata.version("sglang-omni")
+            except importlib.metadata.PackageNotFoundError:
+                self._runtime_version = "unrecorded"
+        except Exception:
+            self._stop_child()
+            raise
+        return True
+
+    def unload(self) -> None:
+        self._stop_child()
+        super().unload()
+
+    def _stop_child(self) -> None:
+        child = self._child
+        self._child = None
+        if child is None:
+            return
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            if child.poll() is None:
+                child.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+        # The SGLang launcher can exit before its multiprocessing stage
+        # workers. Kill any remainder in the private child process group.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        if child.poll() is None:
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _wait_healthy(self, port: int) -> None:
+        timeout = float(os.environ.get("LVS_HIGGS_TTS_STARTUP_TIMEOUT_SECONDS", "600"))
+        deadline = time.monotonic() + timeout
+        url = f"http://127.0.0.1:{port}/health"
+        last_error = "no response yet"
+        while time.monotonic() < deadline:
+            if self._child is not None and self._child.poll() is not None:
+                raise RuntimeError(
+                    f"Higgs SGLang-Omni engine exited during startup with code "
+                    f"{self._child.returncode}; see the worker log."
+                )
+            try:
+                with _urllib_request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        return
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(0.5)
+        raise RuntimeError(f"Timed out starting the Higgs engine ({last_error}).")
+
+    def _generate(self, payload: GeneratePayload) -> tuple[Any, int]:
+        import numpy as np
+        import soundfile as sf
+
+        body: dict[str, Any] = {
+            "model": "higgs_tts_3",
+            "voice": "default",
+            "input": payload.text,
+            "response_format": "wav",
+            "temperature": payload.temperature,
+            "top_k": 50,
+            "max_new_tokens": payload.max_new_tokens or 1024,
+            "seed": payload.seed,
+        }
+        if payload.reference_audio is not None:
+            encoded = base64.b64encode(payload.reference_audio.read_bytes()).decode("ascii")
+            body["references"] = [{
+                "audio_path": f"data:audio/wav;base64,{encoded}",
+                "text": payload.reference_text or "",
+            }]
+        request = _urllib_request.Request(
+            f"http://127.0.0.1:{self._port()}/v1/audio/speech",
+            data=json.dumps(body).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with _urllib_request.urlopen(request, timeout=1800) as response:
+                audio_bytes = response.read()
+        except _urllib_error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:1000]
+            raise RuntimeError(
+                f"Higgs SGLang-Omni API returned HTTP {exc.code}: {detail}"
+            ) from None
+        except (OSError, _urllib_error.URLError) as exc:
+            raise RuntimeError(f"Higgs SGLang-Omni API is unreachable: {exc}") from None
+        if not audio_bytes:
+            raise RuntimeError("Higgs SGLang-Omni API returned empty audio")
+        try:
+            audio, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        except Exception as exc:
+            raise RuntimeError(f"Higgs API returned invalid WAV audio: {exc}") from None
+        return np.asarray(audio, dtype=np.float32), int(sample_rate)
+
+    def _extra_metrics(self, payload: GeneratePayload) -> dict[str, Any]:
+        return {
+            "higgs_runtime": "sglang-omni",
+            "higgs_runtime_version": self._runtime_version,
+            "higgs_hf_revision": self._hf_revision(),
+            "higgs_reference_mode": "clone" if payload.reference_audio else "default",
+            "license": "Boson Higgs TTS 3 Research and Non-Commercial License",
+            "creator_attribution_required": True,
+        }
+
+    def _hf_revision(self) -> str:
+        pin = self.model_path / "lvs-pinned-revision.json"
+        try:
+            data = json.loads(pin.read_text(encoding="utf-8"))
+            return str(data.get("revision", "unrecorded"))
+        except (OSError, ValueError):
+            return "unrecorded"
+
+
 def _reference_key(path: Path, extra: str) -> str:
     stat = path.stat()
     return hashlib.sha256(
@@ -806,7 +1049,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run one isolated local TTS provider")
     parser.add_argument(
         "--provider",
-        choices=("qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2"),
+        choices=(
+            "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
+            "breeze_tts_2", "higgs_tts_3",
+        ),
         required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--tokenizer-path", type=Path)
@@ -822,6 +1068,7 @@ def main() -> None:
         "chatterbox": ChatterboxProvider,
         "omnivoice": OmniVoiceProvider,
         "breeze_tts_2": BreezeProvider,
+        "higgs_tts_3": HiggsTTS3Provider,
     }
     provider = classes[args.provider](args.model_path.expanduser(), args.tokenizer_path)
     uvicorn.run(create_app(provider, output_root=args.output_root), host=args.host, port=args.port)

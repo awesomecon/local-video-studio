@@ -13,6 +13,7 @@ Providers, by runtime:
 | Chatterbox Multilingual V3 | isolated venv worker | 8193 |
 | OmniVoice (k2-fsa) | isolated venv worker | 8194 |
 | Breeze TTS 2 | managed worker + one official-API child | 8195 (worker), 8196 eager / 8197 fast (children) |
+| Higgs TTS 3 4B | managed worker + SGLang-Omni child | 8198 (worker), 8199 (child) |
 | Fish Audio S2 Pro | shared ComfyUI workflow | 8188 |
 | VoxCPM2 2B | shared ComfyUI workflow | 8188 |
 | IndexTTS 2.5 | shared ComfyUI workflow | 8188 |
@@ -34,6 +35,7 @@ location works.
 | Chatterbox Multilingual V3 | `~/ai/services/chatterbox/.venv` | `~/ai/models/tts/chatterbox-v3` | 8193 |
 | OmniVoice | `<service-root>/OmniVoice/.venv` (locked environment) | `<model-root>/tts/omnivoice/OmniVoice` (about 3.1 GB) | 8194 |
 | Breeze TTS 2 | `<service-root>/breeze-tts/.venv` | `<model-root>/tts/breeze/Breeze-TTS-2` (about 7.0 GB) | 8195 |
+| Higgs TTS 3 4B | `~/ai/services/sglang-omni/.venv` | `~/ai/models/tts/higgs/bosonai-higgs-tts-3-4b` (about 9.3 GB) | 8198 |
 
 Chatterbox's selected Multilingual V3 inference files are installed at the
 listed model path; unrelated checkpoints from the larger repository were not downloaded.
@@ -52,11 +54,12 @@ does not require them:
 scripts/start_tts_worker.sh qwen_tts
 scripts/start_tts_worker.sh step_audio_editx
 scripts/start_tts_worker.sh chatterbox
+scripts/start_tts_worker.sh higgs_tts_3
 ```
 
 The script binds only to `127.0.0.1`. Override paths with `LVS_QWEN_MODEL`,
 `LVS_STEP_MODEL`, `LVS_STEP_TOKENIZER`, `LVS_CHATTERBOX_MODEL`, or
-`LVS_TTS_OUTPUT_ROOT`. Worker caches default to `~/ai/cache` and can be moved
+`LVS_HIGGS_MODEL`, or `LVS_TTS_OUTPUT_ROOT`. Worker caches default to `~/ai/cache` and can be moved
 with `LVS_AI_CACHE_ROOT`. Enable/configure the matching backend in the application
 configuration when its worker is running.
 
@@ -107,6 +110,36 @@ hashed).
   the checkout that owns the venv running the worker (`<checkout>/.venv` — how the supervisor
   launches it, so a relocated checkout works as long as `python_path` points at that venv), then
   `~/ai/services/breeze-tts`.
+
+### Higgs TTS 3 4B
+
+`bosonai/higgs-tts-3-4b` runs through the official SGLang-Omni serving path. The
+Studio-owned worker on 8198 starts one loopback-only SGLang-Omni child on 8199,
+waits for it to load, forwards WAV generation requests, and terminates it during
+unload. Voice references are sent as base64 data URLs, so the child receives no
+broad project-directory access.
+
+The worker defaults `LVS_HIGGS_TTS_MEM_FRACTION_STATIC` to `0.65` so a 24 GB
+card retains synthesis headroom alongside normal desktop GPU use. It requires
+18 GiB free before startup by default; override that safety threshold with
+`LVS_HIGGS_TTS_MIN_FREE_GB` only when the memory profile is understood.
+
+Run `scripts/install_higgs_tts_3.sh` to install only the pinned isolated runtime,
+or `scripts/install_higgs_tts_3.sh --download` to explicitly download the roughly
+9.3 GB checkpoint as well. The script checks disk headroom first and preserves the
+50 GiB project reserve. It never changes the system NVIDIA, CUDA, or application
+Python installations.
+
+Higgs accepts a saved, consent-authorized reference voice or its default voice.
+For best clone fidelity, store the exact reference transcript. It also accepts
+inline controls such as `<|emotion:amusement|>`, `<|style:whispering|>`, and
+`<|prosody:long_pause|>` directly in narration text. The default generation
+profile is temperature 0.8, top-k 50, and 1024 new audio-token steps.
+
+The weights use the Boson Higgs TTS 3 Research and Non-Commercial License. The
+Creator Use Grant permits monetized podcasts, videos, and social posts when the
+accompanying content prominently credits Boson AI's Higgs Audio. Other production,
+hosted-service, or embedded-product use requires a separate commercial license.
 
 ## Voice and output behavior
 

@@ -123,7 +123,10 @@ class BackendRegistry:
         registry.register(WanBackend(endpoint=comfy_endpoint))
         h3 = backends.get("h3", {})
         registry.register(H3Backend(endpoint=h3.get("endpoint")))
-        for name in ("qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2"):
+        for name in (
+            "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
+            "breeze_tts_2", "higgs_tts_3",
+        ):
             tts = backends.get(name, {})
             registry.register(TTSServiceBackend(name, tts.get("endpoint")))
         tts_workflows_dir = Path(__file__).resolve().parents[2] / "workflows" / "comfyui" / "tts"
