@@ -7,6 +7,10 @@ deterministic assembly, and stores projects in portable, human-readable director
 The deterministic mock pipeline works without model downloads. Real image, video, speech, music,
 and caption models are optional local backends with separate installation and licensing requirements.
 
+> **Repository note (Sep 5, 2026):** the `main` history was cleaned up; no code changed. If an
+> existing clone reports divergent branches on pull, run `git fetch origin`, then
+> `git checkout main && git reset --hard origin/main` (back up any unpushed work first).
+
 ## Requirements
 
 - Python 3.11 or 3.12
