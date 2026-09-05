@@ -1098,6 +1098,7 @@ def create_app(
                 plan = retimed
             html = compile_edit_plan_html(
                 plan,
+                asset_root=service.store.project_path(service._project(project_id)),
                 asset_url_resolver=lambda asset: (
                     f"/api/projects/{project_id}/assets/{asset.asset_id}/file"
                     if asset.asset_id else None

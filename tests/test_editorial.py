@@ -1339,7 +1339,8 @@ def test_document_reveal_binds_roles_to_layout_regions() -> None:
     )
     assert 'id="sheet-7f" class="source-sheet editorial-element"' in html
     assert 'id="title-9c" class="document-title fit-text editorial-element editorial-type"' in html
-    assert 'id="mark-31" class="passage-mark draw editorial-element"' in html
+    # A named animation slot is not evidence of where a quotation appears.
+    assert 'id="mark-31"' not in html.split("<script>")[0]
     assert 'id="note-b2" class="annotation fit-text editorial-element editorial-type"' in html
     assert 'id="photo-91e" class="context-photo editorial-element"' in html
     assert 'id="join-08" class="connector-line draw editorial-element"' in html
@@ -1470,7 +1471,7 @@ def test_big_text_reveal_uses_renderer_measured_type_fitting() -> None:
     assert 'data-fit-min="50" data-fit-max="250"' in html
     assert "function fitEditorialText()" in html
     assert "document.fonts.load" in html
-    assert "pinnedFontsReady.then(()=>document.fonts.ready)" in html
+    assert "Promise.all([pinnedFontsReady,sourceImagesReady]).then(()=>document.fonts.ready)" in html
     assert "big-headline-medium" not in html
     assert "big-headline-long" not in html
 
