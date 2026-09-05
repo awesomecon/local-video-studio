@@ -1463,7 +1463,14 @@ class PipelineService:
                 script = None
         if word_timings is None:
             try:
-                word_timings = self._editorial_word_timings(project)
+                # Provenance tracks the artifact itself, not its usability:
+                # a newly appeared or modified word-timings.json means the
+                # plan's evidence changed, so the plan is stale even before
+                # captions are regenerated. Rendering paths keep the
+                # master-match gate via the default.
+                word_timings = self._editorial_word_timings(
+                    project, require_master_match=False,
+                )
             except PipelineError:
                 word_timings = None
 
@@ -1540,13 +1547,15 @@ class PipelineService:
             "stale_reasons": reasons,
         }
 
-    def _editorial_word_timings(self, project: Project) -> list[CaptionWord]:
+    def _editorial_word_timings(
+        self, project: Project, *, require_master_match: bool = True,
+    ) -> list[CaptionWord]:
         path = self.store.project_path(project) / "subtitles" / "word-timings.json"
         if not path.is_file():
             return []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if not self._word_timings_match_narration(project, payload):
+            if require_master_match and not self._word_timings_match_narration(project, payload):
                 return []
             return [
                 CaptionWord(
