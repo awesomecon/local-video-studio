@@ -27,6 +27,7 @@ from .models import (
     EditPlan, EditorialAsset, EditorialComposition, EditorialElement, EvidenceClass,
     EditorialTemplate,
 )
+from .passages import locate_passage
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
@@ -64,7 +65,7 @@ def _font_bundle_digest() -> str:
 
 EDITORIAL_FONT_BUNDLE_SHA256 = _font_bundle_digest()
 EDITORIAL_RENDER_WORKFLOW_VERSION = (
-    f"editorial-archive-dossier-v14-{EDITORIAL_FONT_BUNDLE_SHA256[:12]}"
+    f"editorial-archive-dossier-v16-{EDITORIAL_FONT_BUNDLE_SHA256[:12]}"
 )
 
 
@@ -143,6 +144,44 @@ def _source_caption(asset: EditorialAsset | None) -> str:
         f'<div class="source-caption fit-text editorial-type" '
         f'{_fit_attrs(minimum=10, maximum=20, height=48, lines=2)}>'
         f'{escape(asset.label.strip())}</div>'
+    )
+
+
+def _passage_media(
+    composition: EditorialComposition,
+    document: EditorialElement | None,
+    mark: EditorialElement | None,
+    resolver: AssetURLResolver | None,
+) -> tuple[str, str]:
+    asset = _asset(composition, document)
+    source = resolver(asset) if asset is not None and resolver else None
+    # A mark must name the actual source words. Legacy plans with no target
+    # retain their document, but no longer underline an invented position.
+    quote = mark.text.strip() if mark else ""
+    if not quote and document and composition.template is EditorialTemplate.DOCUMENT_REVEAL:
+        quote = document.text.strip()
+    located = locate_passage(source, quote) if source and mark and quote else None
+    boxes = ()
+    if located:
+        source, boxes = located
+    image = _asset_image(composition, document, lambda _: source, class_name="document-image")
+    if not boxes or mark is None:
+        return image, ""
+    image += (
+        '<blockquote class="passage-quote editorial-type">'
+        '<span class="passage-quote-label">SOURCE EXCERPT</span>'
+        f'<span class="passage-quote-text fit-text" '
+        f'{_fit_attrs(minimum=32, maximum=54, height=320, lines=6)}>'
+        f'“{escape(quote)}”</span></blockquote>'
+    )
+    spans = "".join(
+        '<span class="verified-word-line" data-box="'
+        + ",".join(f"{value:.8f}" for value in box) + '"></span>'
+        for box in boxes
+    )
+    return image, (
+        f'<div id="{escape(mark.id, quote=True)}" '
+        f'class="verified-passage draw editorial-element">{spans}</div>'
     )
 
 
@@ -225,6 +264,7 @@ def _archive_markup(
         else "Documentary source material arranged on the editorial canvas."
     )
     ruler_count = rulers.count if rulers else 10
+    document_image, passage_markup = _passage_media(composition, document, passage, resolver)
     nodes = "".join(
         f'<div class="ruler-node" data-ruler="{index}"><span>{index + 1:02d}</span>'
         f'<b class="ruler-chief">CHIEF</b></div>'
@@ -242,11 +282,11 @@ def _archive_markup(
             {_source_caption(photo_asset)}
           </div>
           <div id="{escape(document.id if document else 'document', quote=True)}" class="document editorial-element" data-rest-rotate="2">
-            {_asset_image(composition, document, resolver, class_name="document-image")}
+            {document_image}
             <h2 id="{escape((document.id if document else 'document') + '-title', quote=True)}" class="fit-text editorial-type" {_fit_attrs(minimum=24, maximum=62, height=150, lines=2, landscape_minimum=24, landscape_maximum=62, landscape_height=140)}>{escape(document.text if document and document.text else "DOCUMENT")}</h2>
             <div class="rule"></div>
             <p id="{escape((document.id if document else 'document') + '-copy', quote=True)}" class="document-copy fit-text editorial-type" {_fit_attrs(minimum=18, maximum=27, height=220, lines=5)}>{escape(document_copy)}</p>
-            <div id="{escape(passage.id if passage else 'passage', quote=True)}" class="passage draw editorial-element"></div>
+            {passage_markup}
           </div>
           <div id="{escape(rulers.id if rulers else 'rulers', quote=True)}" class="ruler-grid editorial-element">{nodes}</div>
         </div>
@@ -301,6 +341,7 @@ def _document_reveal_markup(
         else ""
     )
     context_asset = _asset(composition, context)
+    document_image, passage_markup = _passage_media(composition, document, mark, resolver)
     return f"""
       <section class="{section_class}" data-composition="{escape(composition.id, quote=True)}"{section_style}>
         <div class="grain"></div>
@@ -308,9 +349,9 @@ def _document_reveal_markup(
           <div class="technical-line line-a"></div><div class="technical-line line-b"></div>
           <div id="{escape(title.id if title else 'title', quote=True)}" class="document-title fit-text editorial-element editorial-type" {_fit_attrs(minimum=46, maximum=104, height=230, lines=3, landscape_minimum=38, landscape_maximum=82, landscape_height=120, landscape_lines=2)}>{escape(title.text if title else "")}</div>
           <div id="{escape(document.id if document else 'document', quote=True)}" class="{sheet_class} editorial-element" data-rest-rotate="1">
-            {_asset_image(composition, document, resolver, class_name="document-image")}
+            {document_image}
             {document_copy_tag}
-            <div id="{escape(mark.id if mark else 'passage-mark', quote=True)}" class="passage-mark draw editorial-element"></div>
+            {passage_markup}
           </div>
           <div id="{escape(connector.id if connector else 'connector', quote=True)}" class="connector-line draw editorial-element"></div>
           <div id="{escape(annotation.id if annotation else 'annotation', quote=True)}" class="annotation fit-text editorial-element editorial-type" {_fit_attrs(minimum=19, maximum=28, height=230, lines=5, landscape_minimum=18, landscape_maximum=28, landscape_height=170)}>{escape(annotation.text if annotation else "")}</div>
@@ -433,6 +474,7 @@ def compile_edit_plan_html(
     plan: EditPlan,
     *,
     asset_url_resolver: AssetURLResolver | None = None,
+    asset_root: Path | None = None,
     captions: Sequence[dict[str, Any]] = (),
     show_placeholders: bool = True,
 ) -> str:
@@ -452,6 +494,12 @@ def compile_edit_plan_html(
     if unimplemented:
         raise ValueError(
             f"the deterministic renderer does not implement template: {', '.join(unimplemented)}"
+        )
+    if asset_root is not None:
+        fallback_resolver = asset_url_resolver
+        asset_url_resolver = lambda asset: (
+            EditorialRenderer._data_asset_url(asset_root, asset)
+            or (fallback_resolver(asset) if fallback_resolver else None)
         )
     markup = "".join(
         _TEMPLATE_MARKUP[item.template](item, asset_url_resolver)
@@ -502,7 +550,7 @@ body{{font-family:"LVS Noto Sans",sans-serif}}
 .document-image{{position:absolute;inset:0;width:100%;height:100%;opacity:.2;filter:sepia(.35) contrast(.85)}}
 .document-image.evidence-image{{object-fit:contain;opacity:.96;filter:sepia(.08) contrast(1.02);background:#e5ddca}}
 .document:has(.document-image.evidence-image)>h2,.document:has(.document-image.evidence-image)>.rule,.document:has(.document-image.evidence-image)>.document-copy,.document:has(.document-image.evidence-image)>p{{display:none}}
-.document>*:not(.document-image):not(.passage):not(.paper-stamp){{position:relative;z-index:2}}
+.document>*:not(.document-image):not(.passage):not(.paper-stamp):not(.verified-passage):not(.passage-quote){{position:relative;z-index:2}}
 .paper-index{{font:18px monospace;letter-spacing:2px;color:#6e675b}} .document h2{{margin:95px 0 6px;font:700 62px/1 "LVS Noto Serif",serif;letter-spacing:1px}} .document>p{{margin:0;font:22px "LVS Noto Serif",serif;letter-spacing:3px}}
 .document .rule{{height:2px;background:#2b2925;margin:24px 0 42px}} .document .document-copy{{font:27px/1.65 "LVS Noto Serif",serif;letter-spacing:0}}
 .passage{{position:absolute;left:54px;right:54px;top:394px;height:8px;border-bottom:5px solid var(--rust);background:transparent;transform-origin:left center}}
@@ -529,9 +577,17 @@ body{{font-family:"LVS Noto Sans",sans-serif}}
 .document-reveal-strip .annotation{{top:calc(436px + var(--source-sheet-height))}}
 .document-reveal-strip .context-photo{{top:calc(416px + var(--source-sheet-height))}}
 .source-sheet:has(.document-image.evidence-image)>.document-copy{{display:none}}
-.source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp){{position:relative;z-index:2}}
+.source-sheet>*:not(.document-image):not(.passage-mark):not(.paper-stamp):not(.verified-passage):not(.passage-quote){{position:relative;z-index:2}}
 .source-sheet .paper-index{{margin-top:0}} .source-sheet .document-copy{{font:30px/1.72 "LVS Noto Serif",serif;margin:44px 0 0;letter-spacing:0}}
 .passage-mark{{position:absolute;left:56px;right:56px;top:196px;height:34px;border-bottom:8px solid var(--rust);background:#b9532f26;transform-origin:left center}}
+.document>.verified-passage,.source-sheet>.verified-passage{{position:absolute;inset:0;z-index:3;pointer-events:none;transform-origin:left center}}
+.verified-word-line{{position:absolute;background:#eabd3840;border-bottom:3px solid #a33b1e}}
+.document:has(.verified-passage) .document-image,.source-sheet:has(.verified-passage) .document-image{{object-fit:contain;opacity:1;filter:none}}
+.source-sheet:not(.source-sheet-strip):has(.verified-passage) .document-image{{height:45%}}
+.passage-quote{{display:none}}
+.source-sheet:not(.source-sheet-strip)>.passage-quote{{display:block;position:absolute;left:48px;right:48px;top:48%;margin:0;color:#241f19;font:700 50px/1.3 "LVS Noto Serif",serif;text-align:left}}
+.passage-quote-label{{display:block;margin-bottom:20px;font:700 18px/1.3 "LVS Noto Sans",sans-serif;letter-spacing:3px;color:#6d4b31}}
+.passage-quote-text{{display:block}}
 .connector-line{{position:absolute;left:72px;top:1268px;width:520px;height:2px;background:var(--blue);transform-origin:left center}}
 .annotation{{position:absolute;left:72px;top:1308px;width:500px;font:28px/1.6 "LVS Noto Serif",serif;color:var(--ivory);border-left:3px solid var(--rust);padding-left:26px}}
 .context-photo{{position:absolute;right:72px;top:1288px;width:380px;height:520px;padding:16px;background:#c9bea4;box-shadow:0 30px 80px #0008;transform:rotate(-1.6deg)}}
@@ -606,7 +662,7 @@ line-height:1.3;
 /* Ordinary beats keep a soft scrim so they stay comfortably readable over
    bright frames (documents, photographs) while the cream block stays the
    loud emphasis. */
-.caption-style-editorialPhrase .cap:not(.highlight),.caption-style-quietDocumentary .cap:not(.highlight),.caption-style-oneLine .cap:not(.highlight),.caption-style-oneWord .cap:not(.highlight){{background:rgba(9,10,12,.44);padding:3px 12px}}
+.caption-style-editorialPhrase .cap:not(.highlight),.caption-style-quietDocumentary .cap:not(.highlight),.caption-style-oneLine .cap:not(.highlight),.caption-style-oneWord .cap:not(.highlight){{background:rgba(9,10,12,.9);padding:3px 12px;color:#fff}}
 .caption-style-editorialPhrase .cap{{font-size:48px;padding-left:16px;border-left:3px solid var(--rust)}}
 .caption-style-editorialPhrase .cap:not(.highlight){{padding-left:16px}}
 .caption-style-quietDocumentary .cap{{font-size:44px;font-weight:500}}
@@ -748,6 +804,17 @@ function updateCaptions(t){{
   capNode.style.transform=`translate(${{dx}}px,${{dy}}px)`;
 }}
 function reset(root){{
+  root.querySelectorAll('.verified-passage').forEach(mark=>{{
+    const img=mark.parentElement.querySelector('.document-image');
+    if(!img||!img.naturalWidth)return;
+    const w=img.clientWidth,h=img.clientHeight;
+    const scale=Math.min(w/img.naturalWidth,h/img.naturalHeight);
+    const iw=img.naturalWidth*scale,ih=img.naturalHeight*scale;
+    mark.querySelectorAll('[data-box]').forEach(line=>{{
+      const [x,y,bw,bh]=line.dataset.box.split(',').map(Number);
+      Object.assign(line.style,{{left:(img.offsetLeft+(w-iw)/2+x*iw)+'px',top:(img.offsetTop+(h-ih)/2+y*ih)+'px',width:(bw*iw)+'px',height:(bh*ih)+'px'}});
+    }});
+  }});
   root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
   root.querySelectorAll('.document,.source-sheet').forEach(el=>{{el.style.transformOrigin=''}});
   root.querySelectorAll('.ruler-node').forEach(el=>{{
@@ -805,7 +872,10 @@ window.__editorialReady=false;window.__editorialError=null;
 const pinnedFontsReady=Promise.all(FONT_MANIFEST.map(entry=>
   document.fonts.load(`${{entry.weight}} 16px "${{entry.family}}"`)
 ));
-pinnedFontsReady.then(()=>document.fonts.ready).then(()=>{{
+const sourceImagesReady=Promise.all([...document.images].map(img=>
+  img.decode().catch(()=>undefined)
+));
+Promise.all([pinnedFontsReady,sourceImagesReady]).then(()=>document.fonts.ready).then(()=>{{
   fitEditorialText();window.renderAt(0);window.__editorialReady=true;
 }}).catch(error=>{{
   window.__editorialError=String(error&&error.message||error);
@@ -863,6 +933,7 @@ class EditorialRenderer:
         output.parent.mkdir(parents=True, exist_ok=True)
         html = compile_edit_plan_html(
             plan,
+            asset_root=asset_root,
             asset_url_resolver=(
                 lambda asset: self._data_asset_url(asset_root, asset)
                 if asset_root is not None else None

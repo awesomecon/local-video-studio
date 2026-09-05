@@ -1218,19 +1218,29 @@ function setListControlsDisabled(listRoot, disabled) {
  */
 export function buildCompositionControls(data, ctx) {
   if (!data.id) return null; // no validated id -> no endpoint -> no controls
+  // The editor reads as clusters, not one long run of rows: the action
+  // cluster leads, then labeled field clusters separated by a hairline.
   const groups = [
-    buildRegenControl(data, ctx),
-    buildRevisionControl(data, ctx),
-    buildDurationControl(data, ctx),
-    buildTemplateControl(data, ctx),
+    el("div", { class: "stack" },
+      buildRegenControl(data, ctx),
+      buildRevisionControl(data, ctx)),
+    compositionControlGroup("Timing & template",
+      buildDurationControl(data, ctx),
+      buildTemplateControl(data, ctx)),
   ];
   const textGroup = buildTextControls(data, ctx);
-  if (textGroup) groups.push(textGroup);
+  if (textGroup) groups.push(compositionControlGroup("Deterministic text", textGroup));
   const eventGroup = buildEventControls(data, ctx);
-  if (eventGroup) groups.push(eventGroup);
+  if (eventGroup) groups.push(compositionControlGroup("Event actions", eventGroup));
   const assetGroup = buildAssetControls(data, ctx);
-  if (assetGroup) groups.push(assetGroup);
-  return el("div", { class: "stack" }, ...groups);
+  if (assetGroup) groups.push(compositionControlGroup("Planned assets", assetGroup));
+  return el("div", { class: "stack ed-ctrl" }, ...groups);
+}
+
+/** One labeled field cluster inside the composition editor. */
+function compositionControlGroup(label, ...items) {
+  return el("div", { class: "ed-ctrl-group" },
+    el("div", { class: "ed-ctrl-label" }, label), ...items);
 }
 
 function revisionCompositionText(item) {
@@ -1357,7 +1367,7 @@ function buildDurationControl(data, ctx) {
     type: "number", "data-ed-duration": data.id,
     min: "0", max: String(COMPOSITION_DURATION_LIMIT), step: "any",
     value: data.duration != null ? String(data.duration) : "",
-    style: { width: "110px" },
+    style: { width: "130px" },
   });
   const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-duration": data.id }, "Save duration");
   const readValue = () => {
@@ -1427,7 +1437,7 @@ function buildTextControls(data, ctx) {
     e,
     input: el("input", {
       type: "text", "data-ed-text": e.id, value: e.text,
-      maxlength: "4000", style: { width: "280px" },
+      maxlength: "4000", style: { flex: "1 1 220px", maxWidth: "100%" },
     }),
   }));
   const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-text": data.id }, "Save text");
@@ -1460,7 +1470,6 @@ function buildTextControls(data, ctx) {
       "Composition text not saved");
   });
   return el("div", { class: "stack" },
-    el("span", { class: "muted small" }, "Deterministic text (text / document elements):"),
     ...items.map(({ e, input }) => el("div", { class: "row", style: { gap: "8px" } },
       el("span", { class: "muted small", style: { minWidth: "110px" } }, e.role), input)),
     el("div", {}, save));
@@ -1498,7 +1507,6 @@ function buildEventControls(data, ctx) {
       "Event actions not saved");
   });
   return el("div", { class: "stack" },
-    el("span", { class: "muted small" }, "Event actions:"),
     ...items.map(({ ev, select }) => el("div", { class: "row", style: { gap: "8px" } },
       el("span", { class: "muted small", style: { minWidth: "110px" } }, `event ${ev.index}`), select)),
     el("div", {}, save));
@@ -1513,15 +1521,18 @@ function buildEventControls(data, ctx) {
 function buildAssetControls(data, ctx) {
   if (!data.assets.length) return null;
   const rows = data.assets.map((asset) => {
-    const row = el("div", { class: "row wrap", style: { gap: "8px" } });
-    row.append(el("span", { class: "mono small", style: { minWidth: "140px" }, title: asset.id || "" }, asset.label));
+    // Each asset gets an identity line (name + lock/generate state) and,
+    // below it, the local-image replacement line, so neither crowds the
+    // other in the narrow detail column.
+    const identity = el("div", { class: "row wrap", style: { gap: "8px" } });
+    identity.append(el("span", { class: "mono small", style: { minWidth: "140px" }, title: asset.id || "" }, asset.label));
     if (!asset.hasId) {
-      row.append(el("span", { class: "muted small" }, "unrecognized asset id — controls hidden"));
-      return row;
+      identity.append(el("span", { class: "muted small" }, "unrecognized asset id, controls hidden"));
+      return identity;
     }
     if (asset.evidence) {
       // Factual evidence is always locked: state is shown, no unlock offered.
-      row.append(el("span", { class: "badge neutral", "data-ed-asset-state": asset.id }, "Locked (evidence)"));
+      identity.append(el("span", { class: "badge neutral", "data-ed-asset-state": asset.id }, "Locked (evidence)"));
     } else {
       const lock = el("button", { class: "btn btn-ghost btn-sm", type: "button", "data-ed-lock": asset.id },
         asset.locked ? "Unlock" : "Lock");
@@ -1531,7 +1542,7 @@ function buildAssetControls(data, ctx) {
           () => setEditorialAssetLock(state.config, ctx.projectId, data.id, asset.id, !asset.locked),
           "Asset lock not saved");
       });
-      row.append(lock);
+      identity.append(lock);
     }
     if (asset.canGenerate) {
       const generate = el("button", {
@@ -1543,8 +1554,9 @@ function buildAssetControls(data, ctx) {
           () => generateEditorialAsset(state.config, ctx.projectId, data.id, asset.id),
           "Editorial image generation failed");
       });
-      row.append(generate);
+      identity.append(generate);
     }
+    const replaceLine = el("div", { class: "row wrap", style: { gap: "8px" } });
     const fileInput = el("input", { type: "file", accept: "image/*", "data-ed-file": asset.id });
     const evidenceCheck = el("input", { type: "checkbox", checked: asset.evidence, "data-ed-evidence": asset.id });
     const replaceBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button", "data-ed-replace": asset.id }, "Replace");
@@ -1561,17 +1573,16 @@ function buildAssetControls(data, ctx) {
         () => replaceEditorialAsset(state.config, ctx.projectId, data.id, asset.id, file, evidenceCheck.checked),
         "Asset replacement failed");
     });
-    row.append(
+    replaceLine.append(
       el("span", { class: "muted small" }, "Replace with local image:"),
       fileInput,
       evidenceCheck,
       el("span", { class: "muted small" }, "evidence"),
       replaceBtn,
     );
-    return row;
+    return el("div", { class: "stack", style: { gap: "8px" } }, identity, replaceLine);
   });
   return el("div", { class: "stack" },
-    el("span", { class: "muted small" }, "Planned assets:"),
     ...rows);
 }
 

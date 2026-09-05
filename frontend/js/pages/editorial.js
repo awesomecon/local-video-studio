@@ -57,7 +57,6 @@ import {
   badge,
   emptyState,
   errorPanel,
-  loadingState,
   toastError,
 } from "../ui.js";
 import { navigate } from "../router.js";
@@ -172,6 +171,31 @@ export function renderEditorial(_route) {
 }
 
 /**
+ * Loading placeholder shaped like the workspace itself (two columns of
+ * panel skeletons), so the first paint doesn't reflow into a different
+ * layout once the plan arrives.
+ * @returns {HTMLElement}
+ */
+function workspaceSkeleton() {
+  const panel = (blocks) => el("div", { class: "panel" },
+    el("div", { class: "skeleton", style: { minHeight: "12px", width: "38%" } }),
+    ...blocks.map((h) => el("div", {
+      class: "skeleton",
+      style: { marginTop: "12px", minHeight: `${h}px` },
+    })));
+  const left = el("div", { class: "ed-col" },
+    panel([110, 44]),
+    panel([150]),
+    panel([90]));
+  const right = el("div", { class: "ed-col" },
+    panel([44]),
+    panel([220]));
+  return el("div", {
+    class: "ed-layout", role: "status", "aria-label": "Loading Editorial workspace",
+  }, left, right);
+}
+
+/**
  * Mount the workspace (or an empty/error state) for one project and wire
  * its live-update hook. All state that must survive re-renders (in-flight
  * mutation, selected composition, preview toggle, last good plan) lives in
@@ -255,7 +279,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       el("div", { class: "panel-title" }, "Editorial canvas"),
       emptyState(
         "No Edit Plan yet",
-        "This editorial project has no Edit Plan. Generating one plans the whole sequence from the script and narration — it can take a while and changes nothing else.",
+        "This editorial project has no Edit Plan. Generating one plans the whole sequence from the script and narration. It can take a while, and it changes nothing else.",
         actions,
       ),
       el("div", { class: "panel-body" },
@@ -331,12 +355,12 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
               : "Tracked inputs changed since this plan was generated:"),
             ...planState.reasons.map((reason) => el("div", { class: "muted small" }, reason)),
             el("div", { class: "muted small" },
-              "Stale plans are preserved on purpose — the preview still shows the last generated plan."),
+              "Stale plans are preserved on purpose: the preview still shows the last generated plan."),
           ),
         ));
       } else if (planState.kind === "untracked") {
         noteHost.replaceChildren(el("p", { class: "muted small" },
-          "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — the preview shows it as-is."));
+          "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable; the preview shows it as-is."));
       } else {
         noteHost.replaceChildren();
       }
@@ -398,7 +422,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         "data-ed-comp-card": sum.id,
         // Time-proportional width with a readable floor; CSS clamps it.
         style: { flexGrow: String(Math.max(0.6, sum.duration != null ? sum.duration : 1)) },
-        title: `${sum.id} — ${templateLabel(sum.template)}`,
+        title: `${sum.id}: ${templateLabel(sum.template)}`,
         onclick: () => {
           if (ctrl.busy !== "") return; // one mutation in flight at a time
           selectedId = sum.id;
@@ -412,7 +436,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         ),
         el("span", { class: "ed-card-time" }, `${startText}–${endText}`),
         el("span", { class: "ed-card-meta" },
-          `${sum.assetCount} assets · ${sum.elementCount} elements · ${sum.eventCount} events`),
+          `${sum.assetCount} assets, ${sum.elementCount} elements, ${sum.eventCount} events`),
         sum.lockedAssetCount > 0
           ? badge("neutral", `${sum.lockedAssetCount} locked`, false)
           : null,
@@ -453,7 +477,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       ? fmtDuration(sum.start + sum.duration)
       : "—";
     const counts =
-      `${sum.assetCount} assets · ${sum.elementCount} elements · ${sum.eventCount} events · ` +
+      `${sum.assetCount} assets, ${sum.elementCount} elements, ${sum.eventCount} events, ` +
       `${sum.narrationRefCount} narration refs`;
     detailHost.replaceChildren(
       el("div", { class: "ed-detail-head" },
@@ -579,7 +603,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       fmtDuration(end),
       width != null && height != null ? `${width}×${height}` : null,
       fps != null ? `${fps} fps` : null,
-    ].filter(Boolean).join(" · ");
+    ].filter(Boolean).join(", ");
 
     const previewUrl = safeEditorialPreviewUrl(
       (snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
@@ -633,7 +657,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       el("section", { class: "panel" },
         el("div", { class: "panel-title" }, "AI revision"),
         el("p", { class: "muted small" },
-          "Describe a sequence-level change — adding, splitting, or retiming compositions. Nothing is applied until you preview and accept it."),
+          "Describe a sequence-level change: adding, splitting, or retiming compositions. Nothing is applied until you preview and accept it."),
         buildRevisionControl(null, ctx),
       ),
     );
@@ -681,7 +705,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
    */
   async function load({ skeleton = true } = {}) {
     const token = ++inflight;
-    if (skeleton) body.replaceChildren(loadingState(4));
+    if (skeleton) body.replaceChildren(workspaceSkeleton());
     /** @type {import("../api.js").ProjectSnapshot | null} */
     let snap = null;
     try {
