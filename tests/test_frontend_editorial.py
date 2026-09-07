@@ -133,6 +133,17 @@ def test_editorial_workspace_serializes_mutations() -> None:
     assert "if (ctrl.busy !== \"\") return;" in source.split("async function tick()", 1)[1]
 
 
+def test_editorial_composition_timing_is_read_only() -> None:
+    source = _js("pages/project.js")
+    assert '"data-ed-resolved-timing": data.id' in source
+    assert "Resolved length" in source
+    assert "cuts are recalculated from narration and caption timing" in source
+    assert "change it in Editorial settings" in source
+    assert "Save duration" not in source
+    assert "data-ed-save-duration" not in source
+    assert 'editEditorialComposition(state.config, ctx.projectId, data.id, { duration:' not in source
+
+
 def test_editorial_workspace_uses_the_snapshot_plan_metadata() -> None:
     source = _js("pages/editorial.js")
     # Plan status (current / stale / untracked) is the shared presentation:

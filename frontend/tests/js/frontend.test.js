@@ -1765,6 +1765,7 @@ await recordAsync("editorial-compositions: Open Preview is kept and the open lis
 
 const EDITOR_PLAN = {
   ...SAMPLE_PLAN,
+  sentence_hold_seconds: 0.5,
   compositions: [{
     id: "comp/ edit", start: 0, duration: 5, template: "illustrationCanvas",
     assets: [
@@ -1894,14 +1895,13 @@ await recordAsync("editorial-revision: composition scope is sent explicitly", as
   });
 });
 
-await recordAsync("editorial-editor: regeneration and all deterministic PATCHes are exact and do not refetch", async () => {
+await recordAsync("editorial-editor: resolved timing is read-only and mutations stay exact", async () => {
   state.config = { apiBase: "", mediaBase: null };
   let current = structuredClone(EDITOR_PLAN);
   const calls = stubFetch((call) => {
     if (call.method === "GET" && call.url === EDIT_PLAN_URL) return { payload: current };
     if (call.method === "POST" && call.url.endsWith("/regenerate")) return { payload: current };
     if (call.method === "PATCH" && call.url.includes("/editorial/compositions/")) {
-      if (call.body.duration != null) current.compositions[0].duration = call.body.duration;
       if (call.body.template) current.compositions[0].template = call.body.template;
       if (call.body.text_updates) current.compositions[0].elements[0].text = call.body.text_updates.headline;
       if (call.body.event_actions) current.compositions[0].events[0].action = call.body.event_actions[0];
@@ -1918,12 +1918,14 @@ await recordAsync("editorial-editor: regeneration and all deterministic PATCHes 
   await flush();
   eq(calls.at(-1), { url: `${encoded}/regenerate`, method: "POST", body: null }, "bodyless regeneration");
 
-  let input = region.querySelector('[data-ed-duration="comp/ edit"]');
-  input.value = "6";
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  [...region.querySelectorAll("button")].find((b) => b.textContent === "Save duration").click();
-  await flush();
-  eq(calls.at(-1), { url: encoded, method: "PATCH", body: { duration: 6 } });
+  const timing = region.querySelector('[data-ed-resolved-timing="comp/ edit"]');
+  assert(timing, "resolved timing is shown");
+  assert(timing.textContent.includes("Resolved length 5 s"));
+  assert(timing.textContent.includes("Sentence hold: 0.5 seconds"));
+  assert(![...region.querySelectorAll("button")].some((b) => b.textContent === "Save duration"),
+    "caption-derived timing has no manual duration action");
+  assert(!region.querySelector('[data-ed-duration="comp/ edit"]'),
+    "caption-derived timing has no duration input");
 
   let select = region.querySelector('[data-ed-template="comp/ edit"]');
   select.value = "archiveCanvas";
@@ -1932,7 +1934,7 @@ await recordAsync("editorial-editor: regeneration and all deterministic PATCHes 
   await flush();
   eq(calls.at(-1), { url: encoded, method: "PATCH", body: { template: "archiveCanvas" } });
 
-  input = region.querySelector('[data-ed-text="headline"]');
+  let input = region.querySelector('[data-ed-text="headline"]');
   input.value = "ELON";
   input.dispatchEvent(new Event("input", { bubbles: true }));
   [...region.querySelectorAll("button")].find((b) => b.textContent === "Save text").click();

@@ -694,9 +694,6 @@ export const MOTION_PRIMITIVES = [
 /** Element types whose deterministic text the backend allows editing. */
 const EDITABLE_TEXT_ELEMENT_TYPES = ["text", "document"];
 
-/** Backend bounds for a composition duration (seconds). */
-const COMPOSITION_DURATION_LIMIT = 120;
-
 /**
  * Reduce the snapshot's optional provenance metadata to a panel state.
  * Only the recognized plan_status values are trusted: "stale" (with a
@@ -1254,8 +1251,8 @@ export function buildCompositionControls(data, ctx) {
     el("div", { class: "stack" },
       buildRegenControl(data, ctx),
       buildRevisionControl(data, ctx)),
-    compositionControlGroup("Timing & template",
-      buildDurationControl(data, ctx),
+    compositionControlGroup("Narration timing & template",
+      buildResolvedTiming(data, ctx),
       buildTemplateControl(data, ctx)),
   ];
   const textGroup = buildTextControls(data, ctx);
@@ -1391,45 +1388,27 @@ function buildRegenControl(data, ctx) {
   return el("div", { class: "row" }, btn);
 }
 
-/** Duration editor: number input (0 < d <= limit) + save {duration}. */
-function buildDurationControl(data, ctx) {
-  const input = el("input", {
-    type: "number", "data-ed-duration": data.id,
-    min: "0", max: String(COMPOSITION_DURATION_LIMIT), step: "any",
-    value: data.duration != null ? String(data.duration) : "",
-    style: { width: "130px" },
-  });
-  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-duration": data.id }, "Save duration");
-  const readValue = () => {
-    const raw = input.value.trim();
-    const value = Number(raw);
-    return raw !== "" && Number.isFinite(value) && value > 0 && value <= COMPOSITION_DURATION_LIMIT
-      ? value
-      : null;
-  };
-  const refresh = () => {
-    if (ctx.ctrl.busy !== "") return;
-    const value = readValue();
-    save.disabled = value == null || (data.duration != null && value === data.duration);
-  };
-  input.addEventListener("input", refresh);
-  input.addEventListener("change", refresh);
-  refresh();
-  save.addEventListener("click", () => {
-    if (ctx.ctrl.busy !== "") return;
-    const value = readValue();
-    if (value == null) {
-      ctx.errors.replaceChildren(banner(el("div", {},
-        `Duration must be a number between 0 and ${COMPOSITION_DURATION_LIMIT} seconds.`)));
-      return;
-    }
-    if (data.duration != null && value === data.duration) return;
-    void ctx.runMutation(
-      () => editEditorialComposition(state.config, ctx.projectId, data.id, { duration: value }),
-      "Composition duration not saved");
-  });
-  return el("div", { class: "row", style: { gap: "8px" } },
-    el("span", { class: "muted small" }, "Duration (s)"), input, save);
+/** Read-only timing resolved from the narration/caption clock. */
+function buildResolvedTiming(data, ctx) {
+  const seconds = (value) => `${Number(value.toFixed(3))} s`;
+  const validStart = typeof data.start === "number" && Number.isFinite(data.start);
+  const validDuration = typeof data.duration === "number"
+    && Number.isFinite(data.duration) && data.duration > 0;
+  const start = validStart ? data.start : null;
+  const end = validStart && validDuration ? data.start + data.duration : null;
+  const hold = ctx.ctrl?.plan?.sentence_hold_seconds;
+  const validHold = typeof hold === "number" && Number.isFinite(hold)
+    && hold >= 0 && hold <= 5;
+  return el("div", { class: "stack", "data-ed-resolved-timing": data.id },
+    el("div", { class: "row wrap", style: { gap: "12px" } },
+      el("span", { class: "small" }, `Start ${start != null ? seconds(start) : "—"}`),
+      el("span", { class: "small" }, `End ${end != null ? seconds(end) : "—"}`),
+      el("span", { class: "small" }, `Resolved length ${validDuration ? seconds(data.duration) : "—"}`),
+    ),
+    el("div", { class: "muted small" },
+      "Read-only: cuts are recalculated from narration and caption timing during rendering.",
+      validHold ? ` Sentence hold: ${hold} seconds; change it in Editorial settings.` : ""),
+  );
 }
 
 /** Template selector restricted to the five-template allowlist. */
