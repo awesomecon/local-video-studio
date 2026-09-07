@@ -1079,13 +1079,18 @@ def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
     if chromium is None:
         pytest.skip("Chromium is unavailable for Editorial layout verification")
     document = tmp_path / f"layout-{plan.width}x{plan.height}.html"
+    profile = tmp_path / f"chromium-profile-{plan.width}x{plan.height}"
     document.write_text(compile_edit_plan_html(plan), encoding="utf-8")
     result = subprocess.run(
         [
             str(chromium), "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--disable-extensions",
+            "--disable-background-networking", "--disable-component-update",
+            "--disable-sync", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}",
             "--virtual-time-budget=5000", "--dump-dom", document.resolve().as_uri(),
         ],
-        check=True, capture_output=True, text=True, timeout=30,
+        check=True, capture_output=True, text=True, timeout=90,
     )
     match = re.search(r'data-layout-report="([^"]+)"', result.stdout)
     assert match is not None, result.stderr
