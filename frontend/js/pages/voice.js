@@ -429,9 +429,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     higgsNote.hidden = !higgs;
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
-    // Only providers with native in-band controls may receive delivery tags.
-    performance.hidden = !PERFORMANCE_TAG_PROVIDERS.has(provider.value);
-    if (performance.hidden) performance.useTags.checked = false;
+    // The shared artifact is usable only by the provider it was generated for.
+    performance.syncProvider(provider.value);
     updateChunkingExplanation();
   };
   provider.onchange = syncProviderControls;
@@ -682,6 +681,7 @@ function field(label, input, hint) {
  */
 function performancePanel(project, current, tags, provider, script, refresh) {
   const scriptData = tags?.script || null;
+  const storedProvider = scriptData?.provider || null;
   const stale = !!tags?.stale;
   const tagCount = tags?.tag_count || 0;
   const llm = tags?.llm || { available: false, model: null };
@@ -696,18 +696,26 @@ function performancePanel(project, current, tags, provider, script, refresh) {
     placeholder: "e.g. keep it grounded, documentary pace" });
   const useTags = el("input", { type: "checkbox",
     checked: !!(current.use_performance_tags
-      && PERFORMANCE_TAG_PROVIDERS.has(provider.value)) });
+      && PERFORMANCE_TAG_PROVIDERS.has(provider.value)
+      && (!storedProvider || storedProvider === provider.value)) });
 
   const statusLine = el("div", { class: "hint" });
   const renderStatus = () => {
+    const activeProvider = provider.value;
     const parts = [];
     parts.push(llm.available
       ? `Local LLM: ${llm.model || "auto"}.`
       : "Local LLM is not available — start it (or disable mock mode) to add tags.");
     if (scriptData) {
-      parts.push(`${tagCount} cue${tagCount === 1 ? "" : "s"} across ` +
+      parts.push(`${providerLabel(storedProvider)} script: ${tagCount} ` +
+        `cue${tagCount === 1 ? "" : "s"} across ` +
         `${scriptData.segments.length} segment${scriptData.segments.length === 1 ? "" : "s"}.`);
-      if (stale) parts.push("The narration changed since these tags were generated — regenerate for a fresh pass.");
+      if (storedProvider !== activeProvider) {
+        parts.push(`These tags will not be sent to ${providerLabel(activeProvider)}. ` +
+          "Generate tags to replace the shared script for this provider.");
+      } else if (stale) {
+        parts.push("The narration changed since these tags were generated — regenerate for a fresh pass.");
+      }
     } else {
       parts.push("No delivery tags yet.");
     }
@@ -820,6 +828,13 @@ function performancePanel(project, current, tags, provider, script, refresh) {
 
   const useTagsRow = el("label", { class: "check-row" }, useTags,
     " Use delivery tags for this narration");
+  const syntaxHint = el("p", { class: "muted small" });
+  const taggedEditors = segmentEditors.length
+    ? el("div", { class: "stack" },
+      el("div", { class: "panel-title" }, "Tagged segments"),
+      ...segmentEditors.map((s) => s.node),
+      el("div", { class: "row" }, saveEdits, saveAnyway))
+    : null;
 
   const panel = el("div", { class: "stack",
     hidden: !PERFORMANCE_TAG_PROVIDERS.has(provider.value) },
@@ -827,19 +842,37 @@ function performancePanel(project, current, tags, provider, script, refresh) {
     el("p", { class: "muted small" },
       "Adds native delivery controls for Fish S2 Pro or Higgs TTS 3. Controls never reach "
       + "captions or a different model."),
+    syntaxHint,
     statusLine,
     el("div", { class: "pref-grid" },
       field("Intensity", intensity, "How many cues the local LLM should add."),
       field("Focus notes", notes, "Optional direction for the tagger, e.g. pacing or mood.")),
     el("div", { class: "row" }, generateTags, el("span", { class: "spacer" }),
       ...(scriptData ? [removeTags] : [])),
-    ...(segmentEditors.length ? [
-      el("div", { class: "panel-title" }, "Tagged segments"),
-      ...segmentEditors.map((s) => s.node),
-      el("div", { class: "row" }, saveEdits, saveAnyway),
-    ] : []),
+    ...(taggedEditors ? [taggedEditors] : []),
     useTagsRow);
-  return Object.assign(panel, { useTags, intensity, notes });
+  const syncProvider = (activeProvider) => {
+    const supported = PERFORMANCE_TAG_PROVIDERS.has(activeProvider);
+    const matchesStored = !storedProvider || storedProvider === activeProvider;
+    panel.hidden = !supported;
+    useTags.disabled = !!(scriptData && !matchesStored);
+    if (!supported || !matchesStored) useTags.checked = false;
+    if (taggedEditors) taggedEditors.hidden = !matchesStored;
+    if (supported) {
+      const label = providerLabel(activeProvider);
+      generateTags.textContent = scriptData && matchesStored
+        ? `Regenerate ${label} tags`
+        : scriptData
+          ? `Replace with ${label} tags`
+          : `Add ${label} tags with local LLM`;
+      syntaxHint.textContent = activeProvider === "higgs_tts_3"
+        ? "Higgs uses only its official <|category:value|> control-token vocabulary."
+        : "Fish uses free-form natural-language delivery cues in [square brackets].";
+    }
+    renderStatus();
+  };
+  syncProvider(provider.value);
+  return Object.assign(panel, { useTags, intensity, notes, syncProvider });
 }
 
 function section(title, ...children) {

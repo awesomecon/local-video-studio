@@ -1069,7 +1069,7 @@ class TTSManager:
         )
 
     # ------------------------------------------------------------------
-    # Fish S2 Pro delivery tags
+    # Provider-scoped delivery tags (one shared artifact per project)
     # ------------------------------------------------------------------
 
     def _performance_path(self, project_id: str) -> Path:
