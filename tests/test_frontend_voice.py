@@ -22,6 +22,14 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     assert "breezeGrid," in source[panel_start:panel_end]
 
 
+def test_scene_chunk_combining_is_saved_and_sent() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    assert "checked: !!current.combine_scene_chunks" in source
+    assert "combine_scene_chunks: combineSceneChunks.checked" in source
+    assert "Combine planned scenes into longer TTS chunks" in source
+
+
 def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 

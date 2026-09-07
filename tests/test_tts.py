@@ -633,6 +633,45 @@ def test_planned_narration_chunks_are_scene_bound_and_publish_measured_timing(
     assert timeline.metadata["scene_audio_synced"] is True
 
 
+def test_planned_narration_can_combine_scenes_into_one_short_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Continuous short", topic="test", target_duration=2,
+    ))
+    scenes = [
+        Scene(project_id=project.id, index=0, duration=1, narration="First scene line."),
+        Scene(project_id=project.id, index=1, duration=3, narration="Second scene line."),
+    ]
+    for scene in scenes:
+        service.database.save_scene(scene)
+        service.store.save_scene(project.slug, scene)
+    backend = RecordingBackend()
+    service.registry.register(backend, name="chatterbox", replace=True)
+
+    service.tts.generate(
+        project.id,
+        NarrationRequest(
+            provider="chatterbox", chunk_seconds=45, combine_scene_chunks=True,
+        ),
+        job_id="continuous-short",
+    )
+
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    take = next(item for item in takes if item.id == active_id)
+    chunks = service.tts.list_take_chunks(project.id, take.id)
+    assert [chunk["text"] for chunk in chunks] == [
+        "First scene line.\n\nSecond scene line.",
+    ]
+    assert take.settings["chunk_seconds"] == 45
+    assert take.settings["timing_mode"] == "script_audio_v1"
+    assert service.tts.active_scene_durations(project.id) == pytest.approx({
+        scenes[0].id: 0.025,
+        scenes[1].id: 0.075,
+    })
+
+
 def test_regenerating_one_chunk_creates_and_activates_a_new_take(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -959,7 +998,7 @@ def test_narration_stops_after_retryable_backend_failure(
 
     backend = FailedWorkerBackend()
     service.registry.register(backend, name="chatterbox", replace=True)
-    monkeypatch.setattr(service.tts, "_narration_chunks", lambda *_args: [
+    monkeypatch.setattr(service.tts, "_narration_chunks", lambda *_args, **_kwargs: [
         {"text": "First chunk."}, {"text": "Second chunk."},
     ])
     request = NarrationRequest(provider="chatterbox", text="Two chunks.")

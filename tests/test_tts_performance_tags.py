@@ -974,6 +974,40 @@ def test_narration_feeds_higgs_tokens_only_to_matching_provider(
     assert metadata == {"enabled": False, "reason": "script_provider"}
 
 
+def test_higgs_combines_tagged_scenes_into_one_short_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Higgs continuous short", topic="test", target_duration=2,
+    ))
+    scenes = _add_scenes(service, project, [
+        "A quiet opening line.",
+        "Then the reveal lands.",
+    ])
+    script = PerformanceScript(
+        provider="higgs_tts_3",
+        segments=[
+            PerformanceSegment(
+                key=f"scene:{scene.id}", source=scene.narration,
+                tagged=f"<|style:whispering|> {scene.narration}",
+                scene_id=scene.id, scene_index=scene.index, scene_title=scene.title,
+            )
+            for scene in scenes
+        ],
+    )
+
+    chunks = service.tts._narration_chunks(
+        project.id, None, 45, script, combine_scenes=True,
+    )
+
+    assert chunks == [{
+        "text": (
+            "<|style:whispering|> A quiet opening line.\n\n"
+            "<|style:whispering|> Then the reveal lands."
+        ),
+    }]
+
 def test_stale_segment_falls_back_to_clean_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
