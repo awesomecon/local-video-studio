@@ -27,9 +27,14 @@ def test_scene_chunk_combining_is_saved_and_sent() -> None:
 
     assert 'sceneGrouping.value = current.combine_scene_chunks ? "combined" : "scene"' in source
     assert 'combine_scene_chunks: sceneGrouping.value === "combined"' in source
-    assert "One TTS request per scene" in source
-    assert "Group scenes up to the chunk limit" in source
-    assert "including Fish S2 Pro and Higgs TTS 3" in source
+    assert "Separately — one request per scene" in source
+    assert "Together — combine scenes into longer requests" in source
+    assert "How should planned scenes be sent?" in source
+    assert "Maximum text per TTS request" in source
+    assert "If the whole short fits" in source
+    assert "six short scenes become six requests" in source
+    assert "estimated from word count" in source
+    assert "updateChunkingExplanation();" in source
 
 
 def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:

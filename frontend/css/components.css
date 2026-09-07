@@ -620,6 +620,16 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 
 /* --- Voice / music / captions --------------------------------------------------------- */
 .pref-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--gap); }
+.chunking-explainer {
+  grid-column: 1 / -1;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.chunking-explainer p { margin: 5px 0 0; }
 .consent-warning {
   display: flex; gap: 10px; align-items: flex-start;
   background: var(--critical-ink);
