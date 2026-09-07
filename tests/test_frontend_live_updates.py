@@ -390,6 +390,8 @@ def test_project_editorial_display_settings_controls() -> None:
     )
     assert "typeof editorial.captions_enabled === \"boolean\"" in source
     assert "typeof editorial.editorial_text_enabled === \"boolean\"" in source
+    assert "typeof editorial.sentence_hold_seconds === \"number\"" in source
+    assert "Sentence hold (seconds)" in source
     # The caption style select appears only for strict snapshot values and
     # offers the documented style set.
     assert (
@@ -414,9 +416,10 @@ def test_project_editorial_display_settings_controls() -> None:
     assert "{ captions_enabled: control.checked }" in source
     assert "{ editorial_text_enabled: control.checked }" in source
     assert "{ caption_style: control.value }" in source
+    assert "{ sentence_hold_seconds: control.valueAsNumber }" in source
     # Failure restores the previous value and uses the existing surfaces.
     assert "control.checked = previous" in source
-    assert "control.value = previous" in source
+    assert "control.value = String(previous)" in source
     assert "toastError(err, \"Editorial display setting not saved\");" in source
     # The settings path never touches the full Edit Plan.
     assert "patchEditorialSettings(" in source

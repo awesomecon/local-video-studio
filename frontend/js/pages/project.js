@@ -920,7 +920,11 @@ export function buildEditorialDisplayControls(
   const textOk = typeof editorial.editorial_text_enabled === "boolean";
   const captionStyleOk =
     captionsOk && typeof editorial.caption_style === "string";
-  if (!captionsOk && !textOk && !captionStyleOk) return null;
+  const sentenceHoldOk = typeof editorial.sentence_hold_seconds === "number"
+    && Number.isFinite(editorial.sentence_hold_seconds)
+    && editorial.sentence_hold_seconds >= 0
+    && editorial.sentence_hold_seconds <= 5;
+  if (!captionsOk && !textOk && !captionStyleOk && !sentenceHoldOk) return null;
 
   /** @type {HTMLInputElement[]} */
   const controls = [];
@@ -965,9 +969,33 @@ export function buildEditorialDisplayControls(
     }
     row.append(el("label", { class: "small" }, " Caption style", select));
   };
+  const makeSentenceHoldInput = (value) => {
+    const input = el("input", {
+      type: "number", min: "0", max: "5", step: "0.1", value: String(value),
+      "aria-label": "Sentence hold in seconds",
+    });
+    input.dataset.editorialSetting = "sentence_hold_seconds";
+    let current = value;
+    input.addEventListener("change", () => {
+      if (ctrl.busy !== "") { input.value = String(current); return; }
+      const next = input.valueAsNumber;
+      if (!Number.isFinite(next) || next < 0 || next > 5) {
+        input.value = String(current);
+        return;
+      }
+      void saveEditorialSetting("sentence_hold_seconds", input, current,
+        { settingsUrl, ctrl, errors, onSaved, controls }
+      ).then((saved) => {
+        if (saved) current = next;
+      });
+    });
+    controls.push(input);
+    row.append(el("label", { class: "small" }, " Sentence hold (seconds) ", input));
+  };
   if (captionsOk) makeCheckbox("captions_enabled", "Captions", editorial.captions_enabled);
   if (textOk) makeCheckbox("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
   if (captionStyleOk) makeStyleSelect(editorial.caption_style);
+  if (sentenceHoldOk) makeSentenceHoldInput(editorial.sentence_hold_seconds);
   return row;
 }
 
@@ -976,9 +1004,9 @@ export function buildEditorialDisplayControls(
  * per region; every control stays disabled while the request runs. The Edit
  * Plan is never touched on this path. Returns whether the save succeeded so
  * select-based callers can track the last persisted value.
- * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"} key
+ * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"|"sentence_hold_seconds"} key
  * @param {HTMLInputElement | HTMLSelectElement} control — the control that changed
- * @param {boolean | string} previous — value to restore on failure
+ * @param {boolean | string | number} previous — value to restore on failure
  * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, controls: (HTMLInputElement | HTMLSelectElement)[]}} ctx
  * @returns {Promise<boolean>}
  */
@@ -994,15 +1022,17 @@ async function saveEditorialSetting(key, control, previous, ctx) {
     ? { captions_enabled: control.checked }
     : key === "editorial_text_enabled"
       ? { editorial_text_enabled: control.checked }
-      : { caption_style: control.value };
-  const isCheckbox = key !== "caption_style";
+      : key === "sentence_hold_seconds"
+        ? { sentence_hold_seconds: control.valueAsNumber }
+        : { caption_style: control.value };
+  const isCheckbox = key === "captions_enabled" || key === "editorial_text_enabled";
   try {
     await patchEditorialSettings(state.config, settingsUrl, body);
   } catch (err) {
     ctrl.busy = "";
     for (const item of controls) item.disabled = item.dataset.keepDisabled === "1";
     if (isCheckbox) control.checked = previous;
-    else control.value = previous; // restore the previous value
+    else control.value = String(previous); // restore the previous value
     errors.replaceChildren(errorPanel(err));
     toastError(err, "Editorial display setting not saved");
     return false;

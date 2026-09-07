@@ -22,7 +22,7 @@ from backend.editorial import (
     validate_export_assets,
 )
 from backend.editorial.timing import (
-    EDITORIAL_SENTENCE_TAIL_SECONDS,
+    DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
     caption_sentence_boundaries,
     retime_compositions_to_caption_sentences,
 )
@@ -347,8 +347,8 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     context = json.loads(llm.calls[0]["messages"][1]["content"])
     assert context["word_timestamps"][-1]["end_seconds"] == 14.0
     assert context["editorial_timing"] == {
-        "policy": "caption_sentence_end_with_tail_v1",
-        "sentence_tail_seconds": EDITORIAL_SENTENCE_TAIL_SECONDS,
+        "policy": "caption_sentence_end_with_hold_v1",
+        "sentence_hold_seconds": DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
         "allowed_internal_boundaries": [],
     }
     assert context["approved_templates"] == [item.value for item in EditorialTemplate]
@@ -361,7 +361,7 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     }
 
 
-def test_editorial_timing_snaps_cuts_to_caption_sentences_with_tail() -> None:
+def test_editorial_timing_snaps_cuts_to_caption_sentences_with_hold() -> None:
     words = [
         CaptionWord(0.0, 1.0, "First."),
         CaptionWord(1.2, 3.0, "Second?”"),
@@ -395,6 +395,14 @@ def test_editorial_timing_snaps_cuts_to_caption_sentences_with_tail() -> None:
         (0.0, 1.5), (1.5, 2.0), (3.5, 3.0),
     ]
     assert [item.events[0].time for item in retimed] == [0.8, 1.0, 1.5]
+
+    no_hold = retime_compositions_to_caption_sentences(
+        compositions, words, timeline_duration=6.5, fps=10, hold_seconds=0,
+    )
+    assert no_hold is not None
+    assert [(item.start, item.duration) for item in no_hold] == [
+        (0.0, 1.0), (1.0, 2.0), (3.0, 3.5),
+    ]
 
 
 def test_editorial_timing_needs_enough_sentence_boundaries() -> None:

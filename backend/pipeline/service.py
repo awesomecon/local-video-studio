@@ -447,6 +447,9 @@ class PipelineService:
                 "editorial_text_enabled": (
                     edit_plan.editorial_text_enabled if edit_plan is not None else None
                 ),
+                "sentence_hold_seconds": (
+                    edit_plan.sentence_hold_seconds if edit_plan is not None else None
+                ),
             }
         if recovery:
             snapshot["recovery"] = recovery
@@ -480,18 +483,21 @@ class PipelineService:
         captions_enabled: bool | None = None,
         editorial_text_enabled: bool | None = None,
         caption_style: str | None = None,
+        sentence_hold_seconds: float | None = None,
     ) -> EditPlan:
-        """Update only independent caption/editorial-text switches on an existing plan.
+        """Update the supported display and sentence-timing settings on an existing plan.
 
         Caption style changes can move captions between the burned ASS path
         (``standard``) and the rendered composition master, so the invalidation
         set covers the Editorial visual stage whenever the master's caption
-        content changes on either side of the update.
+        content changes on either side of the update. Changing the sentence
+        hold also immediately resnaps the plan when matching word timing exists.
         """
         if (
             captions_enabled is None
             and editorial_text_enabled is None
             and caption_style is None
+            and sentence_hold_seconds is None
         ):
             raise PipelineError("At least one Editorial setting must be provided.")
         if caption_style is not None:
@@ -503,6 +509,16 @@ class PipelineService:
                     f"Unknown Editorial caption style {caption_style!r}; "
                     f"expected one of: {values}."
                 ) from exc
+        if sentence_hold_seconds is not None:
+            if (
+                isinstance(sentence_hold_seconds, bool)
+                or not math.isfinite(sentence_hold_seconds)
+                or not 0 <= sentence_hold_seconds <= 5
+            ):
+                raise PipelineError(
+                    "Editorial sentence hold must be between 0 and 5 seconds."
+                )
+            sentence_hold_seconds = float(sentence_hold_seconds)
         with self._lock:
             project = self._project(project_id)
             if project.video_mode is not VideoMode.EDITORIAL:
@@ -518,9 +534,16 @@ class PipelineService:
                 updates["editorial_text_enabled"] = editorial_text_enabled
             if caption_style is not None and caption_style is not plan.caption_style:
                 updates["caption_style"] = caption_style
+            if (
+                sentence_hold_seconds is not None
+                and sentence_hold_seconds != plan.sentence_hold_seconds
+            ):
+                updates["sentence_hold_seconds"] = sentence_hold_seconds
             if not updates:
                 return plan
             updated = plan.model_copy(update=updates)
+            if "sentence_hold_seconds" in updates:
+                updated = self._retimed_editorial_plan(project, updated) or updated
             self.store.save_edit_plan(project.slug, updated)
             self.store.save_edit_plan_provenance(
                 project.slug,
@@ -533,6 +556,8 @@ class PipelineService:
                 "render_final", "thumbnails",
             }
             if "editorial_text_enabled" in updates:
+                invalidated.add("editorial_visual")
+            if "sentence_hold_seconds" in updates:
                 invalidated.add("editorial_visual")
             old_master_captions = self._plan_uses_master_captions(plan)
             new_master_captions = self._plan_uses_master_captions(updated)
@@ -1716,6 +1741,7 @@ class PipelineService:
                     words,
                     timeline_duration=timeline_duration,
                     fps=plan.fps,
+                    hold_seconds=plan.sentence_hold_seconds,
                 )
                 if compositions is not None:
                     return EditPlan.model_validate({

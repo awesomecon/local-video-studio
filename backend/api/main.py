@@ -49,6 +49,7 @@ class EditorialSettingsEdit(BaseModel):
     captions_enabled: bool | None = None
     editorial_text_enabled: bool | None = None
     caption_style: str | None = None
+    sentence_hold_seconds: float | None = Field(default=None, ge=0, le=5)
 
 
 class EditorialAssetLockEdit(BaseModel):
@@ -956,6 +957,7 @@ def create_app(
                 captions_enabled=request.captions_enabled,
                 editorial_text_enabled=request.editorial_text_enabled,
                 caption_style=request.caption_style,
+                sentence_hold_seconds=request.sentence_hold_seconds,
             ).model_dump(mode="json")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None

@@ -95,9 +95,11 @@ readiness (the Models & System Status screen surfaces this); the optional depend
 directory must be configured first, and nothing is downloaded automatically.
 
 Editorial composition cuts follow that same caption clock. Internal cuts snap to the nearest
-spoken sentence ending and keep the current composition visible for another 0.5 seconds; they are
-not assigned a fixed scene length. The final composition runs through the end of the narration
-master. Motion-event offsets scale with the composition so retiming does not change event order.
+spoken sentence ending and keep the current composition visible for a configurable hold (0.5
+seconds by default); they are not assigned a fixed scene length. The per-plan hold can be changed
+from Editorial settings or with `PATCH .../editorial/settings` and `sentence_hold_seconds` (0–5).
+The final composition runs through the end of the narration master. Motion-event offsets scale
+with the composition so retiming does not change event order.
 Only word timings whose recorded audio hash matches the active narration are authoritative; when
 alignment is missing or stale, Editorial falls back to its recorded per-scene narration clock.
 

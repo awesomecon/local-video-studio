@@ -1248,6 +1248,7 @@ function settingsMeta(extra = {}) {
     settings_url: SETTINGS_URL,
     captions_enabled: true,
     editorial_text_enabled: false,
+    sentence_hold_seconds: 0.5,
     ...extra,
   };
 }
@@ -1276,17 +1277,21 @@ record("editorial-settings: classic and legacy snapshots render no display contr
   eq(noPlan.querySelectorAll("input[type=checkbox]").length, 0, "no controls without a plan");
 });
 
-record("editorial-settings: strict boolean settings render two independent checkboxes", () => {
+record("editorial-settings: display and sentence timing controls render", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, settingsMeta()));
   assert(node, "the section renders");
   const captions = findSettingInput(node, "captions_enabled");
   const text = findSettingInput(node, "editorial_text_enabled");
+  const hold = findSettingInput(node, "sentence_hold_seconds");
   assert(captions && text, "both controls present");
+  assert(hold, "sentence hold control present");
   eq(captions.type, "checkbox");
   eq(captions.checked, true, "starts from the snapshot value");
   eq(text.checked, false, "starts from the snapshot value");
   assert(node.textContent.includes("Captions"), "Captions label shown");
   assert(node.textContent.includes(EDITORIAL_TEXT_LABEL), "Editorial text label shown");
+  eq(hold.type, "number");
+  eq(hold.valueAsNumber, 0.5, "sentence hold starts from the snapshot value");
 });
 
 record("editorial-settings: malformed settings_url or non-boolean values omit controls defensively", () => {
@@ -1322,13 +1327,18 @@ record("editorial-settings: malformed settings_url or non-boolean values omit co
 
 await recordAsync("editorial-settings: one click PATCHes only the changed field, never the Edit Plan", async () => {
   state.config = { apiBase: "", mediaBase: null };
-  let captions = true, textOn = false;
+  let captions = true, textOn = false, holdSeconds = 0.5;
   const snapFor = () => projectSnapshot(
-    EDITORIAL_PROJECT, settingsMeta({ captions_enabled: captions, editorial_text_enabled: textOn }));
+    EDITORIAL_PROJECT, settingsMeta({
+      captions_enabled: captions,
+      editorial_text_enabled: textOn,
+      sentence_hold_seconds: holdSeconds,
+    }));
   const calls = stubFetch((call) => {
     if (call.method === "PATCH" && call.url === SETTINGS_URL) {
       if (call.body && call.body.captions_enabled !== undefined) captions = call.body.captions_enabled;
       if (call.body && call.body.editorial_text_enabled !== undefined) textOn = call.body.editorial_text_enabled;
+      if (call.body && call.body.sentence_hold_seconds !== undefined) holdSeconds = call.body.sentence_hold_seconds;
       return { payload: { version: 1 } };
     }
     if (call.method === "GET" && call.url === "/api/projects/proj-ed") return { payload: snapFor() };
@@ -1357,6 +1367,13 @@ await recordAsync("editorial-settings: one click PATCHes only the changed field,
   const patches2 = calls.filter((c) => c.method === "PATCH");
   eq(patches2.length, 2, "the second change issues its own PATCH");
   eq(patches2[1].body, { editorial_text_enabled: true }, "second body carries only its field");
+  const hold = findSettingInput(region, "sentence_hold_seconds");
+  hold.value = "0.2";
+  hold.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  const patches3 = calls.filter((c) => c.method === "PATCH");
+  eq(patches3.length, 3, "the hold change issues its own PATCH");
+  eq(patches3[2].body, { sentence_hold_seconds: 0.2 }, "hold body is numeric and isolated");
 });
 
 await recordAsync("editorial-settings: one mutation in flight, both controls off, refreshes preserve pending controls", async () => {
@@ -1388,8 +1405,8 @@ await recordAsync("editorial-settings: one mutation in flight, both controls off
   caps.dispatchEvent(new Event("change", { bubbles: true }));
   await flush(2);
   const boxes = [...region.querySelectorAll("input")];
-  eq(boxes.length, 2, "both controls still mounted");
-  assert(boxes.every((b) => b.disabled), "both controls disabled while saving");
+  eq(boxes.length, 3, "all controls still mounted");
+  assert(boxes.every((b) => b.disabled), "all controls disabled while saving");
   // A live snapshot tick with newer data must not replace the pending controls.
   renderEditorialRegion(region, snapFor());
   assert([...region.querySelectorAll("input")].every((b) => b.disabled),
@@ -1406,7 +1423,7 @@ await recordAsync("editorial-settings: one mutation in flight, both controls off
   eq(calls.filter((c) => c.method === "PATCH").length, 1, "exactly one PATCH issued end to end");
   eq(calls.filter((c) => c.method === "GET").length, 1, "one snapshot re-read after the save");
   const fresh = [...region.querySelectorAll("input")];
-  assert(fresh.length === 2 && fresh.every((b) => !b.disabled), "controls re-enabled after the save");
+  assert(fresh.length === 3 && fresh.every((b) => !b.disabled), "controls re-enabled after the save");
   const freshCaps = findSettingInput(region, "captions_enabled");
   assert(freshCaps && !freshCaps.checked, "fresh-snapshot re-render reflects the saved value");
 });

@@ -28,7 +28,7 @@ from .models import (
     TEMPLATE_TEXT_CONSTRAINTS,
 )
 from .timing import (
-    EDITORIAL_SENTENCE_TAIL_SECONDS,
+    DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
     caption_sentence_boundaries,
     retime_compositions_to_caption_sentences,
 )
@@ -624,8 +624,8 @@ class EditorialPlanner:
             "narration": narration,
             "word_timestamps": [word.to_dict() for word in word_timings],
             "editorial_timing": {
-                "policy": "caption_sentence_end_with_tail_v1",
-                "sentence_tail_seconds": EDITORIAL_SENTENCE_TAIL_SECONDS,
+                "policy": "caption_sentence_end_with_hold_v1",
+                "sentence_hold_seconds": DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
                 "allowed_internal_boundaries": sentence_boundaries,
             },
             "available_assets": [cls._asset_context(asset) for asset in assets],
@@ -675,7 +675,7 @@ class EditorialPlanner:
             "or invented animation names. Narration/audio timestamps are the master clock. "
             "Base composition cuts on caption sentence timing, never a fixed number of seconds. "
             "End each composition at one of editorial_timing.allowed_internal_boundaries, which "
-            "already includes the configured 0.5-second visual hold after the spoken sentence. "
+            "already includes the configured visual hold after the spoken sentence. "
             "A composition may cover several related sentences; do not force one full-screen image "
             "per sentence. Choose only an approved template and use only that template's exact unique "
             "element roles and types from template_slots; omit unused optional roles but include "

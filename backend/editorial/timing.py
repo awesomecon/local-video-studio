@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 
@@ -10,7 +11,7 @@ from backend.captions import CaptionWord
 from .models import EditorialComposition
 
 
-EDITORIAL_SENTENCE_TAIL_SECONDS = 0.5
+DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS = 0.5
 _SENTENCE_END_RE = re.compile(r"(?:[.!?]+|…+)[\"'”’)}\]]*$")
 
 
@@ -19,18 +20,23 @@ def caption_sentence_boundaries(
     *,
     timeline_duration: float,
     fps: int,
-    tail_seconds: float = EDITORIAL_SENTENCE_TAIL_SECONDS,
+    hold_seconds: float = DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
 ) -> list[float]:
     """Return frame-aligned visual cut points after spoken sentence endings."""
-    if not words or timeline_duration <= 0 or fps <= 0:
+    if (
+        not words or timeline_duration <= 0 or fps <= 0
+        or not math.isfinite(hold_seconds) or hold_seconds < 0
+    ):
         return []
 
     def frame_time(seconds: float) -> float:
         return round(round(seconds * fps) / fps, 6)
 
+    # The final spoken sentence closes the timeline; it is never an internal
+    # visual cut, even when the narration master has silence after that word.
     points = {
-        frame_time(min(word.end_seconds + tail_seconds, timeline_duration))
-        for word in words
+        frame_time(min(word.end_seconds + hold_seconds, timeline_duration))
+        for word in words[:-1]
         if _SENTENCE_END_RE.search(word.text.strip())
     }
     final_frame = frame_time(timeline_duration)
@@ -43,7 +49,7 @@ def retime_compositions_to_caption_sentences(
     *,
     timeline_duration: float,
     fps: int,
-    tail_seconds: float = EDITORIAL_SENTENCE_TAIL_SECONDS,
+    hold_seconds: float = DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
 ) -> list[EditorialComposition] | None:
     """Snap composition cuts to caption sentences while preserving authored order.
 
@@ -59,7 +65,7 @@ def retime_compositions_to_caption_sentences(
         words,
         timeline_duration=timeline_duration,
         fps=fps,
-        tail_seconds=tail_seconds,
+        hold_seconds=hold_seconds,
     )
     if len(candidates) < internal_count:
         return None

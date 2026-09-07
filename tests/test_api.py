@@ -499,6 +499,7 @@ def test_editorial_display_settings_are_narrow_and_selectively_invalidate(tmp_pa
     snapshot = client.get(f"/api/projects/{project_id}").json()["editorial"]
     assert snapshot["captions_enabled"] is True
     assert snapshot["editorial_text_enabled"] is True
+    assert snapshot["sentence_hold_seconds"] == 0.5
     assert snapshot["settings_url"].endswith("/editorial/settings")
 
     empty = client.patch(f"/api/projects/{project_id}/editorial/settings", json={})
@@ -507,6 +508,11 @@ def test_editorial_display_settings_are_narrow_and_selectively_invalidate(tmp_pa
         f"/api/projects/{project_id}/editorial/settings", json={"arbitrary": True},
     )
     assert extra.status_code == 422
+    invalid_hold = client.patch(
+        f"/api/projects/{project_id}/editorial/settings",
+        json={"sentence_hold_seconds": 5.1},
+    )
+    assert invalid_hold.status_code == 422
 
     service = app.state.service
     project = service._project(project_id)
@@ -563,6 +569,16 @@ def test_editorial_display_settings_are_narrow_and_selectively_invalidate(tmp_pa
     assert editorial["captions_enabled"] is False
     assert editorial["editorial_text_enabled"] is False
     assert editorial["plan_status"] == "current"
+
+    hold = client.patch(
+        f"/api/projects/{project_id}/editorial/settings",
+        json={"sentence_hold_seconds": 0.2},
+    )
+    assert hold.status_code == 200
+    assert hold.json()["sentence_hold_seconds"] == 0.2
+    assert client.get(f"/api/projects/{project_id}").json()["editorial"][
+        "sentence_hold_seconds"
+    ] == 0.2
 
 
 def test_legacy_editorial_plan_without_provenance_is_untracked(tmp_path: Path) -> None:
