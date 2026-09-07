@@ -96,6 +96,7 @@ from backend.editorial.models import (
     EditorialImageModel, EditorialRevisionProposal, EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
+from backend.editorial.timing import retime_compositions_to_caption_sentences
 from backend.editorial.renderer import (
     EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
 )
@@ -1688,7 +1689,7 @@ class PipelineService:
         return clock
 
     def _retimed_editorial_plan(self, project: Project, plan: EditPlan) -> EditPlan | None:
-        """Snap stored plan boundaries onto the real narration clock.
+        """Snap stored plan boundaries onto caption sentences or the scene clock.
 
         Plans authored before the narration takes exist (or against planned
         scene durations) place composition boundaries on the planned clock.
@@ -1700,8 +1701,38 @@ class PipelineService:
         case callers keep using the stored plan.
         """
         bounds = self._narration_scene_bounds(project)
+        words = self._editorial_word_timings(project)
+        if words:
+            timeline_duration: float | None = None
+            master = self.store.project_path(project) / "narration" / "master.wav"
+            try:
+                timeline_duration = wav_duration(master)
+            except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error):
+                if bounds:
+                    timeline_duration = max(end for _start, end in bounds.values())
+            if timeline_duration is not None:
+                compositions = retime_compositions_to_caption_sentences(
+                    plan.compositions,
+                    words,
+                    timeline_duration=timeline_duration,
+                    fps=plan.fps,
+                )
+                if compositions is not None:
+                    return EditPlan.model_validate({
+                        **plan.model_dump(mode="python"),
+                        "compositions": [
+                            item.model_dump(mode="python") for item in compositions
+                        ],
+                    })
         if bounds is None:
             return None
+        recorded_duration = max(end for _start, end in bounds.values())
+        frame_tolerance = max(1.0 / plan.fps, 0.001)
+        if abs(plan.duration - recorded_duration) <= frame_tolerance:
+            # The fallback has no word-level evidence with which to improve an
+            # already recorded-clock plan. Returning it unchanged also avoids
+            # repeatedly redistributing compositions that share narration refs.
+            return plan
         claims: dict[str, list[tuple[int, float]]] = {}
         referenced_by_composition: dict[int, list[str]] = {}
         for index, composition in enumerate(plan.compositions):

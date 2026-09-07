@@ -21,6 +21,11 @@ from backend.editorial import (
     editorial_font_manifest,
     validate_export_assets,
 )
+from backend.editorial.timing import (
+    EDITORIAL_SENTENCE_TAIL_SECONDS,
+    caption_sentence_boundaries,
+    retime_compositions_to_caption_sentences,
+)
 from backend.captions import CaptionWord
 from backend.core import load_config
 from backend.pipeline import PipelineService
@@ -341,6 +346,11 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert "HTML, CSS, JavaScript" in llm.calls[0]["messages"][0]["content"]
     context = json.loads(llm.calls[0]["messages"][1]["content"])
     assert context["word_timestamps"][-1]["end_seconds"] == 14.0
+    assert context["editorial_timing"] == {
+        "policy": "caption_sentence_end_with_tail_v1",
+        "sentence_tail_seconds": EDITORIAL_SENTENCE_TAIL_SECONDS,
+        "allowed_internal_boundaries": [],
+    }
     assert context["approved_templates"] == [item.value for item in EditorialTemplate]
     assert context["template_slots"]["documentReveal"]["document"] == "document"
     assert context["template_required_roles"]["comparisonCanvas"] == [
@@ -349,6 +359,59 @@ def test_editorial_planner_uses_structured_local_llm_and_audio_clock() -> None:
     assert context["template_text_constraints"]["bigTextReveal"]["headline"] == {
         "max_characters": 60, "max_lines": 4,
     }
+
+
+def test_editorial_timing_snaps_cuts_to_caption_sentences_with_tail() -> None:
+    words = [
+        CaptionWord(0.0, 1.0, "First."),
+        CaptionWord(1.2, 3.0, "Second?”"),
+        CaptionWord(3.2, 6.0, "Last."),
+    ]
+    compositions = [
+        EditorialComposition(
+            id=f"c-{index}", start=start, duration=2.0,
+            template=EditorialTemplate.BIG_TEXT_REVEAL,
+            elements=[EditorialElement(
+                id=f"title-{index}", type=EditorialElementType.TEXT,
+                text=str(index), role="headline",
+            )],
+            events=[EditorialEvent(
+                time=1.0, duration=0.5, action=MotionPrimitive.FADE_UP,
+                target=f"title-{index}",
+            )],
+        )
+        for index, start in enumerate((0.0, 2.0, 4.0))
+    ]
+
+    assert caption_sentence_boundaries(
+        words, timeline_duration=6.5, fps=10,
+    ) == [1.5, 3.5]
+    retimed = retime_compositions_to_caption_sentences(
+        compositions, words, timeline_duration=6.5, fps=10,
+    )
+
+    assert retimed is not None
+    assert [(item.start, item.duration) for item in retimed] == [
+        (0.0, 1.5), (1.5, 2.0), (3.5, 3.0),
+    ]
+    assert [item.events[0].time for item in retimed] == [0.8, 1.0, 1.5]
+
+
+def test_editorial_timing_needs_enough_sentence_boundaries() -> None:
+    composition = EditorialComposition(
+        id="only", start=0, duration=2,
+        template=EditorialTemplate.BIG_TEXT_REVEAL,
+        elements=[EditorialElement(
+            id="title", type=EditorialElementType.TEXT, text="ONE", role="headline",
+        )],
+        events=[EditorialEvent(time=0, action=MotionPrimitive.FADE_UP, target="title")],
+    )
+    assert retime_compositions_to_caption_sentences(
+        [composition, composition.model_copy(update={"id": "second", "start": 2})],
+        [CaptionWord(0, 4, "No punctuation")],
+        timeline_duration=4,
+        fps=24,
+    ) is None
 
 
 def test_planner_context_uses_recorded_scene_clock() -> None:
@@ -381,6 +444,17 @@ def test_planner_context_uses_recorded_scene_clock() -> None:
     assert [entry["end"] for entry in fallback["narration"]] == [
         5.0, 10.0, 15.0, 20.0,
     ]
+
+    # The complete narration master owns the final visual tail even when the
+    # final aligned word ends a little earlier.
+    with_words = EditorialPlanner._context(
+        project,
+        script,
+        assets=(),
+        word_timings=[CaptionWord(0, 21.5, "Done.")],
+        scene_clock=clock,
+    )
+    assert with_words["project"]["duration"] == 22.0
 
 
 def test_promote_node_lifts_one_unnumbered_chief_node() -> None:
