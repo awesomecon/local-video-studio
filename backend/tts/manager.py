@@ -234,6 +234,30 @@ class TTSManager:
             performance,
             combine_scenes=request.combine_scene_chunks,
         )
+        effective_combine_scenes = request.combine_scene_chunks
+        chunking_safeguard: str | None = None
+        if (
+            request.text is None
+            and request.combine_scene_chunks
+            and request.provider == "higgs_tts_3"
+            and profile is not None
+            and len(chunk_specs) > 1
+            and self._same_narration(profile.reference_transcript, text)
+        ):
+            # Higgs consumes the reference transcript as in-context speech. If
+            # that transcript is the narration being generated, a long first
+            # chunk can continue into text reserved for the next chunk. The
+            # subsequent request then speaks that text again. Keep those
+            # collision-prone requests short and scene-bound instead.
+            chunk_specs = self._narration_chunks(
+                project_id,
+                request.text,
+                seconds,
+                performance,
+                combine_scenes=False,
+            )
+            effective_combine_scenes = False
+            chunking_safeguard = "separate_scenes_for_matching_higgs_reference"
         chunks = [str(item["text"]) for item in chunk_specs]
         reference = self.voice_profile_audio_path(profile) if profile is not None else None
         profile_id = profile.id if profile is not None else None
@@ -341,7 +365,7 @@ class TTSManager:
                 "backend": request.provider,
                 "model": backend.descriptor().model_name,
                 "model_version": backend.descriptor().model_version,
-                "workflow_version": "tts-narration-v3",
+                "workflow_version": "tts-narration-v4",
                 "seed": request.seed,
                 "prompt": text,
                 "settings": {
@@ -358,8 +382,10 @@ class TTSManager:
                     "scene_script_sha256": self._scene_script_hash(project_id),
                     **({"performance_tags": performance_meta}
                        if performance_meta is not None else {}),
+                    **({"chunking_safeguard": chunking_safeguard}
+                       if chunking_safeguard is not None else {}),
                     "timing_mode": (
-                        "script_audio_v1" if request.text is None and request.combine_scene_chunks
+                        "script_audio_v1" if request.text is None and effective_combine_scenes
                         else "scene_audio_v1" if request.text is None
                         else "override"
                     ),
@@ -390,6 +416,11 @@ class TTSManager:
             if plan_path.is_file():
                 scenes = self.pipeline.store.load_plan(project.slug).scenes
         return scenes
+
+    @staticmethod
+    def _same_narration(first: str, second: str) -> bool:
+        """Compare narration while ignoring harmless layout and case differences."""
+        return " ".join(first.split()).casefold() == " ".join(second.split()).casefold()
 
     def _narration_chunks(
         self,
