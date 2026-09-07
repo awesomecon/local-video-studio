@@ -96,6 +96,7 @@ from backend.editorial.models import (
     EditorialImageModel, EditorialRevisionProposal, EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
+from backend.editorial.timing import retime_compositions_to_caption_sentences
 from backend.editorial.renderer import (
     EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
 )
@@ -446,6 +447,9 @@ class PipelineService:
                 "editorial_text_enabled": (
                     edit_plan.editorial_text_enabled if edit_plan is not None else None
                 ),
+                "sentence_hold_seconds": (
+                    edit_plan.sentence_hold_seconds if edit_plan is not None else None
+                ),
             }
         if recovery:
             snapshot["recovery"] = recovery
@@ -479,18 +483,21 @@ class PipelineService:
         captions_enabled: bool | None = None,
         editorial_text_enabled: bool | None = None,
         caption_style: str | None = None,
+        sentence_hold_seconds: float | None = None,
     ) -> EditPlan:
-        """Update only independent caption/editorial-text switches on an existing plan.
+        """Update the supported display and sentence-timing settings on an existing plan.
 
         Caption style changes can move captions between the burned ASS path
         (``standard``) and the rendered composition master, so the invalidation
         set covers the Editorial visual stage whenever the master's caption
-        content changes on either side of the update.
+        content changes on either side of the update. Changing the sentence
+        hold also immediately resnaps the plan when matching word timing exists.
         """
         if (
             captions_enabled is None
             and editorial_text_enabled is None
             and caption_style is None
+            and sentence_hold_seconds is None
         ):
             raise PipelineError("At least one Editorial setting must be provided.")
         if caption_style is not None:
@@ -502,6 +509,16 @@ class PipelineService:
                     f"Unknown Editorial caption style {caption_style!r}; "
                     f"expected one of: {values}."
                 ) from exc
+        if sentence_hold_seconds is not None:
+            if (
+                isinstance(sentence_hold_seconds, bool)
+                or not math.isfinite(sentence_hold_seconds)
+                or not 0 <= sentence_hold_seconds <= 5
+            ):
+                raise PipelineError(
+                    "Editorial sentence hold must be between 0 and 5 seconds."
+                )
+            sentence_hold_seconds = float(sentence_hold_seconds)
         with self._lock:
             project = self._project(project_id)
             if project.video_mode is not VideoMode.EDITORIAL:
@@ -517,9 +534,16 @@ class PipelineService:
                 updates["editorial_text_enabled"] = editorial_text_enabled
             if caption_style is not None and caption_style is not plan.caption_style:
                 updates["caption_style"] = caption_style
+            if (
+                sentence_hold_seconds is not None
+                and sentence_hold_seconds != plan.sentence_hold_seconds
+            ):
+                updates["sentence_hold_seconds"] = sentence_hold_seconds
             if not updates:
                 return plan
             updated = plan.model_copy(update=updates)
+            if "sentence_hold_seconds" in updates:
+                updated = self._retimed_editorial_plan(project, updated) or updated
             self.store.save_edit_plan(project.slug, updated)
             self.store.save_edit_plan_provenance(
                 project.slug,
@@ -532,6 +556,8 @@ class PipelineService:
                 "render_final", "thumbnails",
             }
             if "editorial_text_enabled" in updates:
+                invalidated.add("editorial_visual")
+            if "sentence_hold_seconds" in updates:
                 invalidated.add("editorial_visual")
             old_master_captions = self._plan_uses_master_captions(plan)
             new_master_captions = self._plan_uses_master_captions(updated)
@@ -1688,7 +1714,7 @@ class PipelineService:
         return clock
 
     def _retimed_editorial_plan(self, project: Project, plan: EditPlan) -> EditPlan | None:
-        """Snap stored plan boundaries onto the real narration clock.
+        """Snap stored plan boundaries onto caption sentences or the scene clock.
 
         Plans authored before the narration takes exist (or against planned
         scene durations) place composition boundaries on the planned clock.
@@ -1700,8 +1726,39 @@ class PipelineService:
         case callers keep using the stored plan.
         """
         bounds = self._narration_scene_bounds(project)
+        words = self._editorial_word_timings(project)
+        if words:
+            timeline_duration: float | None = None
+            master = self.store.project_path(project) / "narration" / "master.wav"
+            try:
+                timeline_duration = wav_duration(master)
+            except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error):
+                if bounds:
+                    timeline_duration = max(end for _start, end in bounds.values())
+            if timeline_duration is not None:
+                compositions = retime_compositions_to_caption_sentences(
+                    plan.compositions,
+                    words,
+                    timeline_duration=timeline_duration,
+                    fps=plan.fps,
+                    hold_seconds=plan.sentence_hold_seconds,
+                )
+                if compositions is not None:
+                    return EditPlan.model_validate({
+                        **plan.model_dump(mode="python"),
+                        "compositions": [
+                            item.model_dump(mode="python") for item in compositions
+                        ],
+                    })
         if bounds is None:
             return None
+        recorded_duration = max(end for _start, end in bounds.values())
+        frame_tolerance = max(1.0 / plan.fps, 0.001)
+        if abs(plan.duration - recorded_duration) <= frame_tolerance:
+            # The fallback has no word-level evidence with which to improve an
+            # already recorded-clock plan. Returning it unchanged also avoids
+            # repeatedly redistributing compositions that share narration refs.
+            return plan
         claims: dict[str, list[tuple[int, float]]] = {}
         referenced_by_composition: dict[int, list[str]] = {}
         for index, composition in enumerate(plan.compositions):

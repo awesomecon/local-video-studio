@@ -94,6 +94,15 @@ the real audio. `GET /api/captions/models` exposes the descriptor, install guida
 readiness (the Models & System Status screen surfaces this); the optional dependency and model
 directory must be configured first, and nothing is downloaded automatically.
 
+Editorial composition cuts follow that same caption clock. Internal cuts snap to the nearest
+spoken sentence ending and keep the current composition visible for a configurable hold (0.5
+seconds by default); they are not assigned a fixed scene length. The per-plan hold can be changed
+from Editorial settings or with `PATCH .../editorial/settings` and `sentence_hold_seconds` (0–5).
+The final composition runs through the end of the narration master. Motion-event offsets scale
+with the composition so retiming does not change event order.
+Only word timings whose recorded audio hash matches the active narration are authoritative; when
+alignment is missing or stale, Editorial falls back to its recorded per-scene narration clock.
+
 ### Editorial Mode caption styles
 
 Editorial Mode separates captions from the composition's own text elements. The user picks a

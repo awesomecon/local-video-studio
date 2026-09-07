@@ -27,6 +27,11 @@ from .models import (
     TEMPLATE_REQUIRED_ROLES,
     TEMPLATE_TEXT_CONSTRAINTS,
 )
+from .timing import (
+    DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
+    caption_sentence_boundaries,
+    retime_compositions_to_caption_sentences,
+)
 
 
 class EditorialPlanDraft(DomainModel):
@@ -396,6 +401,14 @@ class EditorialPlanner:
             )
             for authored in draft.compositions
         ]
+        duration = self._timeline_duration(script.scenes, word_timings, scene_clock)
+        if word_timings:
+            compositions = retime_compositions_to_caption_sentences(
+                compositions,
+                word_timings,
+                timeline_duration=duration,
+                fps=project.fps,
+            ) or compositions
         return EditPlan(
             project_id=project.id,
             width=project.resolution[0],
@@ -555,10 +568,10 @@ class EditorialPlanner:
         word_timings: Sequence[CaptionWord],
         scene_clock: Sequence[tuple[float, float]] | None = None,
     ) -> float:
-        if word_timings:
-            return max(word.end_seconds for word in word_timings)
         if scene_clock:
             return max(end for _start, end in scene_clock)
+        if word_timings:
+            return max(word.end_seconds for word in word_timings)
         return sum(scene.duration for scene in scenes)
 
     @classmethod
@@ -596,6 +609,11 @@ class EditorialPlanner:
                     "start": round(start, 3),
                     "end": round(cursor * scale, 3),
                 })
+        sentence_boundaries = caption_sentence_boundaries(
+            word_timings,
+            timeline_duration=duration,
+            fps=project.fps,
+        )
         return {
             "project": {
                 "title": project.title, "topic": project.topic, "style": project.style,
@@ -605,6 +623,11 @@ class EditorialPlanner:
             },
             "narration": narration,
             "word_timestamps": [word.to_dict() for word in word_timings],
+            "editorial_timing": {
+                "policy": "caption_sentence_end_with_hold_v1",
+                "sentence_hold_seconds": DEFAULT_EDITORIAL_SENTENCE_HOLD_SECONDS,
+                "allowed_internal_boundaries": sentence_boundaries,
+            },
             "available_assets": [cls._asset_context(asset) for asset in assets],
             "approved_templates": [item.value for item in EditorialTemplate],
             "template_slots": {
@@ -650,8 +673,11 @@ class EditorialPlanner:
             "renderer. Return only JSON matching the supplied schema. Decide WHAT visual "
             "events happen; never return HTML, CSS, JavaScript, font names, colors, coordinates, "
             "or invented animation names. Narration/audio timestamps are the master clock. "
-            "Prefer one evolving 5–20 second composition over sentence-by-sentence full-screen "
-            "images. Choose only an approved template and use only that template's exact unique "
+            "Base composition cuts on caption sentence timing, never a fixed number of seconds. "
+            "End each composition at one of editorial_timing.allowed_internal_boundaries, which "
+            "already includes the configured visual hold after the spoken sentence. "
+            "A composition may cover several related sentences; do not force one full-screen image "
+            "per sentence. Choose only an approved template and use only that template's exact unique "
             "element roles and types from template_slots; omit unused optional roles but include "
             "the core visual roles implied by the template. Element ids may be concise unique slugs; "
             "Respect every role's max_characters and max_lines from template_text_constraints; "

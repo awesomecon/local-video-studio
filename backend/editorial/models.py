@@ -400,6 +400,7 @@ class EditPlan(DomainModel):
     compositions: list[EditorialComposition] = Field(min_length=1, max_length=200)
     editorial_text_enabled: bool = True
     captions_enabled: bool = True
+    sentence_hold_seconds: float = Field(default=0.5, ge=0, le=5)
     caption_style: EditorialCaptionStyle = EditorialCaptionStyle.EDITORIAL_PHRASE
     caption_emphasis: list[EditorialCaptionEmphasis] = Field(
         default_factory=list, max_length=50,

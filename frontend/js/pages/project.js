@@ -694,9 +694,6 @@ export const MOTION_PRIMITIVES = [
 /** Element types whose deterministic text the backend allows editing. */
 const EDITABLE_TEXT_ELEMENT_TYPES = ["text", "document"];
 
-/** Backend bounds for a composition duration (seconds). */
-const COMPOSITION_DURATION_LIMIT = 120;
-
 /**
  * Reduce the snapshot's optional provenance metadata to a panel state.
  * Only the recognized plan_status values are trusted: "stale" (with a
@@ -920,7 +917,11 @@ export function buildEditorialDisplayControls(
   const textOk = typeof editorial.editorial_text_enabled === "boolean";
   const captionStyleOk =
     captionsOk && typeof editorial.caption_style === "string";
-  if (!captionsOk && !textOk && !captionStyleOk) return null;
+  const sentenceHoldOk = typeof editorial.sentence_hold_seconds === "number"
+    && Number.isFinite(editorial.sentence_hold_seconds)
+    && editorial.sentence_hold_seconds >= 0
+    && editorial.sentence_hold_seconds <= 5;
+  if (!captionsOk && !textOk && !captionStyleOk && !sentenceHoldOk) return null;
 
   /** @type {HTMLInputElement[]} */
   const controls = [];
@@ -965,9 +966,33 @@ export function buildEditorialDisplayControls(
     }
     row.append(el("label", { class: "small" }, " Caption style", select));
   };
+  const makeSentenceHoldInput = (value) => {
+    const input = el("input", {
+      type: "number", min: "0", max: "5", step: "0.1", value: String(value),
+      "aria-label": "Sentence hold in seconds",
+    });
+    input.dataset.editorialSetting = "sentence_hold_seconds";
+    let current = value;
+    input.addEventListener("change", () => {
+      if (ctrl.busy !== "") { input.value = String(current); return; }
+      const next = input.valueAsNumber;
+      if (!Number.isFinite(next) || next < 0 || next > 5) {
+        input.value = String(current);
+        return;
+      }
+      void saveEditorialSetting("sentence_hold_seconds", input, current,
+        { settingsUrl, ctrl, errors, onSaved, controls }
+      ).then((saved) => {
+        if (saved) current = next;
+      });
+    });
+    controls.push(input);
+    row.append(el("label", { class: "small" }, " Sentence hold (seconds) ", input));
+  };
   if (captionsOk) makeCheckbox("captions_enabled", "Captions", editorial.captions_enabled);
   if (textOk) makeCheckbox("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
   if (captionStyleOk) makeStyleSelect(editorial.caption_style);
+  if (sentenceHoldOk) makeSentenceHoldInput(editorial.sentence_hold_seconds);
   return row;
 }
 
@@ -976,9 +1001,9 @@ export function buildEditorialDisplayControls(
  * per region; every control stays disabled while the request runs. The Edit
  * Plan is never touched on this path. Returns whether the save succeeded so
  * select-based callers can track the last persisted value.
- * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"} key
+ * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"|"sentence_hold_seconds"} key
  * @param {HTMLInputElement | HTMLSelectElement} control — the control that changed
- * @param {boolean | string} previous — value to restore on failure
+ * @param {boolean | string | number} previous — value to restore on failure
  * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, controls: (HTMLInputElement | HTMLSelectElement)[]}} ctx
  * @returns {Promise<boolean>}
  */
@@ -994,15 +1019,17 @@ async function saveEditorialSetting(key, control, previous, ctx) {
     ? { captions_enabled: control.checked }
     : key === "editorial_text_enabled"
       ? { editorial_text_enabled: control.checked }
-      : { caption_style: control.value };
-  const isCheckbox = key !== "caption_style";
+      : key === "sentence_hold_seconds"
+        ? { sentence_hold_seconds: control.valueAsNumber }
+        : { caption_style: control.value };
+  const isCheckbox = key === "captions_enabled" || key === "editorial_text_enabled";
   try {
     await patchEditorialSettings(state.config, settingsUrl, body);
   } catch (err) {
     ctrl.busy = "";
     for (const item of controls) item.disabled = item.dataset.keepDisabled === "1";
     if (isCheckbox) control.checked = previous;
-    else control.value = previous; // restore the previous value
+    else control.value = String(previous); // restore the previous value
     errors.replaceChildren(errorPanel(err));
     toastError(err, "Editorial display setting not saved");
     return false;
@@ -1224,8 +1251,8 @@ export function buildCompositionControls(data, ctx) {
     el("div", { class: "stack" },
       buildRegenControl(data, ctx),
       buildRevisionControl(data, ctx)),
-    compositionControlGroup("Timing & template",
-      buildDurationControl(data, ctx),
+    compositionControlGroup("Narration timing & template",
+      buildResolvedTiming(data, ctx),
       buildTemplateControl(data, ctx)),
   ];
   const textGroup = buildTextControls(data, ctx);
@@ -1361,45 +1388,27 @@ function buildRegenControl(data, ctx) {
   return el("div", { class: "row" }, btn);
 }
 
-/** Duration editor: number input (0 < d <= limit) + save {duration}. */
-function buildDurationControl(data, ctx) {
-  const input = el("input", {
-    type: "number", "data-ed-duration": data.id,
-    min: "0", max: String(COMPOSITION_DURATION_LIMIT), step: "any",
-    value: data.duration != null ? String(data.duration) : "",
-    style: { width: "130px" },
-  });
-  const save = el("button", { class: "btn btn-sm", type: "button", "data-ed-save-duration": data.id }, "Save duration");
-  const readValue = () => {
-    const raw = input.value.trim();
-    const value = Number(raw);
-    return raw !== "" && Number.isFinite(value) && value > 0 && value <= COMPOSITION_DURATION_LIMIT
-      ? value
-      : null;
-  };
-  const refresh = () => {
-    if (ctx.ctrl.busy !== "") return;
-    const value = readValue();
-    save.disabled = value == null || (data.duration != null && value === data.duration);
-  };
-  input.addEventListener("input", refresh);
-  input.addEventListener("change", refresh);
-  refresh();
-  save.addEventListener("click", () => {
-    if (ctx.ctrl.busy !== "") return;
-    const value = readValue();
-    if (value == null) {
-      ctx.errors.replaceChildren(banner(el("div", {},
-        `Duration must be a number between 0 and ${COMPOSITION_DURATION_LIMIT} seconds.`)));
-      return;
-    }
-    if (data.duration != null && value === data.duration) return;
-    void ctx.runMutation(
-      () => editEditorialComposition(state.config, ctx.projectId, data.id, { duration: value }),
-      "Composition duration not saved");
-  });
-  return el("div", { class: "row", style: { gap: "8px" } },
-    el("span", { class: "muted small" }, "Duration (s)"), input, save);
+/** Read-only timing resolved from the narration/caption clock. */
+function buildResolvedTiming(data, ctx) {
+  const seconds = (value) => `${Number(value.toFixed(3))} s`;
+  const validStart = typeof data.start === "number" && Number.isFinite(data.start);
+  const validDuration = typeof data.duration === "number"
+    && Number.isFinite(data.duration) && data.duration > 0;
+  const start = validStart ? data.start : null;
+  const end = validStart && validDuration ? data.start + data.duration : null;
+  const hold = ctx.ctrl?.plan?.sentence_hold_seconds;
+  const validHold = typeof hold === "number" && Number.isFinite(hold)
+    && hold >= 0 && hold <= 5;
+  return el("div", { class: "stack", "data-ed-resolved-timing": data.id },
+    el("div", { class: "row wrap", style: { gap: "12px" } },
+      el("span", { class: "small" }, `Start ${start != null ? seconds(start) : "—"}`),
+      el("span", { class: "small" }, `End ${end != null ? seconds(end) : "—"}`),
+      el("span", { class: "small" }, `Resolved length ${validDuration ? seconds(data.duration) : "—"}`),
+    ),
+    el("div", { class: "muted small" },
+      "Read-only: cuts are recalculated from narration and caption timing during rendering.",
+      validHold ? ` Sentence hold: ${hold} seconds; change it in Editorial settings.` : ""),
+  );
 }
 
 /** Template selector restricted to the five-template allowlist. */
