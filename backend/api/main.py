@@ -1145,12 +1145,11 @@ def create_app(
     def voice_profile_audio(project_id: str, profile_id: str) -> FileResponse:
         try:
             profile = service.tts.get_voice_profile(project_id, profile_id)
-            project = service._project(project_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        path = service.store.project_path(project) / profile.reference_audio
+        path = service.tts.voice_profile_audio_path(profile)
         if not path.is_file():
             raise HTTPException(status_code=404, detail="reference voice audio is missing")
         return FileResponse(path, media_type="audio/wav")

@@ -235,7 +235,7 @@ def test_worker_canceled_jobs_can_be_reset_and_retried(tmp_path: Path) -> None:
     assert provider.generated == ["job-1", "job-1"]
 
 
-def test_voice_profile_api_requires_consent_and_stays_portable(tmp_path: Path) -> None:
+def test_voice_profile_api_requires_consent_and_is_shared_across_projects(tmp_path: Path) -> None:
     app = create_app(
         load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
         project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
@@ -261,15 +261,59 @@ def test_voice_profile_api_requires_consent_and_stays_portable(tmp_path: Path) -
     assert playback.status_code == 200
     assert playback.headers["content-type"].startswith("audio/wav")
     assert playback.content == wav_bytes()
-    assert (app.state.service.store.project_path(project) / payload["reference_audio"]).is_file()
+    shared_audio = (
+        app.state.service.store.root / ".voices" / payload["id"] / payload["reference_audio"]
+    )
+    assert shared_audio.is_file()
 
     other = app.state.service.create_project(ProjectCreate(
         title="Other Voice Project", topic="test", target_duration=1,
     ))
-    denied_playback = client.get(
+    other_listing = client.get(f"/api/projects/{other.id}/tts/voices").json()["voices"]
+    assert [voice["id"] for voice in other_listing] == [payload["id"]]
+    shared_playback = client.get(
         f"/api/projects/{other.id}/tts/voices/{payload['id']}/file",
     )
-    assert denied_playback.status_code == 404
+    assert shared_playback.status_code == 200
+    assert shared_playback.content == wav_bytes()
+    app.state.service.delete_project(project.id)
+    assert shared_audio.is_file()
+    assert client.get(
+        f"/api/projects/{other.id}/tts/voices/{payload['id']}/file",
+    ).status_code == 200
+
+
+def test_legacy_project_voice_profile_is_available_to_other_projects(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    service = app.state.service
+    source = service.create_project(ProjectCreate(
+        title="Legacy Voice", topic="test", target_duration=1,
+    ))
+    other = service.create_project(ProjectCreate(
+        title="New Video", topic="test", target_duration=1,
+    ))
+    profile = service.tts.create_voice_profile(
+        source.id, name="Existing narrator", transcript="hello", language="en",
+        authorized=True, audio=wav_bytes(),
+    )
+
+    shared_dir = service.store.root / ".voices" / profile.id
+    legacy_dir = service.store.project_path(source) / "voices" / profile.id
+    shared_dir.rename(legacy_dir)
+    metadata_path = legacy_dir / "profile.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["reference_audio"] = f"voices/{profile.id}/reference.wav"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    client = TestClient(app)
+    listed = client.get(f"/api/projects/{other.id}/tts/voices").json()["voices"]
+    assert [voice["id"] for voice in listed] == [profile.id]
+    playback = client.get(f"/api/projects/{other.id}/tts/voices/{profile.id}/file")
+    assert playback.status_code == 200
+    assert playback.content == wav_bytes()
 
 
 def test_voice_profile_gain_boosts_saved_reference_audio(tmp_path: Path) -> None:
@@ -909,7 +953,7 @@ def test_corrupt_voice_profiles_are_skipped_when_listing(
         project.id, name="Invalid Schema", transcript="hello", language="en",
         authorized=True, audio=wav_bytes(),
     )
-    voices_dir = service.store.project_path(project) / "voices"
+    voices_dir = service.store.root / ".voices"
     (voices_dir / broken_json.id / "profile.json").write_text("{not json", encoding="utf-8")
     (voices_dir / invalid_schema.id / "profile.json").write_text('{"name": 1}', encoding="utf-8")
 
