@@ -807,6 +807,45 @@ def test_generate_performance_script_scopes_higgs_artifact(
     assert "Higgs Audio v3" in service.director.llm.complete_calls[0]["messages"][0]["content"]
 
 
+def test_generating_for_another_provider_replaces_the_shared_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Shared provider tags", topic="test", target_duration=2,
+    ))
+    source = "I thought everything was normal."
+    _add_scenes(service, project, [source])
+
+    def responder(messages: Any, calls: list[dict[str, Any]]) -> dict[str, Any]:
+        system = messages[0]["content"]
+        tagged = (
+            "<|emotion:contemplation|> I thought everything was normal."
+            if "Higgs Audio v3" in system
+            else "[calm, conversational] I thought everything was normal."
+        )
+        return {"segments": [{"index": 0, "tagged": tagged}]}
+
+    _enable_fake_llm(service, monkeypatch, responder)
+    service.update_project(project.id, {"selected_llm_model": "fake-local-model"})
+
+    fish, _ = service.tts.generate_performance_script(
+        project.id, provider="fish_s2_pro",
+    )
+    path = service.store.project_path(project) / "narration" / "performance-tags.json"
+    assert path.is_file()
+    assert fish.provider == "fish_s2_pro"
+
+    higgs, _ = service.tts.generate_performance_script(
+        project.id, provider="higgs_tts_3",
+    )
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert higgs.provider == "higgs_tts_3"
+    assert persisted["provider"] == "higgs_tts_3"
+    assert persisted["segments"][0]["tagged"].startswith("<|emotion:contemplation|>")
+    assert list(path.parent.glob("performance-tags*.json")) == [path]
+
+
 def test_generate_performance_script_override_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

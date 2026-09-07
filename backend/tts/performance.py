@@ -593,8 +593,10 @@ class PerformanceScript(BaseModel):
     """Portable, human-readable delivery-tag artifact for one narration run.
 
     The artifact is provider-scoped: a script generated for one provider is
-    stored under that provider's file and is only ever applied to runs of
-    that same provider, so one model's cues can never leak into another's.
+    recorded with that provider and is only ever applied to runs of that same
+    provider, so one model's cues can never leak into another's.  A project has
+    one shared ``narration/performance-tags.json`` artifact; generating for a
+    different provider replaces it.
     """
 
     model_config = ConfigDict(extra="forbid")
