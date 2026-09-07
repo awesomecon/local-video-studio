@@ -191,7 +191,13 @@ class TTSManager:
         text = self.resolve_narration_text(project_id, request.text)
         seconds = request.chunk_seconds or _DEFAULT_CHUNK[request.provider]
         performance, performance_meta = self._resolve_performance(project_id, request)
-        chunk_specs = self._narration_chunks(project_id, request.text, seconds, performance)
+        chunk_specs = self._narration_chunks(
+            project_id,
+            request.text,
+            seconds,
+            performance,
+            combine_scenes=request.combine_scene_chunks,
+        )
         chunks = [str(item["text"]) for item in chunk_specs]
         reference = root / profile.reference_audio if profile is not None else None
         profile_id = profile.id if profile is not None else None
@@ -316,7 +322,11 @@ class TTSManager:
                     "scene_script_sha256": self._scene_script_hash(project_id),
                     **({"performance_tags": performance_meta}
                        if performance_meta is not None else {}),
-                    "timing_mode": "scene_audio_v1" if request.text is None else "override",
+                    "timing_mode": (
+                        "script_audio_v1" if request.text is None and request.combine_scene_chunks
+                        else "scene_audio_v1" if request.text is None
+                        else "override"
+                    ),
                     "chunks": chunk_records,
                     "scene_durations": self._scene_durations(
                         chunk_records, join_result.inserted_pause_seconds,
@@ -351,6 +361,8 @@ class TTSManager:
         override: str | None,
         target_seconds: float,
         performance: PerformanceScript | None = None,
+        *,
+        combine_scenes: bool = False,
     ) -> list[dict[str, Any]]:
         """Split at scene boundaries so rendered pictures can follow measured speech.
 
@@ -372,6 +384,30 @@ class TTSManager:
                 chunks = chunk_narration(text, target_seconds)
             return [{"text": text} for text in chunks]
         scenes = self._narration_scenes(project_id)
+        if combine_scenes:
+            sources: list[str] = []
+            has_tags = False
+            for scene in scenes:
+                source = scene.narration.strip()
+                if not source:
+                    continue
+                segment = self._performance_segment(performance, f"scene:{scene.id}")
+                if segment is not None and segment.source == source:
+                    sources.append(segment.tagged)
+                    has_tags = True
+                else:
+                    sources.append(source)
+            combined = "\n\n".join(sources)
+            if not combined:
+                raise ValueError("narration text is empty")
+            chunk_texts = (
+                chunk_narration_tagged(
+                    combined, target_seconds, provider=performance.provider,
+                )
+                if has_tags and performance is not None
+                else chunk_narration(combined, target_seconds)
+            )
+            return [{"text": text} for text in chunk_texts]
         chunks: list[dict[str, Any]] = []
         for scene in scenes:
             source = scene.narration.strip()
@@ -739,7 +775,7 @@ class TTSManager:
             return None
         if asset.settings.get("scene_script_sha256") != self._scene_script_hash(project_id):
             return None
-        if asset.settings.get("timing_mode") == "recorded_master_v1":
+        if asset.settings.get("timing_mode") in {"recorded_master_v1", "script_audio_v1"}:
             project = self.pipeline._project(project_id)
             scenes = self.pipeline.database.list_scenes(project_id)
             planned = [scene.duration for scene in scenes]

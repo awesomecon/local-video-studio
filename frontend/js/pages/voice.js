@@ -224,6 +224,48 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const language = languageSelect(current.language || "en");
   const chunk = el("input", { type: "number", class: "input", min: "5", max: "180",
     step: "5", value: current.chunk_seconds || "", placeholder: "Model default" });
+  const sceneGrouping = el("select", { class: "input" },
+    el("option", { value: "scene" }, "Separately — one request per scene"),
+    el("option", { value: "combined" }, "Together — combine scenes into longer requests"));
+  sceneGrouping.value = current.combine_scene_chunks ? "combined" : "scene";
+  const chunkDefaults = {
+    qwen_tts: 60, step_audio_editx: 20, chatterbox: 45, fish_s2_pro: 30,
+    voxcpm2: 30, omnivoice: 30, index_tts_2_5: 30, breeze_tts_2: 30,
+    higgs_tts_3: 30,
+  };
+  const chunkingExplanation = el("div", {
+    class: "chunking-explainer", role: "note", "aria-live": "polite",
+  });
+  const updateChunkingExplanation = () => {
+    const customLimit = Number(chunk.value);
+    const limit = customLimit || chunkDefaults[provider.value] || 30;
+    const limitSource = customLimit ? "your limit" : "the model default";
+    if (sceneGrouping.value === "combined") {
+      chunkingExplanation.replaceChildren(
+        el("strong", {}, "Together: fewer, longer TTS requests"),
+        el("p", {},
+          `The app adds neighboring scenes to the same request until their combined narration `
+          + `reaches about ${limit} seconds (${limitSource}). If the whole short fits, the voice `
+          + "model receives it in one request; longer scripts become two or more requests."),
+        el("p", { class: "muted small" },
+          "Example: a 35-second short with a 45-second limit becomes one request. A 70-second "
+          + "short becomes about two. This often sounds smoother, but scene timing is estimated."));
+    } else {
+      chunkingExplanation.replaceChildren(
+        el("strong", {}, "Separately: every scene starts a new TTS request"),
+        el("p", {},
+          `The ${limit}-second limit (${limitSource}) only matters when one scene's narration is `
+          + "longer than that. In that case, that scene is split into smaller requests."),
+        el("p", { class: "muted small" },
+          "Example: six short scenes become six requests, even if all six together are under the "
+          + "limit. This preserves measured scene boundaries."));
+    }
+    chunkingExplanation.append(el("p", { class: "muted small" },
+      "The limit is estimated from word count, not the exact generated audio length. This setting "
+      + "affects planned scenes; a Script override is split using only the limit."));
+  };
+  sceneGrouping.onchange = updateChunkingExplanation;
+  chunk.oninput = updateChunkingExplanation;
   const pause = el("input", { type: "number", class: "input", min: "0", max: "5000",
     step: "50", value: current.pause_ms ?? 350 });
   const script = el("textarea", { class: "input", rows: "9",
@@ -390,6 +432,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     // Only providers with native in-band controls may receive delivery tags.
     performance.hidden = !PERFORMANCE_TAG_PROVIDERS.has(provider.value);
     if (performance.hidden) performance.useTags.checked = false;
+    updateChunkingExplanation();
   };
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
@@ -415,6 +458,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       provider: provider.value, voice_profile_id: builtIn ? null : voice.value,
       language: language.value,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
+      combine_scene_chunks: sceneGrouping.value === "combined",
       enhance_with_step: enhance.checked, step_edit_type: editType.value,
       step_instruction: instruction.value.trim(),
       speaker: builtInQwen ? voice.value.slice(qwenBuiltInPrefix.length) : "Ryan",
@@ -488,9 +532,13 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           cloneProviders.includes(provider.value)
             ? "This model clones an authorized saved profile."
             : "Qwen, Chatterbox, and Higgs include reference-free voices."),
+        field("How should planned scenes be sent?", sceneGrouping,
+          "Choose whether each scene starts a request or neighboring scenes share one."),
+        field("Maximum text per TTS request", chunk,
+          "Approximate spoken seconds. Leave blank to use the selected model's default."),
+        chunkingExplanation,
         field("Language", language, "Generation language."),
         field("Qwen delivery", voiceInstruction, "Optional style instruction for a built-in Qwen voice."),
-        field("Chunk seconds", chunk, "Defaults: Qwen 60, Step 20, Chatterbox 45, comparison models 30."),
         field("Minimum pause (ms)", pause,
           "Minimum silence between chunks; existing generated silence counts toward it."),
         field("Script override", script, hasPlannedNarration
