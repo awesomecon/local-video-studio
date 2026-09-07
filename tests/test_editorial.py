@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
-from html import escape, unescape
+import time
+import urllib.request
+from html import escape
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,7 @@ from backend.editorial.timing import (
     caption_sentence_boundaries,
     retime_compositions_to_caption_sentences,
 )
+from backend.editorial.renderer import _CDP
 from backend.captions import CaptionWord
 from backend.core import load_config
 from backend.pipeline import PipelineService
@@ -1081,20 +1085,87 @@ def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
     document = tmp_path / f"layout-{plan.width}x{plan.height}.html"
     profile = tmp_path / f"chromium-profile-{plan.width}x{plan.height}"
     document.write_text(compile_edit_plan_html(plan), encoding="utf-8")
-    result = subprocess.run(
+    process = subprocess.Popen(
         [
             str(chromium), "--headless=new", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--disable-extensions",
             "--disable-background-networking", "--disable-component-update",
             "--disable-sync", "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={profile}",
-            "--virtual-time-budget=5000", "--dump-dom", document.resolve().as_uri(),
+            f"--user-data-dir={profile}", "--remote-debugging-port=0",
+            "--remote-allow-origins=*", "about:blank",
         ],
-        check=True, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, HOME=str(profile)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    match = re.search(r'data-layout-report="([^"]+)"', result.stdout)
-    assert match is not None, result.stderr
-    return json.loads(unescape(match.group(1)))
+    client: _CDP | None = None
+    try:
+        port_file = profile / "DevToolsActivePort"
+        deadline = time.monotonic() + 30
+        while not port_file.is_file() and time.monotonic() < deadline:
+            assert process.poll() is None, "Chromium exited before layout inspection started"
+            time.sleep(0.1)
+        assert port_file.is_file(), "Chromium did not expose layout inspection control"
+        port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+        page_url = None
+        deadline = time.monotonic() + 30
+        while page_url is None and time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/json", timeout=2,
+                ) as response:
+                    targets = json.load(response)
+                page_url = next(
+                    item["webSocketDebuggerUrl"]
+                    for item in targets if item["type"] == "page"
+                )
+            except (OSError, StopIteration, ValueError):
+                time.sleep(0.1)
+        assert page_url is not None, "Chromium did not create a layout inspection page"
+        client = _CDP(page_url)
+        client.command("Page.enable")
+        client.command("Runtime.enable")
+        client.command("Emulation.setDeviceMetricsOverride", {
+            "width": plan.width, "height": plan.height,
+            "deviceScaleFactor": 1, "mobile": False,
+        })
+        client.command("Page.navigate", {"url": document.resolve().as_uri()})
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            evaluated = client.command("Runtime.evaluate", {
+                "expression": (
+                    "({ready:window.__editorialReady===true,"
+                    "error:window.__editorialError||null})"
+                ),
+                "returnByValue": True,
+            }).get("result", {}).get("value", {})
+            state = evaluated if isinstance(evaluated, dict) else {}
+            assert not state.get("error"), state["error"]
+            if state.get("ready") is True:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("Editorial layout did not become ready")
+        report = client.command("Runtime.evaluate", {
+            "expression": (
+                "document.querySelector('[data-layout-report]')"
+                ".getAttribute('data-layout-report')"
+            ),
+            "returnByValue": True,
+        }).get("result", {}).get("value")
+        assert isinstance(report, str) and report, "Editorial layout report is missing"
+        return json.loads(report)
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def _layout_stress_plan(width: int, height: int) -> EditPlan:
