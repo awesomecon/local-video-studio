@@ -72,6 +72,10 @@ python -m pytest
 python3 frontend/tests/static_checks.py
 ```
 
+The `main` branch is protected. Make every code or documentation change on a separate feature, fix,
+or documentation branch, then merge it through a pull request after the required checks and review
+pass. Do not commit or push changes directly to `main`.
+
 The project is under active development. Start in mock mode and treat optional real-model setup as
 experimental until its backend-specific health check succeeds.
 

@@ -34,6 +34,9 @@
 
 ## Parallel development
 
+- The `main` branch is protected. Never commit or push changes directly to `main`, including
+  documentation-only changes. Create a feature, fix, or documentation branch, commit and push that
+  branch, and merge it through a pull request after required checks and review pass.
 - The main checkout is the integration workspace and owns `pyproject.toml`, lock files, this file, `.gitignore`, README, shared contracts, dependency resolution, and migrations.
 - Use Git worktrees for parallel workers. Workers stay on their assigned branches, modify only owned paths, run focused tests, and report commits. The integration agent inspects and merges.
 - Never install dependencies concurrently or run heavyweight GPU tests in parallel.
