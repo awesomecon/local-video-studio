@@ -1,4 +1,4 @@
-"""Project-scoped TTS orchestration with restartable chunk artifacts."""
+"""TTS orchestration with shared voice profiles and restartable chunk artifacts."""
 
 from __future__ import annotations
 
@@ -71,12 +71,11 @@ class TTSManager:
             raise ValueError("reference WAV must be between 1 byte and 100 MB")
         self._validate_wav(audio)
         boosted_audio = apply_wav_gain(audio, gain_db)
-        project = self.pipeline._project(project_id)
-        root = self.pipeline.store.project_path(project)
+        self.pipeline._project(project_id)
         profile = VoiceProfile(
             project_id=project_id,
             name=name,
-            reference_audio=Path("voices") / "pending" / "reference.wav",
+            reference_audio=Path("reference.wav"),
             reference_transcript=transcript,
             language=language,
             authorized=True,
@@ -84,24 +83,30 @@ class TTSManager:
             audio_sha256=hashlib.sha256(boosted_audio).hexdigest(),
             source_audio_sha256=hashlib.sha256(audio).hexdigest(),
         )
-        relative = Path("voices") / profile.id / "reference.wav"
-        profile.reference_audio = relative
-        directory = root / relative.parent
+        directory = self._voice_library_root() / profile.id
         directory.mkdir(parents=True, exist_ok=False)
         self._atomic_bytes(directory / "reference.wav", boosted_audio)
         self._atomic_json(directory / "profile.json", profile.model_dump(mode="json"))
         return profile
 
     def list_voice_profiles(self, project_id: str) -> list[VoiceProfile]:
-        project = self.pipeline._project(project_id)
-        directory = self.pipeline.store.project_path(project) / "voices"
+        self.pipeline._project(project_id)
         profiles: list[VoiceProfile] = []
-        for path in sorted(directory.glob("*/profile.json")):
+        seen: set[str] = set()
+        paths = list(self._voice_library_root().glob("*/profile.json"))
+        # Profiles created before the shared library lived inside their source
+        # project. Keep them usable across projects without moving user files.
+        for slug in self.pipeline.store.list_project_slugs():
+            paths.extend((self.pipeline.store.project_path(slug) / "voices").glob("*/profile.json"))
+        for path in sorted(paths):
             try:
-                profiles.append(VoiceProfile.model_validate_json(path.read_text(encoding="utf-8")))
+                profile = VoiceProfile.model_validate_json(path.read_text(encoding="utf-8"))
+                if profile.id not in seen:
+                    profiles.append(profile)
+                    seen.add(profile.id)
             except (OSError, ValueError) as exc:
                 logger.warning("Skipping unreadable voice profile %s: %s", path, exc)
-        return profiles
+        return sorted(profiles, key=lambda item: item.created_at, reverse=True)
 
     def import_narration_take(
         self,
@@ -159,14 +164,45 @@ class TTSManager:
     def get_voice_profile(self, project_id: str, profile_id: str) -> VoiceProfile:
         if not profile_id or any(char not in "0123456789abcdef-" for char in profile_id.lower()):
             raise KeyError("voice profile not found")
-        project = self.pipeline._project(project_id)
-        path = self.pipeline.store.project_path(project) / "voices" / profile_id / "profile.json"
-        if not path.is_file():
-            raise KeyError("voice profile not found")
-        profile = VoiceProfile.model_validate_json(path.read_text(encoding="utf-8"))
-        if profile.project_id != project_id or not profile.authorized:
-            raise ValueError("voice profile is not authorized for this project")
-        return profile
+        self.pipeline._project(project_id)
+        for path in self._voice_profile_metadata_paths(profile_id):
+            if not path.is_file():
+                continue
+            profile = VoiceProfile.model_validate_json(path.read_text(encoding="utf-8"))
+            if profile.id != profile_id:
+                continue
+            if not profile.authorized:
+                raise ValueError("voice profile is not authorized")
+            return profile
+        raise KeyError("voice profile not found")
+
+    def voice_profile_audio_path(self, profile: VoiceProfile) -> Path:
+        """Resolve shared profiles and legacy project-scoped profiles safely."""
+        shared = self._voice_library_root() / profile.id / profile.reference_audio
+        if shared.is_file():
+            return shared
+        for slug in self.pipeline.store.list_project_slugs():
+            metadata = self.pipeline.store.project_path(slug) / "voices" / profile.id / "profile.json"
+            if not metadata.is_file():
+                continue
+            try:
+                stored = VoiceProfile.model_validate_json(metadata.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if stored.id == profile.id:
+                return metadata.parent / stored.reference_audio.name
+        return shared
+
+    def _voice_library_root(self) -> Path:
+        return self.pipeline.store.root / ".voices"
+
+    def _voice_profile_metadata_paths(self, profile_id: str) -> list[Path]:
+        paths = [self._voice_library_root() / profile_id / "profile.json"]
+        paths.extend(
+            self.pipeline.store.project_path(slug) / "voices" / profile_id / "profile.json"
+            for slug in self.pipeline.store.list_project_slugs()
+        )
+        return paths
 
     def generate(
         self,
@@ -199,7 +235,7 @@ class TTSManager:
             combine_scenes=request.combine_scene_chunks,
         )
         chunks = [str(item["text"]) for item in chunk_specs]
-        reference = root / profile.reference_audio if profile is not None else None
+        reference = self.voice_profile_audio_path(profile) if profile is not None else None
         profile_id = profile.id if profile is not None else None
         reference_text = profile.reference_transcript if profile is not None else ""
         job_component = self._safe_component(job_id)
@@ -651,7 +687,7 @@ class TTSManager:
             self.get_voice_profile(project_id, request.voice_profile_id)
             if request.voice_profile_id else None
         )
-        reference = root / profile.reference_audio if profile is not None else None
+        reference = self.voice_profile_audio_path(profile) if profile is not None else None
         reference_text = profile.reference_transcript if profile is not None else ""
         directory = root / "audio" / _PROVIDER_DIR[request.provider] / self._safe_component(job_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -1379,7 +1415,7 @@ class TTSManager:
                     result = backend.generate(GenerationRequest(
                         job_id=f"{job_id}:step:{index}", output_dir=step_dir, prompt=text,
                         seed=request.seed + index - 1,
-                        references=(root / profile.reference_audio,), settings=settings,
+                        references=(self.voice_profile_audio_path(profile),), settings=settings,
                     ))
                     output = result.outputs[0]
                     self._atomic_json(output.with_suffix(".json"), {

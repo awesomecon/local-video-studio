@@ -176,7 +176,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         name: profileName.value.trim(), transcript: transcript.value.trim(),
         language: profileLanguage.value, authorized: true, gain_db: Number(gain.value),
       });
-      toast("good", "Voice profile saved", "The reference remains local to this project.");
+      toast("good", "Voice profile saved", "This voice is now available in every project.");
       refresh();
     } catch (err) { toastError(err, "save voice profile"); }
     finally { upload.disabled = false; }
@@ -506,7 +506,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       el("div", { class: "source-grid" }, recordCard, importCard, reference),
       previewBox,
       el("div", { class: "pref-grid" },
-        field("Profile name", profileName, "Reusable within this project."),
+        field("Profile name", profileName, "Reusable across all projects on this machine."),
         field("Language", profileLanguage, "Language of the reference audio."),
         field("Exact transcript", transcript,
           "Filled in automatically after a recording; recommended for imports.")),
