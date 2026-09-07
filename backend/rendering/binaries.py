@@ -40,7 +40,12 @@ def _usable_executable(value: str | os.PathLike[str] | None) -> Path | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return path.resolve() if result.returncode == 0 else None
+    # Keep the path exactly as found: on snap-based systems a command such as
+    # /snap/bin/ffmpeg is a shim that execs /usr/bin/snap and dispatches on
+    # argv[0]. Resolving the symlink to /usr/bin/snap makes later subprocess
+    # calls run the snap CLI with FFmpeg flags, which fails with exit code 64
+    # ("unknown flag") and no output file.
+    return Path(os.path.abspath(str(path))) if result.returncode == 0 else None
 
 
 def _bundled_ffmpeg() -> Path | None:
@@ -50,6 +55,16 @@ def _bundled_ffmpeg() -> Path | None:
         return _usable_executable(imageio_ffmpeg.get_ffmpeg_exe())
     except (ImportError, OSError, RuntimeError):
         return None
+
+
+def _is_snap_shim(path: Path | None) -> bool:
+    """Return whether *path* dispatches through the confined Snap launcher."""
+    if path is None:
+        return False
+    try:
+        return path.resolve() == Path("/usr/bin/snap")
+    except OSError:
+        return False
 
 
 def _sibling_ffprobe(ffmpeg: Path | None) -> Path | None:
@@ -77,7 +92,12 @@ def discover_binaries(
 
     system_ffmpeg = _usable_executable(shutil.which("ffmpeg"))
     system_ffprobe = explicit_ffprobe or _usable_executable(shutil.which("ffprobe"))
-    if system_ffmpeg:
+    # Snap's FFmpeg can pass ``-version`` yet fail to access project or pytest
+    # paths outside its confinement. Prefer the unconfined bundled executable
+    # when PATH only supplies the Snap dispatcher; keep the shim as a fallback
+    # for installations without imageio-ffmpeg.
+    snap_ffmpeg = system_ffmpeg if _is_snap_shim(system_ffmpeg) else None
+    if system_ffmpeg and snap_ffmpeg is None:
         return FFmpegBinaries(system_ffmpeg, system_ffprobe, "system")
 
     bundled = _bundled_ffmpeg()
@@ -87,6 +107,8 @@ def discover_binaries(
             system_ffprobe or _sibling_ffprobe(bundled),
             "imageio_ffmpeg",
         )
+    if snap_ffmpeg:
+        return FFmpegBinaries(snap_ffmpeg, system_ffprobe, "system")
     return FFmpegBinaries(None, system_ffprobe, "unavailable")
 
 

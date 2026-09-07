@@ -251,6 +251,7 @@ class PerformanceTagsGenerateRequest(BaseModel):
     #: Script-override text to tag instead of the scene narration. ``None``
     #: (the default) tags the narration that would actually be generated.
     text: str | None = None
+    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
     notes: str = Field(default="", max_length=2000)
     #: Re-tag over an existing script instead of returning it unchanged.
@@ -1339,7 +1340,7 @@ def create_app(
 
     @application.get("/api/projects/{project_id}/tts/performance-tags")
     def get_performance_tags(project_id: str) -> dict[str, Any]:
-        """Current Fish S2 Pro delivery-tag script plus staleness and LLM state."""
+        """Current provider-scoped delivery-tag script, staleness, and LLM state."""
         try:
             project = service._project(project_id)
             script = service.tts.get_performance_script(project_id)
@@ -1375,7 +1376,7 @@ def create_app(
         try:
             if not request.force:
                 existing = service.tts.get_performance_script(project_id)
-                if existing is not None:
+                if existing is not None and existing.provider == request.provider:
                     return {
                         "script": existing.model_dump(mode="json"),
                         "tag_count": existing.tag_count,
@@ -1386,6 +1387,7 @@ def create_app(
                 text=request.text,
                 intensity=request.intensity,
                 notes=request.notes,
+                provider=request.provider,
             )
             return {
                 "script": script.model_dump(mode="json"),

@@ -24,6 +24,8 @@ from .audio import WavJoinResult, apply_wav_gain, join_wav_files_detailed, wav_d
 from .chunking import chunk_narration, chunk_narration_tagged
 from .models import NarrationRequest, VoiceProfile
 from .performance import (
+    PERFORMANCE_TAG_PROVIDERS,
+    PerformanceProvider,
     NoNarrationTextError,
     PerformanceScript,
     PerformanceSegment,
@@ -352,7 +354,7 @@ class TTSManager:
     ) -> list[dict[str, Any]]:
         """Split at scene boundaries so rendered pictures can follow measured speech.
 
-        When a Fish S2 Pro delivery-tag script is active, each scene segment is
+        When a provider-scoped delivery-tag script is active, each scene is
         chunked from its tagged text (cue-aware) so the cues reach the model
         while the chunk-to-scene mapping — and therefore picture sync — is
         unchanged.  Stale segments (source no longer matches the current
@@ -363,7 +365,9 @@ class TTSManager:
             segment = self._performance_segment(performance, "override")
             if segment is not None and segment.source == text:
                 text = segment.tagged
-                chunks = chunk_narration_tagged(text, target_seconds)
+                chunks = chunk_narration_tagged(
+                    text, target_seconds, provider=performance.provider,
+                )
             else:
                 chunks = chunk_narration(text, target_seconds)
             return [{"text": text} for text in chunks]
@@ -373,7 +377,9 @@ class TTSManager:
             source = scene.narration.strip()
             segment = self._performance_segment(performance, f"scene:{scene.id}")
             if segment is not None and segment.source == source:
-                chunk_texts = chunk_narration_tagged(segment.tagged, target_seconds)
+                chunk_texts = chunk_narration_tagged(
+                    segment.tagged, target_seconds, provider=performance.provider,
+                )
             else:
                 chunk_texts = chunk_narration(source, target_seconds)
             for text in chunk_texts:
@@ -719,12 +725,46 @@ class TTSManager:
         return self.activate_take(project_id, asset.id, stage_job_id=job_id)
 
     def active_scene_durations(self, project_id: str) -> dict[str, float] | None:
-        """Measured per-scene narration lengths for the active, current-script take."""
+        """Measured per-scene narration lengths for the active, current-script take.
+
+        A complete user recording has one measured duration, rather than TTS
+        chunks with scene ids.  Split that duration across the current planned
+        scene clock so classic and Editorial renders use the same audio clock.
+        The recording itself remains untouched; this is only the visual scene
+        timing projection.
+        """
         takes, active_id = self.list_narration_takes(project_id)
         asset = next((item for item in takes if item.id == active_id), None)
-        if asset is None or asset.settings.get("timing_mode") != "scene_audio_v1":
+        if asset is None:
             return None
         if asset.settings.get("scene_script_sha256") != self._scene_script_hash(project_id):
+            return None
+        if asset.settings.get("timing_mode") == "recorded_master_v1":
+            project = self.pipeline._project(project_id)
+            scenes = self.pipeline.database.list_scenes(project_id)
+            planned = [scene.duration for scene in scenes]
+            planned_total = sum(planned)
+            if (
+                not scenes
+                or planned_total <= 0
+                or any(not scene.narration.strip() for scene in scenes)
+            ):
+                return None
+            try:
+                actual_duration = wav_duration(
+                    self.pipeline.store.project_path(project) / asset.filepath,
+                )
+            except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error):
+                return None
+            if not math.isfinite(actual_duration) or actual_duration <= 0:
+                return None
+            durations = [actual_duration * duration / planned_total for duration in planned]
+            durations[-1] += actual_duration - sum(durations)
+            return {
+                scene.id: duration
+                for scene, duration in zip(scenes, durations, strict=True)
+            }
+        if asset.settings.get("timing_mode") != "scene_audio_v1":
             return None
         raw = asset.settings.get("scene_durations")
         if not isinstance(raw, list):
@@ -998,7 +1038,9 @@ class TTSManager:
         self.pipeline._project(project_id)
         problems: list[str] = []
         for segment in script.segments:
-            errors = validate_tagged(segment.source, segment.tagged)
+            errors = validate_tagged(
+                segment.source, segment.tagged, script.provider,
+            )
             if errors:
                 problems.append(f"segment {segment.key}: {'; '.join(errors)}")
         if problems and not accept:
@@ -1147,6 +1189,7 @@ class TTSManager:
         text: str | None = None,
         intensity: str = "balanced",
         notes: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
     ) -> tuple[PerformanceScript, list[str]]:
         """Tag the narration with the local LLM and persist the script."""
         project = self.pipeline._project(project_id)
@@ -1162,6 +1205,7 @@ class TTSManager:
             language=language,
             model=model,
             context=self._video_context(project),
+            provider=provider,
         )
         script.source_sha256 = hashlib.sha256(
             script.source_text.encode("utf-8"),
@@ -1203,6 +1247,7 @@ class TTSManager:
         result, warnings = tagger.tag(
             [segment], intensity=intensity, notes=notes,
             language=language, model=model, context=context,
+            provider=script.provider,
         )
         new_tagged = result.segments[0].tagged
         for s in script.segments:
@@ -1216,23 +1261,25 @@ class TTSManager:
     ) -> tuple[PerformanceScript | None, dict[str, Any] | None]:
         """Resolve the delivery-tag script for a narration run.
 
-        Only Fish S2 Pro consumes cues; every other provider gets clean text
-        and a ``reason: "provider"`` marker so the take metadata explains why
-        the toggle had no effect.
+        Only a supported provider matching the stored script consumes cues;
+        every other provider gets clean text and an explanatory marker.
         """
         if not request.use_performance_tags:
             return None, None
-        if request.provider != "fish_s2_pro":
+        if request.provider not in PERFORMANCE_TAG_PROVIDERS:
             return None, {"enabled": False, "reason": "provider"}
         script = self.get_performance_script(project_id)
         if script is None:
             return None, {"enabled": False, "reason": "no_script"}
+        if script.provider != request.provider:
+            return None, {"enabled": False, "reason": "script_provider"}
         used, skipped = self._performance_usage(project_id, request.text, script)
         return script, {
             "enabled": True,
             "segments_used": used,
             "segments_skipped": skipped,
             "model": script.model,
+            "provider": script.provider,
             "sha256": script.source_sha256,
         }
 

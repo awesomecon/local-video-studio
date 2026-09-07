@@ -360,6 +360,10 @@ def test_recorded_voiceover_import_is_active_and_retimes_both_video_modes(
     assert bounds is not None
     assert list(bounds) == [scene.id for scene in plan.scenes]
     assert max(end for _start, end in bounds.values()) == pytest.approx(0.15)
+    measured = service.tts.active_scene_durations(project.id)
+    assert measured is not None
+    assert sum(measured.values()) == pytest.approx(0.15)
+    assert list(measured) == [scene.id for scene in plan.scenes]
     assert service._editorial_word_timings(project) == []
     assert max(cue.end_seconds for cue in service._subtitle_cues(project)) == pytest.approx(0.15)
 

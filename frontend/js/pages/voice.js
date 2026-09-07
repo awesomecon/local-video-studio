@@ -13,6 +13,8 @@ import {
 import { loadingState, errorPanel, badge, icon, toast, toastError, confirm, field as sharedField } from "../ui.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
+const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
+
 export function renderVoice(_route) {
   const screen = el("div", { class: "screen" },
     el("div", { class: "screen-head" }, el("h1", {}, "Voice")));
@@ -385,10 +387,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     higgsNote.hidden = !higgs;
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
-    // Delivery tags are a Fish S2 Pro feature: hide the panel for every other
-    // provider and force the toggle off so cues can never be sent elsewhere.
-    performance.hidden = provider.value !== "fish_s2_pro";
-    if (provider.value !== "fish_s2_pro") performance.useTags.checked = false;
+    // Only providers with native in-band controls may receive delivery tags.
+    performance.hidden = !PERFORMANCE_TAG_PROVIDERS.has(provider.value);
+    if (performance.hidden) performance.useTags.checked = false;
   };
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
@@ -421,9 +422,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         : (provider.value === "breeze_tts_2" ? breezeDirection.value.trim() : ""),
       guidance_scale: null, inference_timesteps: null, num_steps: null, speed: null,
       breeze_mode: "eager",
-      // Fish S2 Pro delivery tags: only sent when the toggle is on and the
-      // provider is S2 Pro (the panel forces it off otherwise).
-      use_performance_tags: performance.useTags.checked && provider.value === "fish_s2_pro",
+      use_performance_tags: performance.useTags.checked
+        && PERFORMANCE_TAG_PROVIDERS.has(provider.value),
       intensity: performance.intensity.value,
       performance_notes: performance.notes.value.trim(),
     };
@@ -627,8 +627,8 @@ function field(label, input, hint) {
 }
 
 /**
- * Fish S2 Pro delivery-tags panel. Hidden for every other provider; the
- * narration toggle is forced off there so cues can never reach another model.
+ * Provider-aware delivery-tags panel. Hidden for providers without native
+ * in-band controls so cues can never reach an incompatible model.
  * Returns the panel element with `useTags`, `intensity`, and `notes` attached
  * so the generate handler can read them.
  */
@@ -647,7 +647,8 @@ function performancePanel(project, current, tags, provider, script, refresh) {
     value: current.performance_notes || "",
     placeholder: "e.g. keep it grounded, documentary pace" });
   const useTags = el("input", { type: "checkbox",
-    checked: !!(current.use_performance_tags && provider.value === "fish_s2_pro") });
+    checked: !!(current.use_performance_tags
+      && PERFORMANCE_TAG_PROVIDERS.has(provider.value)) });
 
   const statusLine = el("div", { class: "hint" });
   const renderStatus = () => {
@@ -675,6 +676,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
       const result = await generatePerformanceTags(state.config, project.id, {
         intensity: intensity.value,
         notes: notes.value.trim(),
+        provider: provider.value,
         force: !!scriptData,
         text: script.value.trim() || null,
       });
@@ -769,13 +771,14 @@ function performancePanel(project, current, tags, provider, script, refresh) {
   };
 
   const useTagsRow = el("label", { class: "check-row" }, useTags,
-    " Use delivery tags for this narration (Fish S2 Pro only)");
+    " Use delivery tags for this narration");
 
-  const panel = el("div", { class: "stack", hidden: provider.value !== "fish_s2_pro" },
-    el("div", { class: "panel-title" }, "Delivery tags (Fish S2 Pro)"),
+  const panel = el("div", { class: "stack",
+    hidden: !PERFORMANCE_TAG_PROVIDERS.has(provider.value) },
+    el("div", { class: "panel-title" }, "Delivery tags"),
     el("p", { class: "muted small" },
-      "Adds [square bracket] delivery cues — tone, emotion, and sound effects — that S2 Pro "
-      + "interprets without speaking them. Cues never reach captions or any other model."),
+      "Adds native delivery controls for Fish S2 Pro or Higgs TTS 3. Controls never reach "
+      + "captions or a different model."),
     statusLine,
     el("div", { class: "pref-grid" },
       field("Intensity", intensity, "How many cues the local LLM should add."),

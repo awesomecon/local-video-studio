@@ -22,7 +22,7 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     assert "breezeGrid," in source[panel_start:panel_end]
 
 
-def test_delivery_tags_panel_is_fish_only_and_wired_into_generation() -> None:
+def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
     # The panel is built and attached to the local-model narration section.
@@ -31,13 +31,15 @@ def test_delivery_tags_panel_is_fish_only_and_wired_into_generation() -> None:
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]
 
-    # It is hidden for every non-Fish provider and the toggle is forced off.
-    assert 'performance.hidden = provider.value !== "fish_s2_pro"' in source
-    assert 'if (provider.value !== "fish_s2_pro") performance.useTags.checked = false' in source
+    # It is shown only for providers with native controls and forced off elsewhere.
+    assert 'new Set(["fish_s2_pro", "higgs_tts_3"])' in source
+    assert "performance.hidden = !PERFORMANCE_TAG_PROVIDERS.has(provider.value)" in source
+    assert "if (performance.hidden) performance.useTags.checked = false" in source
 
-    # The toggle is only sent for Fish S2 Pro; intensity/notes are persisted
+    # The toggle is only sent for supported providers; intensity/notes are persisted
     # settings and are stripped from the NarrationRequest body.
-    assert 'use_performance_tags: performance.useTags.checked && provider.value === "fish_s2_pro"' in source
+    assert "&& PERFORMANCE_TAG_PROVIDERS.has(provider.value)" in source
+    assert "provider: provider.value" in source
     assert "intensity: _intensity, performance_notes: _notes, ...requestSettings" in source
     assert "generatePerformanceTags" in source
     assert "savePerformanceTags" in source

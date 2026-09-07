@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import backend.rendering.binaries as binaries_module
 from backend.rendering.binaries import FFmpegBinaries, discover_binaries
 from backend.rendering.commands import RenderOptions, build_finalize_command, build_video_command
 from backend.rendering.mock_media import (
@@ -39,6 +40,41 @@ def binaries():
 def test_discovery_finds_system_or_bundled_ffmpeg(binaries) -> None:
     assert binaries.ffmpeg is not None
     assert binaries.source in {"override", "system", "imageio_ffmpeg"}
+
+
+def test_usable_executable_preserves_dispatch_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shim = tmp_path / "ffmpeg"
+    shim.symlink_to("/bin/true")
+    monkeypatch.setattr(
+        binaries_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+    assert binaries_module._usable_executable(shim) == shim.absolute()
+    assert binaries_module._usable_executable(shim) != shim.resolve()
+
+
+def test_discovery_prefers_bundled_ffmpeg_over_snap_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = Path("/snap/bin/ffmpeg")
+    bundled = Path("/opt/imageio/ffmpeg")
+    monkeypatch.setattr(
+        binaries_module.shutil, "which",
+        lambda name: str(snap) if name == "ffmpeg" else None,
+    )
+    monkeypatch.setattr(
+        binaries_module, "_usable_executable",
+        lambda value: Path(value) if value else None,
+    )
+    monkeypatch.setattr(binaries_module, "_is_snap_shim", lambda path: path == snap)
+    monkeypatch.setattr(binaries_module, "_bundled_ffmpeg", lambda: bundled)
+
+    discovered = discover_binaries()
+    assert discovered.ffmpeg == bundled
+    assert discovered.source == "imageio_ffmpeg"
 
 
 def test_subtitle_writers(tmp_path: Path) -> None:

@@ -50,17 +50,23 @@ def ffmpeg_identity(binaries: FFmpegBinaries) -> str:
     """Stable identity of the exact FFmpeg executable used for a cache entry."""
     if binaries.ffmpeg is None:
         return "ffmpeg:unavailable"
+    executable = binaries.ffmpeg
     try:
-        path = binaries.ffmpeg.resolve()
+        # The resolved target is only used as a stable memo key (its mtime
+        # changes when the underlying binary is updated).
+        path = executable.resolve()
         cache_key = f"{path}|{path.stat().st_mtime_ns}"
     except OSError:
-        return f"ffmpeg:{binaries.ffmpeg}:unreadable"
+        return f"ffmpeg:{executable}:unreadable"
     cached = _IDENTITY_CACHE.get(cache_key)
     if cached is not None:
         return cached
     try:
+        # Invoke the executable exactly as discovered: snap shims such as
+        # /snap/bin/ffmpeg dispatch on argv[0], so running the resolved
+        # /usr/bin/snap target would report snapd's version, not FFmpeg's.
         result = subprocess.run(
-            [str(path), "-version"],
+            [str(executable), "-version"],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -72,9 +78,9 @@ def ffmpeg_identity(binaries: FFmpegBinaries) -> str:
         if result.returncode != 0 or not first_line:
             raise OSError("ffmpeg -version produced no output")
     except (OSError, subprocess.TimeoutExpired, IndexError):
-        identity = f"ffmpeg:{path.name}:unreadable"
+        identity = f"ffmpeg:{executable.name}:unreadable"
     else:
-        identity = content_key({"path": path.name, "version": first_line})
+        identity = content_key({"path": executable.name, "version": first_line})
     _IDENTITY_CACHE[cache_key] = identity
     return identity
 
