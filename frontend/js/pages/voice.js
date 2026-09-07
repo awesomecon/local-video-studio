@@ -3,8 +3,8 @@
 import { el, fmtDate, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
 import {
-  activateNarrationTake, clearPerformanceTags, editProject, generateNarration,
-  generatePerformanceTags, getPerformanceTags, getProject,
+  activateNarrationTake, clearPerformanceTags, deleteVoiceProfile, editProject,
+  generateNarration, generatePerformanceTags, getPerformanceTags, getProject,
   importRecordedNarration, listNarrationTakes, listVoiceProfiles,
   regenerateNarrationChunk, regeneratePerformanceSegment,
   savePerformanceTags,
@@ -514,7 +514,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       el("div", { class: "row" }, upload,
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, "Audio never leaves this machine.")),
-      savedVoicesPanel(voices)),
+      savedVoicesPanel(voices, project.id, refresh)),
     section("2. Use your recorded voiceover",
       el("p", { class: "muted small" },
         "This becomes the master narration without running TTS or cloning your voice. "
@@ -565,7 +565,7 @@ function languageSelect(value) {
   return select;
 }
 
-function savedVoicesPanel(voices) {
+function savedVoicesPanel(voices, projectId, refresh) {
   if (!voices.length) {
     return el("p", { class: "muted small" },
       "No saved voices yet. Record or import your first reference above — it then appears in the Voice dropdown below.");
@@ -573,21 +573,50 @@ function savedVoicesPanel(voices) {
   return el("div", { class: "stack" },
     el("div", { class: "panel-title" }, "Saved voices"),
     el("div", { class: "voice-profile-list" },
-      ...voices.map((item) => el("div", { class: "voice-profile-row saved-voice" },
-        icon("mic", 15),
-        el("div", { class: "stack saved-voice-body" },
-          el("div", { class: "row" },
-            el("span", { class: "vp-name" }, item.name),
-            el("span", { class: "tag" }, String(item.language || "en").toUpperCase()),
-            item.authorized ? badge("good", "authorized", false)
-              : badge("warning", "unauthorized", false),
-            item.gain_db ? el("span", { class: "tag" }, `+${item.gain_db} dB boost`) : "",
-            el("span", { class: "spacer" }),
-            el("span", { class: "muted small" }, item.created_at ? fmtDate(item.created_at) : "")),
-          item.url ? el("audio", {
-            controls: true, preload: "metadata", src: item.url,
-            "aria-label": `Play reference voice ${item.name}`,
-          }) : el("span", { class: "muted small" }, "Reference audio unavailable."))))));
+      ...voices.map((item) => {
+        const remove = el("button", {
+          class: "btn btn-danger btn-sm", type: "button",
+          "aria-label": `Delete voice profile ${item.name}`,
+        }, "Delete");
+        remove.onclick = async () => {
+          remove.disabled = true;
+          try {
+            const ok = await confirm({
+              title: `Delete voice \u201c${item.name}\u201d?`,
+              message:
+                "Removes this profile from the shared local library, so it is no "
+                + "longer available in any project. Narration takes already "
+                + "generated with it keep their audio.",
+              confirmLabel: "Delete",
+            });
+            if (!ok) return;
+            await deleteVoiceProfile(state.config, projectId, item.id);
+            toast("good", "Voice profile deleted",
+              `\u201c${item.name}\u201d was removed from the shared library.`);
+            await refresh();
+          } catch (err) {
+            toastError(err, "delete voice profile");
+          } finally {
+            remove.disabled = false;
+          }
+        };
+        return el("div", { class: "voice-profile-row saved-voice" },
+          icon("mic", 15),
+          el("div", { class: "stack saved-voice-body" },
+            el("div", { class: "row" },
+              el("span", { class: "vp-name" }, item.name),
+              el("span", { class: "tag" }, String(item.language || "en").toUpperCase()),
+              item.authorized ? badge("good", "authorized", false)
+                : badge("warning", "unauthorized", false),
+              item.gain_db ? el("span", { class: "tag" }, `+${item.gain_db} dB boost`) : "",
+              el("span", { class: "spacer" }),
+              el("span", { class: "muted small" }, item.created_at ? fmtDate(item.created_at) : "")),
+            item.url ? el("audio", {
+              controls: true, preload: "metadata", src: item.url,
+              "aria-label": `Play reference voice ${item.name}`,
+            }) : el("span", { class: "muted small" }, "Reference audio unavailable."),
+            el("div", { class: "row" }, el("span", { class: "spacer" }), remove)));
+      })));
 }
 
 function fmtBytes(bytes) {

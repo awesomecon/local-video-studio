@@ -76,6 +76,24 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
     assert "result.script.tag_count" not in source
 
 
+def test_saved_voices_can_be_deleted_from_the_shared_library() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+    api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")
+
+    # The API helper issues a DELETE against the shared voice-profile library.
+    assert "export function deleteVoiceProfile" in api
+    assert 'method: "DELETE"' in api
+    assert "/tts/voices/${encodeURIComponent(profileId)}" in api
+
+    # Each saved-voice row gets a delete button wired through a confirm dialog,
+    # and the page refreshes so the row disappears from the list and dropdown.
+    assert "deleteVoiceProfile" in source
+    assert "savedVoicesPanel(voices, project.id, refresh)" in source
+    assert 'confirmLabel: "Delete"' in source
+    assert 'toast("good", "Voice profile deleted"' in source
+    assert 'toastError(err, "delete voice profile")' in source
+
+
 def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
     api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")

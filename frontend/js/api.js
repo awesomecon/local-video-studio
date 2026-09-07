@@ -655,6 +655,13 @@ export function listVoiceProfiles(config, projectId, opts = {}) {
   });
 }
 
+/** DELETE a saved voice profile from the shared local library. */
+export function deleteVoiceProfile(config, projectId, profileId, opts = {}) {
+  return request(config,
+    `/api/projects/${encodeURIComponent(projectId)}/tts/voices/${encodeURIComponent(profileId)}`,
+    { method: "DELETE", timeoutMs: 15000, ...opts });
+}
+
 /** Upload an authorized PCM WAV without multipart dependencies. */
 export async function uploadVoiceProfile(config, projectId, file, metadata) {
   const params = new URLSearchParams({

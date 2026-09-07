@@ -351,6 +351,100 @@ def test_voice_profile_gain_boosts_saved_reference_audio(tmp_path: Path) -> None
     assert too_high.status_code == 422
 
 
+def test_voice_profile_deletion_removes_shared_and_legacy_storage(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    client = TestClient(app)
+    service = app.state.service
+    project = service.create_project(ProjectCreate(
+        title="Delete Voice", topic="test", target_duration=1,
+    ))
+    saved = client.post(
+        f"/api/projects/{project.id}/tts/voices?name=Shared&authorized=true",
+        content=wav_bytes(), headers={"Content-Type": "audio/wav"},
+    )
+    assert saved.status_code == 201
+    shared_id = saved.json()["id"]
+    shared_dir = service.store.root / ".voices" / shared_id
+    assert shared_dir.is_dir()
+
+    deleted = client.delete(f"/api/projects/{project.id}/tts/voices/{shared_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"]["id"] == shared_id
+    assert not shared_dir.exists()
+    assert client.get(f"/api/projects/{project.id}/tts/voices").json()["voices"] == []
+    assert client.delete(f"/api/projects/{project.id}/tts/voices/{shared_id}").status_code == 404
+    assert client.delete(f"/api/projects/{project.id}/tts/voices/unknown-id").status_code == 404
+
+    # A legacy profile stored inside a project directory is deleted the same way.
+    profile = service.tts.create_voice_profile(
+        project.id, name="Legacy", transcript="hello", language="en",
+        authorized=True, audio=wav_bytes(),
+    )
+    legacy_dir = service.store.project_path(project) / "voices" / profile.id
+    (service.store.root / ".voices" / profile.id).rename(legacy_dir)
+    metadata = json.loads((legacy_dir / "profile.json").read_text(encoding="utf-8"))
+    metadata["reference_audio"] = f"voices/{profile.id}/reference.wav"
+    (legacy_dir / "profile.json").write_text(json.dumps(metadata), encoding="utf-8")
+    assert client.get(
+        f"/api/projects/{project.id}/tts/voices",
+    ).json()["voices"][0]["id"] == profile.id
+
+    deleted_legacy = client.delete(f"/api/projects/{project.id}/tts/voices/{profile.id}")
+    assert deleted_legacy.status_code == 200
+    assert deleted_legacy.json()["deleted"]["id"] == profile.id
+    assert not legacy_dir.exists()
+    assert client.get(f"/api/projects/{project.id}/tts/voices").json()["voices"] == []
+
+
+def test_voice_profile_deletion_is_refused_while_a_project_selects_it(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    client = TestClient(app)
+    service = app.state.service
+    project = service.create_project(ProjectCreate(
+        title="Kept Voice", topic="test", target_duration=1,
+    ))
+    other = service.create_project(ProjectCreate(
+        title="Other Kept Voice", topic="test", target_duration=1,
+    ))
+    saved = client.post(
+        f"/api/projects/{project.id}/tts/voices?name=InUse&authorized=true",
+        content=wav_bytes(), headers={"Content-Type": "audio/wav"},
+    )
+    assert saved.status_code == 201
+    profile_id = saved.json()["id"]
+    voice_dir = service.store.root / ".voices" / profile_id
+
+    # A project that selects the profile for narration blocks deletion...
+    service.update_project(project.id, {"settings": {"voice": {
+        "provider": "fish_s2_pro", "voice_profile_id": profile_id,
+    }}})
+    refused = client.delete(f"/api/projects/{project.id}/tts/voices/{profile_id}")
+    assert refused.status_code == 409
+    assert "Kept Voice" in refused.json()["detail"]
+    assert voice_dir.is_dir()
+
+    # ...even when the request comes from another project's context.
+    refused_elsewhere = client.delete(f"/api/projects/{other.id}/tts/voices/{profile_id}")
+    assert refused_elsewhere.status_code == 409
+    assert "Kept Voice" in refused_elsewhere.json()["detail"]
+    assert voice_dir.is_dir()
+
+    # Clearing the selection lets the profile be deleted from any context.
+    service.update_project(project.id, {"settings": {"voice": {
+        "provider": "fish_s2_pro", "voice_profile_id": None,
+    }}})
+    allowed = client.delete(f"/api/projects/{other.id}/tts/voices/{profile_id}")
+    assert allowed.status_code == 200
+    assert allowed.json()["deleted"]["id"] == profile_id
+    assert not voice_dir.exists()
+
+
 @pytest.mark.parametrize("video_mode", [VideoMode.CLASSIC, VideoMode.EDITORIAL])
 def test_recorded_voiceover_import_is_active_and_retimes_both_video_modes(
     tmp_path: Path, video_mode: VideoMode,
