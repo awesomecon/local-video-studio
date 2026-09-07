@@ -224,9 +224,10 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const language = languageSelect(current.language || "en");
   const chunk = el("input", { type: "number", class: "input", min: "5", max: "180",
     step: "5", value: current.chunk_seconds || "", placeholder: "Model default" });
-  const combineSceneChunks = el("input", {
-    type: "checkbox", checked: !!current.combine_scene_chunks,
-  });
+  const sceneGrouping = el("select", { class: "input" },
+    el("option", { value: "scene" }, "One TTS request per scene"),
+    el("option", { value: "combined" }, "Group scenes up to the chunk limit"));
+  sceneGrouping.value = current.combine_scene_chunks ? "combined" : "scene";
   const pause = el("input", { type: "number", class: "input", min: "0", max: "5000",
     step: "50", value: current.pause_ms ?? 350 });
   const script = el("textarea", { class: "input", rows: "9",
@@ -418,7 +419,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       provider: provider.value, voice_profile_id: builtIn ? null : voice.value,
       language: language.value,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
-      combine_scene_chunks: combineSceneChunks.checked,
+      combine_scene_chunks: sceneGrouping.value === "combined",
       enhance_with_step: enhance.checked, step_edit_type: editType.value,
       step_instruction: instruction.value.trim(),
       speaker: builtInQwen ? voice.value.slice(qwenBuiltInPrefix.length) : "Ryan",
@@ -492,8 +493,11 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           cloneProviders.includes(provider.value)
             ? "This model clones an authorized saved profile."
             : "Qwen, Chatterbox, and Higgs include reference-free voices."),
-        el("label", { class: "check-row" }, combineSceneChunks,
-          " Combine planned scenes into longer TTS chunks"),
+        field("TTS request grouping", sceneGrouping,
+          "One per scene preserves exact scene boundaries. Grouping joins neighboring planned "
+          + "scenes until Chunk seconds is reached, so a short script may use one request. It works "
+          + "with every TTS model, including Fish S2 Pro and Higgs TTS 3; timing within a grouped "
+          + "request is estimated."),
         field("Language", language, "Generation language."),
         field("Qwen delivery", voiceInstruction, "Optional style instruction for a built-in Qwen voice."),
         field("Chunk seconds", chunk, "Defaults: Qwen 60, Step 20, Chatterbox 45, comparison models 30."),

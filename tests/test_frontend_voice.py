@@ -25,9 +25,11 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
 def test_scene_chunk_combining_is_saved_and_sent() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
-    assert "checked: !!current.combine_scene_chunks" in source
-    assert "combine_scene_chunks: combineSceneChunks.checked" in source
-    assert "Combine planned scenes into longer TTS chunks" in source
+    assert 'sceneGrouping.value = current.combine_scene_chunks ? "combined" : "scene"' in source
+    assert 'combine_scene_chunks: sceneGrouping.value === "combined"' in source
+    assert "One TTS request per scene" in source
+    assert "Group scenes up to the chunk limit" in source
+    assert "including Fish S2 Pro and Higgs TTS 3" in source
 
 
 def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:
