@@ -716,6 +716,54 @@ def test_planned_narration_can_combine_scenes_into_one_short_take(
     })
 
 
+def test_higgs_avoids_combined_chunk_continuation_when_reference_is_narration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Reference collision", topic="test", target_duration=4,
+    ))
+    scenes = [
+        Scene(project_id=project.id, index=index, duration=1, narration=text)
+        for index, text in enumerate((
+            "First scene has words.",
+            "Second scene has words.",
+            "Third scene has words.",
+            "Fourth scene has words.",
+        ))
+    ]
+    for scene in scenes:
+        service.database.save_scene(scene)
+        service.store.save_scene(project.slug, scene)
+    full_narration = "\n\n".join(scene.narration for scene in scenes)
+    profile = service.tts.create_voice_profile(
+        project.id, name="Narrator", transcript=full_narration, language="en",
+        authorized=True, audio=wav_bytes(),
+    )
+    backend = RecordingBackend()
+    service.registry.register(backend, name="higgs_tts_3", replace=True)
+
+    service.tts.generate(
+        project.id,
+        NarrationRequest(
+            provider="higgs_tts_3", voice_profile_id=profile.id,
+            chunk_seconds=5, combine_scene_chunks=True,
+        ),
+        job_id="higgs-reference-collision",
+    )
+
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    take = next(item for item in takes if item.id == active_id)
+    chunks = service.tts.list_take_chunks(project.id, take.id)
+    assert [chunk["text"] for chunk in chunks] == [scene.narration for scene in scenes]
+    assert len(backend.calls) == len(scenes)
+    assert take.settings["timing_mode"] == "scene_audio_v1"
+    assert take.settings["chunking_safeguard"] == (
+        "separate_scenes_for_matching_higgs_reference"
+    )
+    assert take.workflow_version == "tts-narration-v4"
+
+
 def test_regenerating_one_chunk_creates_and_activates_a_new_take(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
