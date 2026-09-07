@@ -14,7 +14,9 @@ import http.client
 import io
 import importlib.metadata
 import json
+import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -699,6 +701,26 @@ class HiggsTTS3Provider(SpeechProvider):
 
     name: ProviderName = "higgs_tts_3"
     requires_reference = False
+    # Higgs emits 25 codec frames/s plus seven codebook delay steps.
+    # Allow the UI's 180-second chunks with room for slower delivery.
+    MAX_AUDIO_TOKENS = 8192
+    AUDIO_FRAMES_PER_SECOND = 25
+
+    @classmethod
+    def _token_budget(cls, payload: GeneratePayload) -> int:
+        if payload.max_new_tokens is not None:
+            budget = payload.max_new_tokens
+        else:
+            spoken = re.sub(r"<\|[^|\n]*\|>", " ", payload.text)
+            # Match the chunker's 2.5 words/s with 50% headroom for slow
+            # delivery and pauses, plus ten seconds of fixed allowance.
+            seconds = len(spoken.split()) / 2.5 * 1.5 + 10
+            budget = max(1024, math.ceil(seconds * cls.AUDIO_FRAMES_PER_SECOND) + 7)
+        if not 1 <= budget <= cls.MAX_AUDIO_TOKENS:
+            raise ValueError(
+                "Higgs audio token budget is outside 1–8192; use shorter narration chunks."
+            )
+        return budget
 
     def __init__(self, model_path: Path, tokenizer_path: Path | None = None) -> None:
         super().__init__(model_path, tokenizer_path)
@@ -799,6 +821,7 @@ class HiggsTTS3Provider(SpeechProvider):
             "--host", "127.0.0.1", "--port", str(port),
             "--mem-fraction-static",
             os.environ.get("LVS_HIGGS_TTS_MEM_FRACTION_STATIC", "0.65"),
+            "--tts_engine.factory.max_new_tokens", str(self.MAX_AUDIO_TOKENS),
         ]
         try:
             self._child = self._spawn(command, environment)
@@ -873,7 +896,7 @@ class HiggsTTS3Provider(SpeechProvider):
             "response_format": "wav",
             "temperature": payload.temperature,
             "top_k": 50,
-            "max_new_tokens": payload.max_new_tokens or 1024,
+            "max_new_tokens": self._token_budget(payload),
             "seed": payload.seed,
         }
         if payload.reference_audio is not None:
@@ -903,6 +926,14 @@ class HiggsTTS3Provider(SpeechProvider):
             audio, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
         except Exception as exc:
             raise RuntimeError(f"Higgs API returned invalid WAV audio: {exc}") from None
+        # The WAV endpoint does not expose a finish reason. A waveform at the
+        # token ceiling is likely incomplete; do not silently activate it.
+        ceiling_seconds = (body["max_new_tokens"] - 7) / self.AUDIO_FRAMES_PER_SECOND
+        if len(audio) / sample_rate >= ceiling_seconds - 0.08:
+            raise RuntimeError(
+                "Higgs reached its audio token limit; narration may be cut off. "
+                "Use shorter chunks and regenerate."
+            )
         return np.asarray(audio, dtype=np.float32), int(sample_rate)
 
     def _extra_metrics(self, payload: GeneratePayload) -> dict[str, Any]:
@@ -911,6 +942,8 @@ class HiggsTTS3Provider(SpeechProvider):
             "higgs_runtime_version": self._runtime_version,
             "higgs_hf_revision": self._hf_revision(),
             "higgs_reference_mode": "clone" if payload.reference_audio else "default",
+            "higgs_max_new_tokens": self._token_budget(payload),
+            "higgs_engine_max_new_tokens": self.MAX_AUDIO_TOKENS,
             "license": "Boson Higgs TTS 3 Research and Non-Commercial License",
             "creator_attribution_required": True,
         }
