@@ -55,7 +55,13 @@ class NarrationRequest(BaseModel):
     # measured audio duration can drive exact scene timing. Short scripts may
     # opt into one continuous chunking pass for more natural TTS delivery;
     # their scene clock is then projected proportionally across the take.
-    combine_scene_chunks: bool = False
+    combine_scene_chunks: bool = Field(
+        default=False,
+        description=(
+            "Join neighboring planned scenes before applying the selected provider's "
+            "chunk-duration limit. Supported by every TTS provider."
+        ),
+    )
     pause_ms: int = Field(default=350, ge=0, le=5000)
     seed: int = Field(default=20001, ge=0, le=2**63 - 1)
     unload_after: bool = True

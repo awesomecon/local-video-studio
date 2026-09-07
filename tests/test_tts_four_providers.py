@@ -33,6 +33,9 @@ COMPARISON_PROVIDERS = (
     "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2",
     "higgs_tts_3",
 )
+ALL_TTS_PROVIDERS = (
+    "qwen_tts", "step_audio_editx", "chatterbox", *COMPARISON_PROVIDERS,
+)
 
 
 def wav_bytes(*, frames: int = 800, sample_rate: int = 8000, sample: int = 0) -> bytes:
@@ -137,6 +140,46 @@ def test_narration_request_accepts_comparison_providers_with_controls() -> None:
         NarrationRequest(provider="voxcpm2", guidance_scale=-1)
     with pytest.raises(ValidationError):
         NarrationRequest(provider="omnivoice", speed=5.0)
+
+
+@pytest.mark.parametrize("provider", ALL_TTS_PROVIDERS)
+def test_every_tts_provider_can_group_planned_scenes_into_one_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title=f"Grouped {provider}", topic="t", target_duration=2,
+    ))
+    scenes = [
+        Scene(project_id=project.id, index=0, duration=1, narration="First scene line."),
+        Scene(project_id=project.id, index=1, duration=1, narration="Second scene line."),
+    ]
+    for scene in scenes:
+        service.database.save_scene(scene)
+        service.store.save_scene(project.slug, scene)
+    profile_id = authorized_profile(service, project.id)
+    backend = RecordingComparisonBackend(provider)
+    service.registry.register(backend, name=provider, replace=True)
+
+    service.tts.generate(
+        project.id,
+        NarrationRequest(
+            provider=provider,
+            voice_profile_id=profile_id,
+            chunk_seconds=45,
+            combine_scene_chunks=True,
+        ),
+        job_id=f"grouped-{provider}",
+    )
+
+    assert backend.calls == [f"grouped-{provider}:1"]
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    take = next(item for item in takes if item.id == active_id)
+    chunks = service.tts.list_take_chunks(project.id, take.id)
+    assert [chunk["text"] for chunk in chunks] == [
+        "First scene line.\n\nSecond scene line.",
+    ]
+    assert take.settings["timing_mode"] == "script_audio_v1"
 
 
 def test_comparison_providers_require_an_authorized_voice_profile(
