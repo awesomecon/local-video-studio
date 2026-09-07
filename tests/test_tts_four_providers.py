@@ -497,8 +497,10 @@ def test_worker_cli_registers_the_fourth_provider() -> None:
     assert "higgs_tts_3" in worker_app.ProviderName.__args__
 
 
+@pytest.mark.parametrize("words, explicit_budget", [(1, None), (120, None), (450, None), (120, 4096)])
 def test_higgs_worker_builds_private_voice_clone_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    words: int, explicit_budget: int | None,
 ) -> None:
     import base64
     from urllib import request as urllib_request
@@ -530,22 +532,92 @@ def test_higgs_worker_builds_private_voice_clone_request(
 
     monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
     waveform, sample_rate = provider._generate(GeneratePayload(
-        job_id="higgs-job", text="<|emotion:contentment|>Hello.",
+        job_id="higgs-job", text="<|emotion:contentment|>" + "Hello. " * words,
         output_path=tmp_path / "out.wav", reference_audio=reference,
         reference_text="Reference words.", seed=91, temperature=0.7,
+        max_new_tokens=explicit_budget,
     ))
 
     assert sample_rate == 24000
     assert len(waveform) == 1200
-    assert captured["input"] == "<|emotion:contentment|>Hello."
+    assert captured["input"] == "<|emotion:contentment|>" + "Hello. " * words
     assert captured["temperature"] == 0.7
     assert captured["top_k"] == 50
-    assert captured["max_new_tokens"] == 1024
+    if explicit_budget is not None:
+        assert captured["max_new_tokens"] == explicit_budget
+    elif words == 1:
+        assert captured["max_new_tokens"] == 1024
+    else:
+        assert captured["max_new_tokens"] > words / 2 * 25
+        assert captured["max_new_tokens"] <= provider.MAX_AUDIO_TOKENS
     assert captured["seed"] == 91
     item = captured["references"][0]
     assert item["text"] == "Reference words."
     assert item["audio_path"].startswith("data:audio/wav;base64,")
     assert base64.b64decode(item["audio_path"].split(",", 1)[1]) == reference.read_bytes()
+
+
+def test_higgs_rejects_audio_at_token_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from urllib import request as urllib_request
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return wav_bytes(frames=976320, sample_rate=24000, sample=800)
+
+    monkeypatch.setattr(urllib_request, "urlopen", lambda *args, **kwargs: Response())
+    provider = HiggsTTS3Provider(tmp_path)
+    with pytest.raises(RuntimeError, match="audio token limit"):
+        provider._generate(GeneratePayload(
+            job_id="capped", text="Hello.", output_path=tmp_path / "out.wav",
+            max_new_tokens=1024,
+        ))
+    assert not (tmp_path / "out.wav").exists()
+
+
+@pytest.mark.parametrize("budget", [0, -1, 8193])
+def test_higgs_rejects_unsupported_budget(tmp_path: Path, budget: int) -> None:
+    with pytest.raises(ValueError, match="shorter narration chunks"):
+        HiggsTTS3Provider._token_budget(GeneratePayload(
+            job_id="invalid", text="Hello.", output_path=tmp_path / "out.wav",
+            max_new_tokens=budget,
+        ))
+
+
+def test_higgs_launch_raises_engine_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.tts_worker.app as worker_app
+
+    executable = tmp_path / "sgl-omni"
+    executable.touch(mode=0o700)
+    provider = HiggsTTS3Provider(tmp_path)
+    commands: list[list[str]] = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def connect_ex(self, address):
+            return 1
+
+    monkeypatch.setattr(worker_app.socket, "socket", lambda *args: Probe())
+    monkeypatch.setattr(provider, "_server_executable", lambda: executable)
+    monkeypatch.setattr(provider, "_free_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(provider, "_spawn", lambda command, environment: commands.append(command))
+    monkeypatch.setattr(provider, "_wait_healthy", lambda port: None)
+    provider._load()
+    command = commands[0]
+    assert command[command.index("--tts_engine.factory.max_new_tokens") + 1] == "8192"
 
 
 def test_higgs_worker_allows_default_voice(tmp_path: Path) -> None:
