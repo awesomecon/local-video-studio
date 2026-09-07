@@ -648,7 +648,7 @@ export function generateCaptions(config, projectId, opts = {}) {
   });
 }
 
-/** GET project voice profiles. */
+/** GET the shared local voice-profile library for a project context. */
 export function listVoiceProfiles(config, projectId, opts = {}) {
   return request(config, `/api/projects/${encodeURIComponent(projectId)}/tts/voices`, {
     timeoutMs: 15000, ...opts,
