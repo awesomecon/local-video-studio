@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import shutil
 import subprocess
 import threading
 import wave
@@ -28,15 +27,12 @@ _CAPABILITIES = frozenset(Capability)
 
 
 def find_ffmpeg() -> str | None:
-    executable = shutil.which("ffmpeg")
-    if executable:
-        return executable
-    try:
-        import imageio_ffmpeg
+    # Import lazily to keep backend-model imports independent from rendering
+    # package initialization while sharing its Snap-safe discovery policy.
+    from backend.rendering.binaries import discover_binaries
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except (ImportError, RuntimeError):
-        return None
+    executable = discover_binaries().ffmpeg
+    return str(executable) if executable is not None else None
 
 
 class MockGeneratorBackend(GeneratorBackend):

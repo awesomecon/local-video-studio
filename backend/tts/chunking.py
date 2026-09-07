@@ -1,27 +1,30 @@
 """Natural-boundary script chunking for long-form narration.
 
-The chunker is cue-aware: Fish S2 Pro delivery tags (``[square bracket]``
-cues) are never counted as spoken words, are kept glued to the sentence they
-direct, and can never become a chunk of their own.  Text without cues chunks
-byte-identically to the original word-counting behavior.
+The chunker is cue-aware: provider-specific delivery tags are never counted
+as spoken words, are kept glued to the sentence they direct, and can never
+become a chunk of their own. Text without cues chunks byte-identically to the
+original word-counting behavior.
 """
 
 from __future__ import annotations
 
 import re
 
-from .performance import count_spoken_words, normalize_tagged_layout
+from .performance import PerformanceProvider, count_spoken_words, normalize_tagged_layout
 
 # Sentence boundary: after terminal punctuation, before the next sentence's
 # first character.  The ``\[`` in the lookahead keeps a sentence that starts
 # with a delivery cue (``[emphasis] This is...``) attached to its cue instead
 # of splitting between the bracket and the sentence.
 _SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
-_TAGGED_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[\[A-Z0-9\"'])")
+_TAGGED_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[\[<A-Z0-9\"'])")
 
 # Tokens for hard-splitting an oversized sentence: a whole cue stays one
 # token so it is never separated from the word it annotates.
-_CUE_OR_WORD_RE = re.compile(r"\[[^\[\]\n]+\]|\S+")
+_CUE_OR_WORD_RE = {
+    "fish_s2_pro": re.compile(r"\[[^\[\]\n]+\]|\S+"),
+    "higgs_tts_3": re.compile(r"<\|[^|\n]*\|>|\S+"),
+}
 
 
 def chunk_narration(text: str, target_seconds: float, *, words_per_second: float = 2.5) -> list[str]:
@@ -52,32 +55,33 @@ def chunk_narration(text: str, target_seconds: float, *, words_per_second: float
 
 def chunk_narration_tagged(
     text: str, target_seconds: float, *, words_per_second: float = 2.5,
+    provider: PerformanceProvider = "fish_s2_pro",
 ) -> list[str]:
-    """Chunk Fish S2 Pro delivery-tagged narration.
+    """Chunk provider-specific delivery-tagged narration.
 
     Layout is normalized first so a cue placed on its own line glues to the
     following sentence; the cue-aware :func:`chunk_narration` then sizes
     chunks by spoken words only.
     """
-    normalized = normalize_tagged_layout(text)
+    normalized = normalize_tagged_layout(text, provider)
     target_words = max(10, round(target_seconds * words_per_second))
     paragraphs = [
         part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()
     ]
     units: list[str] = []
     for paragraph in paragraphs:
-        if count_spoken_words(paragraph) <= target_words:
+        if count_spoken_words(paragraph, provider) <= target_words:
             units.append(paragraph)
         else:
-            units.extend(_split_large_paragraph_tagged(paragraph, target_words))
+            units.extend(_split_large_paragraph_tagged(paragraph, target_words, provider))
 
     chunks: list[str] = []
     current: list[str] = []
     current_words = 0
     leading: list[str] = []
     for unit in units:
-        count = count_spoken_words(unit)
-        if count == 0 and "[" in unit:
+        count = count_spoken_words(unit, provider)
+        if count == 0:
             if current:
                 current.append(unit)
             else:
@@ -119,7 +123,9 @@ def _split_large_paragraph(paragraph: str, target_words: int) -> list[str]:
     return result
 
 
-def _split_large_paragraph_tagged(paragraph: str, target_words: int) -> list[str]:
+def _split_large_paragraph_tagged(
+    paragraph: str, target_words: int, provider: PerformanceProvider,
+) -> list[str]:
     sentences = _TAGGED_SENTENCE.split(paragraph)
     result: list[str] = []
     current: list[str] = []
@@ -128,8 +134,8 @@ def _split_large_paragraph_tagged(paragraph: str, target_words: int) -> list[str
         sentence = sentence.strip()
         if not sentence:
             continue
-        sentence_words = count_spoken_words(sentence)
-        if sentence_words == 0 and "[" in sentence:
+        sentence_words = count_spoken_words(sentence, provider)
+        if sentence_words == 0:
             # A cue-only fragment (e.g. a trailing ``[pause]``): glue it to
             # the previous sentence so it can never end a chunk dangling or
             # become a chunk of pure bracket text.
@@ -142,7 +148,7 @@ def _split_large_paragraph_tagged(paragraph: str, target_words: int) -> list[str
             if current:
                 result.append(" ".join(current))
                 current, words = [], 0
-            result.extend(_hard_split_tagged(sentence, target_words))
+            result.extend(_hard_split_tagged(sentence, target_words, provider))
         elif current and words + sentence_words > target_words:
             result.append(" ".join(current))
             current, words = [sentence], sentence_words
@@ -154,19 +160,24 @@ def _split_large_paragraph_tagged(paragraph: str, target_words: int) -> list[str
     return result
 
 
-def _hard_split_tagged(sentence: str, target_words: int) -> list[str]:
+def _hard_split_tagged(
+    sentence: str, target_words: int, provider: PerformanceProvider,
+) -> list[str]:
     """Split an oversized sentence on spoken words, keeping cues attached.
 
     Cues are whole tokens that never count toward the word budget and never
     trigger a split, so a cue always travels with the word it annotates.
     """
-    tokens = _CUE_OR_WORD_RE.findall(sentence)
+    tokens = _CUE_OR_WORD_RE[provider].findall(sentence)
     groups: list[str] = []
     current: list[str] = []
     pending_cues: list[str] = []
     words = 0
     for token in tokens:
-        is_cue = token.startswith("[")
+        is_cue = (
+            token.startswith("[") if provider == "fish_s2_pro"
+            else token.startswith("<|")
+        )
         if is_cue:
             pending_cues.append(token)
             continue

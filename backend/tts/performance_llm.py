@@ -1,4 +1,4 @@
-"""Local-LLM orchestration for Fish S2 Pro delivery tags.
+"""Local-LLM orchestration for provider-specific delivery tags.
 
 Mirrors :class:`backend.director.engine.DirectorEngine`: the tagger takes an
 injectable LLM backend (``None`` in mock mode) and degrades per batch instead
@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.models.local_llm import LocalLLMBackend
 
 from .performance import (
+    PerformanceProvider,
     PerformanceScript,
     PerformanceSegment,
     count_spoken_words,
@@ -76,7 +77,7 @@ class PerformanceTaggedBatch(BaseModel):
         return payload
 
 
-_SYSTEM_PROMPT = """You are a voice-delivery director for Fish Audio S2 Pro narration.
+_FISH_SYSTEM_PROMPT = """You are a voice-delivery director for Fish Audio S2 Pro narration.
 You receive numbered narration segments. For each one, return the exact same spoken words with [square bracket] delivery cues inserted.
 {context_block}
 S2 Pro cue syntax (verified from the Fish Audio docs):
@@ -106,9 +107,29 @@ Hard rules:
 {notes_line}
 Return only the JSON object constrained by the provided response schema. Echo each segment's index unchanged."""
 
+_HIGGS_SYSTEM_PROMPT = """You are a voice-delivery director for Higgs Audio v3 narration.
+You receive numbered narration segments. For each one, return the exact same spoken words with official Higgs control tokens inserted.
+{context_block}
+Allowed token syntax and vocabulary:
+- Emotion: <|emotion:elation|>, <|emotion:amusement|>, <|emotion:enthusiasm|>, <|emotion:determination|>, <|emotion:pride|>, <|emotion:contentment|>, <|emotion:affection|>, <|emotion:relief|>, <|emotion:contemplation|>, <|emotion:confusion|>, <|emotion:surprise|>, <|emotion:awe|>, <|emotion:longing|>, <|emotion:arousal|>, <|emotion:anger|>, <|emotion:fear|>, <|emotion:disgust|>, <|emotion:bitterness|>, <|emotion:sadness|>, <|emotion:shame|>, <|emotion:helplessness|>.
+- Style: <|style:singing|>, <|style:shouting|>, <|style:whispering|>.
+- Prosody: <|prosody:speed_very_slow|>, <|prosody:speed_slow|>, <|prosody:speed_fast|>, <|prosody:speed_very_fast|>, <|prosody:pitch_low|>, <|prosody:pitch_high|>, <|prosody:pause|>, <|prosody:long_pause|>, <|prosody:expressive_high|>, <|prosody:expressive_low|>.
+- Sound effects: <|sfx:cough|> ahem, <|sfx:laughter|> haha, <|sfx:crying|> boohoo, <|sfx:screaming|> ahh, <|sfx:burping|> burp, <|sfx:humming|> hmm, <|sfx:sigh|> uh, <|sfx:sniff|> sff, <|sfx:sneeze|> achoo.
+
+Hard rules:
+- Never change, delete, or reorder a spoken source word. Only an exact sound-effect word shown above may be added immediately after its matching sfx token.
+- Put emotion, style, speed, pitch, and expressive tokens before all spoken text. Use at most one token from each of those groups per segment.
+- Pause and sound-effect tokens may be placed where their effect should occur.
+- Use only the exact official tokens listed above. Never invent a token or use square-bracket cues.
+- Do not tag every sentence. Start simple and avoid conflicting or excessive controls.
+- Target natural long-form YouTube narration, not cartoon acting.
+- Intensity: {intensity} (subtle = a few controls, balanced = moderate, expressive = frequent but still natural).
+{notes_line}
+Return only the JSON object constrained by the provided response schema. Echo each segment's index unchanged."""
+
 
 class PerformanceTagger:
-    """Tag narration segments with S2 Pro delivery cues via the local LLM."""
+    """Tag narration segments with provider-specific cues via the local LLM."""
 
     def __init__(self, llm: LocalLLMBackend | None = None) -> None:
         self.llm = llm
@@ -126,7 +147,10 @@ class PerformanceTagger:
         return "Script override"
 
     @staticmethod
-    def _system_prompt(intensity: str, notes: str, context: str = "") -> str:
+    def _system_prompt(
+        intensity: str, notes: str, context: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
+    ) -> str:
         notes_line = (
             f"Focus notes from the creator: {notes.strip()}"
             if notes.strip() else ""
@@ -135,7 +159,11 @@ class PerformanceTagger:
             f"About this video:\n{context.strip()}\n"
             if context.strip() else ""
         )
-        return _SYSTEM_PROMPT.format(
+        template = (
+            _HIGGS_SYSTEM_PROMPT if provider == "higgs_tts_3"
+            else _FISH_SYSTEM_PROMPT
+        )
+        return template.format(
             intensity=intensity if intensity in INTENSITIES else "balanced",
             notes_line=notes_line,
             context_block=context_block,
@@ -149,6 +177,7 @@ class PerformanceTagger:
         notes: str = "",
         language: str = "en",
         context: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
     ) -> list[dict[str, str]]:
         lines: list[str] = [
             f"Narration language: {language or 'en'}.",
@@ -164,7 +193,9 @@ class PerformanceTagger:
         return [
             {
                 "role": "system",
-                "content": PerformanceTagger._system_prompt(intensity, notes, context),
+                "content": PerformanceTagger._system_prompt(
+                    intensity, notes, context, provider,
+                ),
             },
             {"role": "user", "content": "\n".join(lines).rstrip()},
         ]
@@ -271,6 +302,7 @@ class PerformanceTagger:
         language: str,
         model: str,
         context: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
     ) -> str | None:
         """Regenerate one failed segment, telling the LLM what failed last time.
 
@@ -281,7 +313,7 @@ class PerformanceTagger:
         to the clean source.
         """
         previous = (
-            normalize_tagged_layout(candidate)
+            normalize_tagged_layout(candidate, provider)
             if candidate is not None
             else "(the segment was missing from your response)"
         )
@@ -294,11 +326,13 @@ class PerformanceTagger:
             f"Segment 0 ({self._segment_label(segment)}):\n"
             f"{segment.source}\n\n"
             "Fix the problems above. Keep every spoken word exactly as "
-            "written, insert only valid [square bracket] cues, and echo the "
+            "written, insert only valid provider control cues, and echo the "
             "segment index."
         )
         messages = [
-            {"role": "system", "content": self._system_prompt(intensity, notes, context)},
+            {"role": "system", "content": self._system_prompt(
+                intensity, notes, context, provider,
+            )},
             {"role": "user", "content": user},
         ]
         try:
@@ -314,8 +348,8 @@ class PerformanceTagger:
         repaired = draft.segments[0].tagged
         if not isinstance(repaired, str) or not repaired:
             return None
-        normalized = normalize_tagged_layout(repaired)
-        if validate_tagged(segment.source, normalized):
+        normalized = normalize_tagged_layout(repaired, provider)
+        if validate_tagged(segment.source, normalized, provider):
             return None
         return normalized
 
@@ -328,6 +362,7 @@ class PerformanceTagger:
         language: str,
         model: str,
         context: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
         warnings: list[str],
     ) -> list[str]:
         """Return tagged text per segment, degrading per segment on failure.
@@ -338,7 +373,7 @@ class PerformanceTagger:
         """
         messages = self.build_messages(
             batch, intensity=intensity, notes=notes, language=language,
-            context=context,
+            context=context, provider=provider,
         )
         try:
             draft = self._complete_batch(messages, batch, model=model)
@@ -354,14 +389,14 @@ class PerformanceTagger:
         results: list[str] = []
         for position, (segment, candidate) in enumerate(zip(batch, candidates)):
             normalized = (
-                normalize_tagged_layout(candidate)
+                normalize_tagged_layout(candidate, provider)
                 if candidate is not None
                 else None
             )
             errors = (
                 ["the segment was missing from the model response"]
                 if normalized is None
-                else validate_tagged(segment.source, normalized)
+                else validate_tagged(segment.source, normalized, provider)
             )
             if not errors:
                 results.append(normalized)
@@ -370,6 +405,7 @@ class PerformanceTagger:
                 segment, candidate, errors,
                 intensity=intensity, notes=notes,
                 language=language, model=model, context=context,
+                provider=provider,
             )
             if repaired is not None:
                 results.append(repaired)
@@ -394,6 +430,7 @@ class PerformanceTagger:
         language: str = "en",
         model: str = "",
         context: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
     ) -> tuple[PerformanceScript, list[str]]:
         """Tag every segment; returns the script plus per-segment warnings."""
         if self.llm is None:
@@ -412,10 +449,12 @@ class PerformanceTagger:
                 self._tag_batch(
                     batch, intensity=intensity, notes=notes,
                     language=language, model=model, context=context,
+                    provider=provider,
                     warnings=warnings,
                 )
             )
         script = PerformanceScript(
+            provider=provider,
             model=model,
             intensity=intensity if intensity in INTENSITIES else "balanced",
             segments=[

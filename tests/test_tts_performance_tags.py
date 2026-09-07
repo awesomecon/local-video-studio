@@ -192,6 +192,51 @@ def test_strip_performance_tags_removes_cues_and_collapses_whitespace() -> None:
     assert strip_performance_tags("   ") == ""
 
 
+def test_higgs_control_tokens_are_provider_aware() -> None:
+    text = "<|emotion:amusement|> Hello <|prosody:pause|> world."
+    assert strip_performance_tags(text, "higgs_tts_3") == "Hello world."
+    assert count_spoken_words(text, "higgs_tts_3") == 2
+    assert count_tags(text, "higgs_tts_3") == 2
+    # Square brackets remain ordinary spoken text for Higgs.
+    assert strip_performance_tags("[aside] Hello.", "higgs_tts_3") == "[aside] Hello."
+
+
+def test_validate_higgs_controls_and_sfx_pairing() -> None:
+    source = "Hello world."
+    tagged = (
+        "<|emotion:amusement|><|prosody:speed_slow|> "
+        "Hello <|sfx:laughter|> haha world."
+    )
+    assert validate_tagged(source, tagged, "higgs_tts_3") == []
+
+    errors = validate_tagged(
+        source, "Hello <|emotion:anger|> world.", "higgs_tts_3",
+    )
+    assert any("before any spoken text" in error for error in errors)
+
+    errors = validate_tagged(
+        source,
+        "<|emotion:anger|><|emotion:fear|> Hello world.",
+        "higgs_tts_3",
+    )
+    assert any("only one emotion" in error for error in errors)
+
+    errors = validate_tagged(
+        source, "Hello <|sfx:laughter|> world.", "higgs_tts_3",
+    )
+    assert any("immediately followed" in error for error in errors)
+
+    errors = validate_tagged(
+        source, "<|emotion:invented|> Hello world.", "higgs_tts_3",
+    )
+    assert any("official vocabulary" in error for error in errors)
+
+    errors = validate_tagged(
+        source, "<|emotion:anger Hello world.", "higgs_tts_3",
+    )
+    assert any("unbalanced control tokens" in error for error in errors)
+
+
 def test_normalize_tagged_layout_glues_cue_only_lines() -> None:
     text = "[calm narration]\nI thought everything was normal.\n\n[pause]\nIt really was."
     # The real paragraph break (blank line) is preserved; only the cue-only
@@ -381,6 +426,17 @@ def test_tagged_chunking_sizing_ignores_cue_words() -> None:
     assert count_tags(chunks[0]) == 3
 
 
+def test_higgs_tagged_chunking_keeps_controls_with_spoken_text() -> None:
+    text = "<|emotion:awe|> " + " ".join(f"word{i}" for i in range(12))
+    chunks = chunk_narration_tagged(
+        text, 5, words_per_second=2, provider="higgs_tts_3",
+    )
+    assert len(chunks) == 2
+    assert chunks[0].startswith("<|emotion:awe|>")
+    assert all(count_spoken_words(chunk, "higgs_tts_3") > 0 for chunk in chunks)
+    assert sum(count_tags(chunk, "higgs_tts_3") for chunk in chunks) == 1
+
+
 # ---------------------------------------------------------------------------
 # PerformanceTagger with a fake LLM
 # ---------------------------------------------------------------------------
@@ -452,6 +508,23 @@ def test_tagger_includes_video_context_in_system_prompt() -> None:
     assert "About this video:" in system
     assert "The Haunted House" in system
     assert "true-crime story" in system
+
+
+def test_tagger_generates_higgs_control_tokens_with_higgs_prompt() -> None:
+    source = "I thought everything was normal."
+    tagged = "<|emotion:contemplation|> I thought everything was normal."
+    fake = FakeLLM(_tagged_responder({source: tagged}))
+    script, warnings = PerformanceTagger(fake).tag(
+        _segments([source]), provider="higgs_tts_3",
+    )
+    assert warnings == []
+    assert script.provider == "higgs_tts_3"
+    assert script.segments[0].tagged == tagged
+    assert script.tag_count == 1
+    system = fake.complete_calls[0]["messages"][0]["content"]
+    assert "Higgs Audio v3" in system
+    assert "<|emotion:contemplation|>" in system
+    assert "square-bracket cues" in system
 
 
 def test_tagger_omits_context_block_when_empty() -> None:
@@ -711,6 +784,29 @@ def test_generate_performance_script_sends_video_context(
     assert "keep it tense" in system
 
 
+def test_generate_performance_script_scopes_higgs_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Higgs tags", topic="test", target_duration=2,
+    ))
+    source = "I thought everything was normal."
+    _add_scenes(service, project, [source])
+    _enable_fake_llm(service, monkeypatch, _tagged_responder({
+        source: "<|emotion:contemplation|> I thought everything was normal.",
+    }))
+    service.update_project(project.id, {"selected_llm_model": "fake-local-model"})
+
+    script, warnings = service.tts.generate_performance_script(
+        project.id, provider="higgs_tts_3",
+    )
+    assert warnings == []
+    assert script.provider == "higgs_tts_3"
+    assert script.tag_count == 1
+    assert "Higgs Audio v3" in service.director.llm.complete_calls[0]["messages"][0]["content"]
+
+
 def test_generate_performance_script_override_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -833,6 +929,49 @@ def test_narration_other_provider_ignores_tags(
     takes, active_id = service.tts.list_narration_takes(project.id)
     take = next(item for item in takes if item.id == active_id)
     assert take.settings["performance_tags"] == {"enabled": False, "reason": "provider"}
+
+
+def test_narration_feeds_higgs_tokens_only_to_matching_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = narration_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(
+        title="Higgs controls", topic="test", target_duration=2,
+    ))
+    scenes = _add_scenes(service, project, ["A quiet line begins here."])
+    backend = PromptRecordingBackend()
+    service.registry.register(backend, name="higgs_tts_3", replace=True)
+    script = PerformanceScript(
+        provider="higgs_tts_3",
+        segments=[PerformanceSegment(
+            key=f"scene:{scenes[0].id}",
+            source=scenes[0].narration,
+            tagged="<|style:whispering|> A quiet line begins here.",
+            scene_id=scenes[0].id,
+            scene_index=0,
+            scene_title=scenes[0].title,
+        )],
+    )
+    service.tts.save_performance_script(project.id, script)
+
+    service.tts.generate(
+        project.id,
+        NarrationRequest(provider="higgs_tts_3", use_performance_tags=True),
+        job_id="higgs-tagged-run",
+    )
+
+    assert backend.prompts == ["<|style:whispering|> A quiet line begins here."]
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    take = next(item for item in takes if item.id == active_id)
+    assert take.settings["performance_tags"]["enabled"] is True
+    assert take.settings["performance_tags"]["provider"] == "higgs_tts_3"
+
+    fish_request = NarrationRequest(
+        provider="fish_s2_pro", use_performance_tags=True,
+    )
+    resolved, metadata = service.tts._resolve_performance(project.id, fish_request)
+    assert resolved is None
+    assert metadata == {"enabled": False, "reason": "script_provider"}
 
 
 def test_stale_segment_falls_back_to_clean_text(

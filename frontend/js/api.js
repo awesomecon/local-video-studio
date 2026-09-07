@@ -694,7 +694,7 @@ export function generateNarration(config, projectId, body, opts = {}) {
 
 /**
  * GET /api/projects/{id}/tts/performance-tags
- * Fish S2 Pro delivery-tag script (square-bracket delivery cues).
+ * Provider-scoped delivery-tag script (Fish cues or Higgs controls).
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
  * @param {{signal?: AbortSignal}} [opts]
@@ -714,7 +714,7 @@ export function getPerformanceTags(config, projectId, opts = {}) {
  * like plan generation; `force` re-tags over an existing script.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
- * @param {{text?: string | null, intensity?: "subtle"|"balanced"|"expressive", notes?: string, force?: boolean}} body
+ * @param {{text?: string | null, provider?: "fish_s2_pro"|"higgs_tts_3", intensity?: "subtle"|"balanced"|"expressive", notes?: string, force?: boolean}} body
  * @param {{signal?: AbortSignal}} [opts]
  * @returns {Promise<{script: any, tag_count: number, warnings: string[]}>}
  */
