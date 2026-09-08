@@ -217,7 +217,16 @@ class TTSManager:
                 break
         if profile is None:
             raise KeyError("voice profile not found")
-        projects, _issues = self.pipeline.list_projects()
+        projects, issues = self.pipeline.list_projects()
+        # Reconciliation can retain stale index rows or omit unreadable disk
+        # projects. Neither proves that the portable projects no longer use
+        # this voice. Successful recovery is informational, not a blocker.
+        unresolved = [issue for issue in issues if issue["type"] != "recovered"]
+        if unresolved:
+            raise ValueError(
+                "cannot safely delete a voice profile while project recovery issues remain; "
+                "resolve the project recovery issues on the Dashboard first"
+            )
         using = [
             project.title
             for project in projects
@@ -227,7 +236,7 @@ class TTSManager:
         if using:
             raise ValueError(
                 f"voice profile is still selected in {', '.join(sorted(using))}; "
-                "change that project's voice first"
+                "change that project's voice and click Save voice settings first"
             )
         removed: list[Path] = []
         for path in self._voice_profile_metadata_paths(profile.id):

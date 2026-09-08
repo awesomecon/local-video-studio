@@ -215,7 +215,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     builtInOption,
     higgsBuiltInOption,
     ...qwenOptions,
-    el("option", { value: "" }, voices.length ? "Select a saved profile" : "No saved profiles"),
+    el("option", { value: "" }, "No saved profile selected"),
     ...voices.map((item) => el("option", { value: item.id }, item.name)));
   voice.value = current.voice_profile_id ||
     (provider.value === "chatterbox" ? chatterboxBuiltIn :
@@ -436,25 +436,11 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
   syncProviderControls();
-  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
-  generate.onclick = async () => {
-    const builtInChatterbox = voice.value === chatterboxBuiltIn;
+  const voiceSettings = () => {
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
-    const builtInHiggs = voice.value === higgsBuiltIn;
-    const builtIn = builtInChatterbox || builtInQwen || builtInHiggs;
-    if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
-        (builtInQwen && provider.value !== "qwen_tts") ||
-        (builtInHiggs && provider.value !== "higgs_tts_3")) {
-      toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
-      return;
-    }
-    if (!script.value.trim() && !hasPlannedNarration) {
-      toast("critical", "Script required",
-        "Run planning from the Script screen, or enter text in Script override.");
-      return;
-    }
+    const builtIn = voice.value === chatterboxBuiltIn || builtInQwen || voice.value === higgsBuiltIn;
     const settings = {
-      provider: provider.value, voice_profile_id: builtIn ? null : voice.value,
+      provider: provider.value, voice_profile_id: builtIn ? null : (voice.value || null),
       language: language.value,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
       combine_scene_chunks: sceneGrouping.value === "combined",
@@ -481,7 +467,35 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       settings.num_steps = omniSteps.value ? Number(omniSteps.value) : null;
       settings.speed = omniSpeed.value ? Number(omniSpeed.value) : null;
     }
-    generate.disabled = true;
+    return settings;
+  };
+  const saveVoice = el("button", { class: "btn", type: "button" }, "Save voice settings");
+  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
+  saveVoice.onclick = async () => {
+    saveVoice.disabled = generate.disabled = true;
+    try {
+      await editProject(state.config, project.id, { settings: { voice: voiceSettings() } });
+      toast("good", "Voice settings saved", "You can now delete any profile no project selects.");
+    } catch (err) { toastError(err, "save voice settings"); }
+    finally { saveVoice.disabled = generate.disabled = false; }
+  };
+  generate.onclick = async () => {
+    const builtInChatterbox = voice.value === chatterboxBuiltIn;
+    const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
+    const builtInHiggs = voice.value === higgsBuiltIn;
+    if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
+        (builtInQwen && provider.value !== "qwen_tts") ||
+        (builtInHiggs && provider.value !== "higgs_tts_3")) {
+      toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
+      return;
+    }
+    if (!script.value.trim() && !hasPlannedNarration) {
+      toast("critical", "Script required",
+        "Run planning from the Script screen, or enter text in Script override.");
+      return;
+    }
+    const settings = voiceSettings();
+    saveVoice.disabled = generate.disabled = true;
     try {
       await editProject(state.config, project.id, { settings: { voice: settings } });
       // intensity / performance_notes are persisted settings, not NarrationRequest
@@ -492,7 +506,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} will run locally.`);
       refresh();
     } catch (err) { toastError(err, "generate narration"); }
-    finally { generate.disabled = false; }
+    finally { saveVoice.disabled = generate.disabled = false; }
   };
 
   return el("div", { class: "stack" },
@@ -550,7 +564,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       enhanceRow,
       stepGrid,
       performance,
-      el("div", { class: "row" }, generate)),
+      el("div", { class: "row" }, saveVoice, generate)),
     workerControlsPanel(models, refresh),
     takeLibraryPanel(
       project.id, narrations.takes || [], narrations.active_asset_id || null,

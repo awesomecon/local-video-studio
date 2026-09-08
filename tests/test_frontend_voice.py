@@ -94,6 +94,20 @@ def test_saved_voices_can_be_deleted_from_the_shared_library() -> None:
     assert 'toastError(err, "delete voice profile")' in source
 
 
+def test_voice_settings_can_be_saved_without_generating_or_reloading() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+    handler = source.split("saveVoice.onclick = async () => {", 1)[1].split(
+        "generate.onclick = async () => {", 1,
+    )[0]
+    assert "await editProject" in handler
+    assert "voice: voiceSettings()" in handler
+    assert "generateNarration(" not in handler
+    assert "script.value" not in handler
+    assert "refresh()" not in handler  # Keep unsaved script and recording inputs.
+    assert '"Save voice settings"' in source
+    assert '(voice.value || null)' in source
+
+
 def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
     api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")

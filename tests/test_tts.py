@@ -445,6 +445,54 @@ def test_voice_profile_deletion_is_refused_while_a_project_selects_it(tmp_path: 
     assert not voice_dir.exists()
 
 
+@pytest.mark.parametrize("issue", ["diverged", "unreadable", "conflict"])
+def test_voice_deletion_preserves_audio_when_project_recovery_is_unresolved(
+    tmp_path: Path, issue: str,
+) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    service = app.state.service
+    project = service.create_project(ProjectCreate(title="Recovery", topic="test", target_duration=1))
+    profile = service.tts.create_voice_profile(
+        project.id, name="Keep", transcript="hello", language="en",
+        authorized=True, audio=wav_bytes(),
+    )
+    selected = project.model_copy(update={"settings": {"voice": {"voice_profile_id": profile.id}}})
+    if issue == "conflict":
+        selected = selected.model_copy(update={"slug": "different-directory"})
+    path = service.store.project_path(project) / "project.json"
+    path.write_text("invalid json" if issue == "unreadable" else selected.model_dump_json(), encoding="utf-8")
+    client = TestClient(app)
+    endpoint = f"/api/projects/{project.id}/tts/voices/{profile.id}"
+    response = client.delete(endpoint)
+    assert response.status_code == 409
+    assert "recovery issues" in response.json()["detail"]
+    assert service.tts.voice_profile_audio_path(profile).read_bytes() == wav_bytes()
+    # Repairing the portable record allows the same request to succeed.
+    service.store.save_project(project)
+    assert client.delete(endpoint).status_code == 200
+
+
+def test_voice_deletion_allows_successfully_recovered_projects(tmp_path: Path) -> None:
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    service = app.state.service
+    project = service.create_project(ProjectCreate(title="Caller", topic="test", target_duration=1))
+    other = service.create_project(ProjectCreate(title="Recovered", topic="test", target_duration=1))
+    profile = service.tts.create_voice_profile(
+        project.id, name="Unused", transcript="hello", language="en",
+        authorized=True, audio=wav_bytes(),
+    )
+    service.database.delete_project(other.id)
+    response = TestClient(app).delete(f"/api/projects/{project.id}/tts/voices/{profile.id}")
+    assert response.status_code == 200
+    assert service.database.get_project(other.id) is not None
+
+
 @pytest.mark.parametrize("video_mode", [VideoMode.CLASSIC, VideoMode.EDITORIAL])
 def test_recorded_voiceover_import_is_active_and_retimes_both_video_modes(
     tmp_path: Path, video_mode: VideoMode,
