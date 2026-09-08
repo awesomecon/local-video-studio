@@ -1,11 +1,14 @@
 # Local Video Studio
 
-Local Video Studio is a local-first, restartable AI video-production application for Ubuntu and a
-single 24 GB-class NVIDIA GPU. It keeps prompts and media on your machine, uses FFmpeg for
-deterministic assembly, and stores projects in portable, human-readable directories.
+Local Video Studio is a local-first, restartable AI video-production application for Ubuntu. It
+runs your own models on your hardware, keeps prompts and media on your machine, uses FFmpeg for
+deterministic assembly, and stores projects in portable, human-readable directories. GPU and VRAM
+needs depend on which optional model backends you enable; the deterministic mock pipeline works
+without any GPU or model downloads.
 
-The deterministic mock pipeline works without model downloads. Real image, video, speech, music,
-and caption models are optional local backends with separate installation and licensing requirements.
+Real image, video, speech, music, and caption models are optional local backends with separate
+installation and licensing requirements. Each backend document states its own VRAM expectations;
+see [GPU memory management](docs/gpu-memory.md) and [model backends](docs/models.md).
 
 > **Repository note (Sep 5, 2026):** the `main` history was cleaned up; no code changed. If an
 > existing clone reports divergent branches on pull, run `git fetch origin`, then
