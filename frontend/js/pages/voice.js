@@ -222,6 +222,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       provider.value === "qwen_tts" ? `${qwenBuiltInPrefix}${current.speaker || "Ryan"}` :
         provider.value === "higgs_tts_3" ? higgsBuiltIn : "");
   const language = languageSelect(current.language || "en");
+  const seed = el("input", { type: "number", class: "input", min: "0",
+    max: String(Number.MAX_SAFE_INTEGER), step: "1", value: current.seed ?? 20001 });
   const chunk = el("input", { type: "number", class: "input", min: "5", max: "180",
     step: "5", value: current.chunk_seconds || "", placeholder: "Model default" });
   const sceneGrouping = el("select", { class: "input" },
@@ -438,6 +440,11 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   syncProviderControls();
   const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
   generate.onclick = async () => {
+    const seedValue = Number(seed.value);
+    if (!seed.value.trim() || !Number.isSafeInteger(seedValue) || seedValue < 0) {
+      toast("critical", "Invalid seed", "Enter a non-negative whole number up to 9007199254740991.");
+      return;
+    }
     const builtInChatterbox = voice.value === chatterboxBuiltIn;
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
     const builtInHiggs = voice.value === higgsBuiltIn;
@@ -456,6 +463,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     const settings = {
       provider: provider.value, voice_profile_id: builtIn ? null : voice.value,
       language: language.value,
+      seed: seedValue,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
       combine_scene_chunks: sceneGrouping.value === "combined",
       enhance_with_step: enhance.checked, step_edit_type: editType.value,
@@ -537,6 +545,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           "Approximate spoken seconds. Leave blank to use the selected model's default."),
         chunkingExplanation,
         field("Language", language, "Generation language."),
+        field("Seed", seed,
+          "Use the same seed to repeat a take, or change it for a different delivery. "
+          + "If a model skips text, a different seed may help."),
         field("Qwen delivery", voiceInstruction, "Optional style instruction for a built-in Qwen voice."),
         field("Minimum pause (ms)", pause,
           "Minimum silence between chunks; existing generated silence counts toward it."),
