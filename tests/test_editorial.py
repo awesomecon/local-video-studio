@@ -8,6 +8,8 @@ import time
 import urllib.request
 from html import escape
 from pathlib import Path
+from typing import BinaryIO
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -1121,6 +1123,83 @@ def _template_composition(template: EditorialTemplate, *, cid: str = "c1") -> Ed
     ])
 
 
+def _stop_layout_browser(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _wait_for_layout_browser(process: subprocess.Popen, profile: Path) -> str:
+    port_file = profile / "DevToolsActivePort"
+    deadline = time.monotonic() + 30
+    while not port_file.is_file() and time.monotonic() < deadline:
+        assert process.poll() is None, "Chromium exited before layout inspection started"
+        time.sleep(0.1)
+    assert port_file.is_file(), "Chromium did not expose layout inspection control"
+    port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+    page_url = None
+    deadline = time.monotonic() + 30
+    while page_url is None and time.monotonic() < deadline:
+        assert process.poll() is None, "Chromium exited before creating an inspection page"
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/json", timeout=2,
+            ) as response:
+                targets = json.load(response)
+            page_url = next(
+                item["webSocketDebuggerUrl"]
+                for item in targets if item["type"] == "page"
+            )
+        except (OSError, StopIteration, ValueError):
+            time.sleep(0.1)
+    assert page_url is not None, "Chromium did not create a layout inspection page"
+    return page_url
+
+
+def _start_layout_browser(chromium: Path, profile_root: Path) -> tuple[subprocess.Popen, str]:
+    """Retry only browser startup, before navigating to any layout under test."""
+    failures: list[str] = []
+    for attempt in (1, 2):
+        profile = profile_root.with_name(f"{profile_root.name}-attempt-{attempt}")
+        log_path = profile.with_suffix(".log")
+        process: subprocess.Popen | None = None
+        ready = False
+        try:
+            # A file avoids pipe-buffer deadlocks and retains both attempts' output.
+            with log_path.open("wb") as log:
+                process = subprocess.Popen(
+                    [
+                        str(chromium), "--headless=new", "--no-sandbox", "--disable-gpu",
+                        "--disable-dev-shm-usage", "--disable-extensions",
+                        "--disable-background-networking", "--disable-component-update",
+                        "--disable-sync", "--no-first-run", "--no-default-browser-check",
+                        f"--user-data-dir={profile}", "--remote-debugging-port=0",
+                        "--remote-allow-origins=*", "about:blank",
+                    ],
+                    env=dict(os.environ, HOME=str(profile)),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+                page_url = _wait_for_layout_browser(process, profile)
+                ready = True
+                return process, page_url
+        except (AssertionError, OSError, ValueError, IndexError) as exc:
+            failures.append(f"Chromium startup attempt {attempt}/2: {exc}")
+        finally:
+            if process is not None and not ready:
+                _stop_layout_browser(process)
+        log_tail = (
+            log_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+            if log_path.is_file() else "Startup log could not be created"
+        )
+        failures[-1] += f"\nBrowser: {chromium}\nLog: {log_path}\n{log_tail}"
+        print(failures[-1], flush=True)
+    pytest.fail("Chromium startup failed after two attempts:\n" + "\n".join(failures))
+
+
 def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
     chromium = discover_chromium()
     if chromium is None:
@@ -1128,43 +1207,9 @@ def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
     document = tmp_path / f"layout-{plan.width}x{plan.height}.html"
     profile = tmp_path / f"chromium-profile-{plan.width}x{plan.height}"
     document.write_text(compile_edit_plan_html(plan), encoding="utf-8")
-    process = subprocess.Popen(
-        [
-            str(chromium), "--headless=new", "--no-sandbox", "--disable-gpu",
-            "--disable-dev-shm-usage", "--disable-extensions",
-            "--disable-background-networking", "--disable-component-update",
-            "--disable-sync", "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={profile}", "--remote-debugging-port=0",
-            "--remote-allow-origins=*", "about:blank",
-        ],
-        env=dict(os.environ, HOME=str(profile)),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    process, page_url = _start_layout_browser(chromium, profile)
     client: _CDP | None = None
     try:
-        port_file = profile / "DevToolsActivePort"
-        deadline = time.monotonic() + 30
-        while not port_file.is_file() and time.monotonic() < deadline:
-            assert process.poll() is None, "Chromium exited before layout inspection started"
-            time.sleep(0.1)
-        assert port_file.is_file(), "Chromium did not expose layout inspection control"
-        port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
-        page_url = None
-        deadline = time.monotonic() + 30
-        while page_url is None and time.monotonic() < deadline:
-            try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/json", timeout=2,
-                ) as response:
-                    targets = json.load(response)
-                page_url = next(
-                    item["webSocketDebuggerUrl"]
-                    for item in targets if item["type"] == "page"
-                )
-            except (OSError, StopIteration, ValueError):
-                time.sleep(0.1)
-        assert page_url is not None, "Chromium did not create a layout inspection page"
         client = _CDP(page_url)
         client.command("Page.enable")
         client.command("Runtime.enable")
@@ -1203,12 +1248,72 @@ def _browser_layout_report(tmp_path: Path, plan: EditPlan) -> list[dict]:
             if client is not None:
                 client.close()
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            _stop_layout_browser(process)
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_layout_browser_startup_retries_once_with_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    recovers: bool,
+) -> None:
+    processes: list[Mock] = []
+    profiles: list[Path] = []
+
+    def launch(argv: list[str], *, stdout: BinaryIO, **kwargs: object) -> Mock:
+        stdout.write(f"browser diagnostic {len(processes) + 1}\n".encode())
+        process = Mock()
+        processes.append(process)
+        return process
+
+    def wait(process: Mock, profile: Path) -> str:
+        profiles.append(profile)
+        if len(profiles) == 1 or not recovers:
+            raise AssertionError("Chromium did not expose layout inspection control")
+        return "ws://127.0.0.1:9999/page"
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setitem(globals(), "_wait_for_layout_browser", wait)
+    if recovers:
+        process, page_url = _start_layout_browser(Path("/test/chromium"), tmp_path / "profile")
+        assert process is processes[1]
+        assert page_url == "ws://127.0.0.1:9999/page"
+        processes[1].terminate.assert_not_called()
+    else:
+        with pytest.raises(pytest.fail.Exception, match="failed after two attempts") as exc:
+            _start_layout_browser(Path("/test/chromium"), tmp_path / "profile")
+        assert "browser diagnostic 1" in str(exc.value)
+        assert "browser diagnostic 2" in str(exc.value)
+        processes[1].terminate.assert_called_once()
+        processes[1].wait.assert_called_once()
+    assert len(processes) == 2
+    assert profiles[0] != profiles[1]
+    processes[0].terminate.assert_called_once()
+    processes[0].wait.assert_called_once()
+    assert "browser diagnostic 1" in capsys.readouterr().out
+
+
+def test_layout_errors_do_not_retry_browser_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock()
+    start = Mock(return_value=(process, "ws://127.0.0.1:9999/page"))
+    client = Mock()
+
+    def command(method: str, *args: object) -> dict:
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {"error": "layout rendering failed"}}}
+        return {}
+
+    client.command.side_effect = command
+    monkeypatch.setitem(globals(), "discover_chromium", lambda: Path("/test/chromium"))
+    monkeypatch.setitem(globals(), "_start_layout_browser", start)
+    monkeypatch.setitem(globals(), "_CDP", Mock(return_value=client))
+    with pytest.raises(AssertionError, match="layout rendering failed"):
+        _browser_layout_report(tmp_path, _layout_stress_plan(1080, 1920))
+    start.assert_called_once()
+    client.close.assert_called_once()
+    process.terminate.assert_called_once()
+    process.wait.assert_called_once()
 
 
 def _layout_stress_plan(width: int, height: int) -> EditPlan:
