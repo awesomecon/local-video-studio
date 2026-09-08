@@ -45,14 +45,17 @@ measured duration. Editorial rendering derives a proportional scene clock from t
 then retimes the deterministic composition canvas to the same master duration. Rebuild caption
 alignment after selecting a recording when exact word-level caption timing is wanted.
 
-## Fish S2 Pro delivery tags
+## Fish S2 Pro and Higgs TTS 3 delivery tags
 
-These endpoints manage the optional, Fish-S2-Pro-only delivery-tag script. The tagged text is a
-separate portable artifact (`narration/performance-tags.json`); the clean scene narration and
-caption transcript are never modified, and cues are never sent to any other TTS provider.
+These endpoints manage independent delivery-tag scripts for `fish_s2_pro` and `higgs_tts_3`.
+Each uses `narration/performance-tags-{provider}.json`; the legacy `performance-tags.json`
+remains readable only for its recorded provider. Clean narration and captions are unchanged.
+Pass `provider` in POST/PUT bodies or the GET/DELETE query string (default `fish_s2_pro`).
+All reads, edits, regeneration, and deletion affect only that provider's script.
 
 - `GET /api/projects/{project_id}/tts/performance-tags`
-  Returns `{ script, stale, tag_count, llm }`. `script` is `null` when none exists; `stale`
+  Returns `{ script, stale, tag_count, llm, providers }`. `providers` maps both provider names
+  to `{ script, stale, tag_count }` for switching editors. `script` is `null` when none exists; `stale`
   is true when a stored segment's source no longer matches the current narration; `llm`
   reports whether the local LLM is available and which model would be used.
 - `POST /api/projects/{project_id}/tts/performance-tags`

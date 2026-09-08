@@ -125,6 +125,7 @@ import {
   previewAspectRatio,
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
+import { performancePanel } from "../../js/pages/voice.js";
 import { state } from "../../js/state.js";
 import {
   effectiveVideoMode,
@@ -2390,6 +2391,51 @@ await recordAsync("editorial-workspace: an untrusted preview_url degrades to the
   assert(!screen.querySelector("iframe"), "no iframe is ever pointed at the untrusted URL");
   screen.remove();
   state.currentProjectId = null;
+});
+
+await recordAsync("voice tags: switching providers preserves edits and scopes saves and regeneration", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  const calls = stubFetch(() => ({ payload: { tag_count: 1, warnings: [] } }));
+  const provider = document.createElement("input");
+  provider.value = "higgs_tts_3";
+  const script = document.createElement("textarea");
+  const makeTags = (name, tagged) => ({
+    script: { provider: name, segments: [{ key: "override", source: "Hello world.", tagged }] },
+    stale: false, tag_count: 1,
+  });
+  const tags = {
+    llm: { available: true, model: "local-test" },
+    providers: {
+      higgs_tts_3: makeTags("higgs_tts_3", "<|emotion:contentment|> Hello world."),
+      fish_s2_pro: makeTags("fish_s2_pro", "[calm] Hello world."),
+    },
+  };
+  const panel = performancePanel({ id: "test" }, { use_performance_tags: true }, tags,
+    provider, script, () => {});
+  const switchTo = (name) => { provider.value = name; panel.syncProvider(name); };
+  const clickButton = (label) => [...panel.querySelectorAll("button")]
+    .find((button) => button.textContent === label).click();
+  const higgsEditor = panel.querySelector("textarea");
+  higgsEditor.value = "<|style:whispering|> Hello world.";
+  switchTo("fish_s2_pro");
+  eq(panel.querySelector("textarea").value, "[calm] Hello world.");
+  panel.querySelector("textarea").value = "[happy] Hello world.";
+  clickButton("Save edits");
+  await flush();
+  eq(calls[0].body.provider, "fish_s2_pro");
+  eq(calls[0].body.segments[0].tagged, "[happy] Hello world.");
+  switchTo("higgs_tts_3");
+  assert(panel.querySelector("textarea") === higgsEditor, "unsaved editor survives switching");
+  eq(higgsEditor.value, "<|style:whispering|> Hello world.");
+  clickButton("Regenerate");
+  await flush();
+  eq(calls[1].body.provider, "higgs_tts_3");
+  eq(calls[1].body.key, "override");
+  switchTo("qwen_tts");
+  assert(panel.firstElementChild.hidden, "unsupported providers hide tags");
+  assert(!panel.useTags.checked, "unsupported providers cannot send tags");
+  switchTo("fish_s2_pro");
+  eq(panel.querySelector("textarea").value, "[happy] Hello world.");
 });
 
 /* --- report -------------------------------------------------------------- */

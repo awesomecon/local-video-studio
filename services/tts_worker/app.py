@@ -706,6 +706,37 @@ class HiggsTTS3Provider(SpeechProvider):
     MAX_AUDIO_TOKENS = 8192
     AUDIO_FRAMES_PER_SECOND = 25
 
+    @staticmethod
+    def _clean_terminal_noise(audio: Any, sample_rate: int) -> tuple[Any, int]:
+        """Silence a brief decoder tail only after a sustained quiet gap.
+
+        Higgs can return a rising noise burst in its final 100 ms, after the
+        utterance has already ended. Preserve all samples/timing and avoid
+        gating speech or internal breaths. Continuous endings are untouched.
+        """
+        import numpy as np
+
+        audio = np.asarray(audio, dtype=np.float32)
+        window = max(1, round(sample_rate * 0.01))
+        if audio.ndim != 1 or len(audio) < window * 30:
+            return audio, 0
+        # Align windows to the end, including partial codec-frame durations.
+        offset = len(audio) % window
+        blocks = audio[offset:].reshape(-1, window)
+        rms = np.sqrt(np.mean(blocks.astype(np.float64) ** 2, axis=1))
+        threshold = min(10 ** (-50 / 20), float(rms.max()) * 10 ** (-24 / 20))
+        quiet = rms <= threshold
+        # Require >=120 ms of quiet before a <=120 ms terminal burst.
+        for end in range(len(quiet) - 1, max(11, len(quiet) - 13), -1):
+            if quiet[end - 12:end].all() and not quiet[end:].all():
+                start = offset + (end - 12) * window
+                cleaned = audio.copy()
+                fade = min(window, len(audio) - start)
+                cleaned[start:start + fade] *= np.linspace(1, 0, fade, dtype=np.float32)
+                cleaned[start + fade:] = 0
+                return cleaned, len(audio) - start
+        return audio, 0
+
     @classmethod
     def _token_budget(cls, payload: GeneratePayload) -> int:
         if payload.max_new_tokens is not None:
@@ -934,6 +965,9 @@ class HiggsTTS3Provider(SpeechProvider):
                 "Higgs reached its audio token limit; narration may be cut off. "
                 "Use shorter chunks and regenerate."
             )
+        audio, silenced = self._clean_terminal_noise(audio, int(sample_rate))
+        self._terminal_noise_samples = silenced
+        self._terminal_noise_sample_rate = int(sample_rate)
         return np.asarray(audio, dtype=np.float32), int(sample_rate)
 
     def _extra_metrics(self, payload: GeneratePayload) -> dict[str, Any]:
@@ -944,6 +978,11 @@ class HiggsTTS3Provider(SpeechProvider):
             "higgs_reference_mode": "clone" if payload.reference_audio else "default",
             "higgs_max_new_tokens": self._token_budget(payload),
             "higgs_engine_max_new_tokens": self.MAX_AUDIO_TOKENS,
+            "higgs_tail_cleanup_version": 1,
+            "higgs_tail_silenced_seconds": (
+                getattr(self, "_terminal_noise_samples", 0)
+                / max(1, getattr(self, "_terminal_noise_sample_rate", 1))
+            ),
             "license": "Boson Higgs TTS 3 Research and Non-Commercial License",
             "creator_attribution_required": True,
         }

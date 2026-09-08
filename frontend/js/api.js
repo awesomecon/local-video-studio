@@ -738,7 +738,7 @@ export function generatePerformanceTags(config, projectId, body, opts = {}) {
  * stored tags. Synchronous like plan generation.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
- * @param {{key: string, intensity?: "subtle"|"balanced"|"expressive", notes?: string}} body
+ * @param {{key: string, provider?: "fish_s2_pro"|"higgs_tts_3", intensity?: "subtle"|"balanced"|"expressive", notes?: string}} body
  * @param {{signal?: AbortSignal}} [opts]
  * @returns {Promise<{script: any, tag_count: number, warnings: string[]}>}
  */
@@ -755,7 +755,7 @@ export function regeneratePerformanceSegment(config, projectId, body, opts = {})
  * the clean source; `accept=true` keeps a hand edit the validator dislikes.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
- * @param {{segments: {key: string, tagged: string}[]}} body
+ * @param {{provider?: "fish_s2_pro"|"higgs_tts_3", segments: {key: string, tagged: string}[]}} body
  * @param {{signal?: AbortSignal, accept?: boolean}} [opts]
  * @returns {Promise<{script: any}>}
  */
@@ -772,13 +772,14 @@ export function savePerformanceTags(config, projectId, body, opts = {}) {
  * DELETE /api/projects/{id}/tts/performance-tags
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
- * @param {{signal?: AbortSignal}} [opts]
+ * @param {{signal?: AbortSignal, provider?: "fish_s2_pro"|"higgs_tts_3"}} [opts]
  * @returns {Promise<{deleted: boolean}>}
  */
 export function clearPerformanceTags(config, projectId, opts = {}) {
+  const { provider = "fish_s2_pro", ...rest } = opts;
   return request(config,
-    `/api/projects/${encodeURIComponent(projectId)}/tts/performance-tags`, {
-      method: "DELETE", timeoutMs: 10000, ...opts,
+    `/api/projects/${encodeURIComponent(projectId)}/tts/performance-tags?provider=${encodeURIComponent(provider)}`, {
+      method: "DELETE", timeoutMs: 10000, ...rest,
     });
 }
 
