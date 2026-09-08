@@ -9,11 +9,10 @@ without any GPU or model downloads.
 Real image, video, speech, music, and caption models are optional local backends with separate
 installation and licensing requirements.
 
-The project was developed and tested on a 24 GB-class NVIDIA GPU. Every current TTS, image,
-video, and music backend is validated on that card, and all of them can also run on smaller GPUs
-with different quantizations, presets, or models. Each backend document states its own VRAM
-expectations; see [GPU memory management](docs/gpu-memory.md) and
-[model backends](docs/models.md).
+The project was developed and tested on a 24 GB-class NVIDIA GPU. All current TTS, image, video,
+and music backends work on that card; on any other GPU you choose the backends, quantizations,
+and presets that fit. The table below is an honest per-card guide; the per-backend details live in
+[GPU memory management](docs/gpu-memory.md) and [model backends](docs/models.md).
 
 > **Repository note (Sep 5, 2026):** the `main` history was cleaned up; no code changed. If an
 > existing clone reports divergent branches on pull, run `git fetch origin`, then
@@ -25,6 +24,22 @@ expectations; see [GPU memory management](docs/gpu-memory.md) and
 - FFmpeg and ffprobe on `PATH` (or an existing `imageio-ffmpeg` installation)
 - Git
 - NVIDIA/CUDA only for optional real-model backends
+
+## GPU compatibility
+
+| Card size | Runs |
+| --- | --- |
+| No GPU / CPU | The whole deterministic mock pipeline, Graphics Screens, editorial overlays, thumbnails, and FFmpeg rendering; caption alignment on CPU. No GPU is ever required for the application itself. |
+| 8 GB | Lighter TTS (Chatterbox, IndexTTS 2.5, and the ~8 GiB providers with headroom), captions on CPU or small models, graphics and editing. |
+| 12 GB | Everything above plus most still-image generation with smaller presets and lighter TTS (Qwen3-TTS 1.7B, OmniVoice, VoxCPM2, Breeze eager). |
+| 16 GB | 12 GB features plus video via Wan-class models, heavier TTS (Fish S2 Pro), and still models with more headroom. |
+| 24 GB (reference) | All current backends: H3, Krea 2 Turbo, Qwen-Image-2512, Ideogram 4, ACE-Step 1.5 XL, Higgs TTS 3, and every TTS provider. |
+| Larger | Everything, with more headroom; nothing in the Studio caps larger cards. |
+
+These are typical free-VRAM floors observed on the reference card, not exact requirements. One
+setting, `gpu.minimum_free_vram_gb_for_heavy_job` (default 20), gates the heavy cold loads; tune it
+to your card. Full per-backend numbers and smaller-card alternatives: see
+[GPU memory management](docs/gpu-memory.md).
 
 ## Quick start (no model downloads)
 
