@@ -7,8 +7,13 @@ needs depend on which optional model backends you enable; the deterministic mock
 without any GPU or model downloads.
 
 Real image, video, speech, music, and caption models are optional local backends with separate
-installation and licensing requirements. Each backend document states its own VRAM expectations;
-see [GPU memory management](docs/gpu-memory.md) and [model backends](docs/models.md).
+installation and licensing requirements.
+
+The project was developed and tested on a 24 GB-class NVIDIA GPU. Every current TTS, image,
+video, and music backend is validated on that card, and all of them can also run on smaller GPUs
+with different quantizations, presets, or models. Each backend document states its own VRAM
+expectations; see [GPU memory management](docs/gpu-memory.md) and
+[model backends](docs/models.md).
 
 > **Repository note (Sep 5, 2026):** the `main` history was cleaned up; no code changed. If an
 > existing clone reports divergent branches on pull, run `git fetch origin`, then

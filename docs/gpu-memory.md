@@ -1,8 +1,11 @@
 # GPU memory management
 
-The reference configuration uses a 24 GB-class GPU; usable headroom varies. Local Video Studio reads
-system-wide usage, not just memory allocated by its own Python process. Desktop graphics and the
-external local LLM can reduce available capacity.
+The reference configuration was tested on a 24 GB-class GPU; usable headroom varies by card and
+desktop load. The Studio works on other GPUs too: on smaller cards some backends may need a
+different quantization, smaller presets, or a different model, and the Studio's VRAM probes adapt
+to whatever capacity the card actually has. Local Video Studio reads system-wide usage, not just
+memory allocated by its own Python process. Desktop graphics and the external local LLM can reduce
+available capacity.
 
 Default policy:
 
@@ -26,7 +29,8 @@ tests, never parallel H3/FLUX/Wan inference.
 
 ## MiniMax H3 VRAM gate
 
-MiniMax H3 cold-load needs roughly 20 GiB free on a 24 GB-class card. Before dispatch, the pipeline probes
+MiniMax H3 cold-load needs roughly 20 GiB free on the tested 24 GB-class card (smaller cards can
+use H3's smaller canvas presets, a quantized checkpoint, or another video backend). Before dispatch, the pipeline probes
 system-wide free VRAM and raises a structured `INSUFFICIENT_VRAM` error (mapped to HTTP 409) when the
 threshold is not met. The error message lists concrete remediation steps:
 
