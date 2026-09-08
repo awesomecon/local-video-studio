@@ -143,6 +143,7 @@ input.input[aria-invalid="true"] { border-color: var(--critical); }
 .small { font-size: var(--text-sm); }
 .mono { font-family: var(--mono); }
 .critical { color: var(--critical); }
+.warning { color: var(--warning); }
 
 /* --- Tables ---------------------------------------------------------------- */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
@@ -203,6 +204,7 @@ dialog.modal {
   padding: 0;
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
+  max-height: calc(100dvh - 64px);
 }
 dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2px); }
 .modal-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 8px; }
@@ -346,10 +348,10 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   border-radius: 999px; padding: 1px 8px;
   border: 1px solid; white-space: nowrap;
 }
-.lane-real  { color: #86dcb0; border-color: color-mix(in oklab, #4caf7d 60%, transparent); background: color-mix(in oklab, #4caf7d 16%, transparent); }
-.lane-image { color: #cabcff; border-color: color-mix(in oklab, #8b72f0 60%, transparent); background: color-mix(in oklab, #8b72f0 16%, transparent); }
-.lane-h3    { color: #ffc790; border-color: color-mix(in oklab, #f08c3a 60%, transparent); background: color-mix(in oklab, #f08c3a 16%, transparent); }
-.lane-html  { color: #93cdff; border-color: color-mix(in oklab, #3d8fe0 60%, transparent); background: color-mix(in oklab, #3d8fe0 16%, transparent); }
+.lane-real  { color: #86dcb0; border-color: color-mix(in oklab, var(--lane-real) 60%, transparent); background: color-mix(in oklab, var(--lane-real) 16%, transparent); }
+.lane-image { color: #cabcff; border-color: color-mix(in oklab, var(--lane-image) 60%, transparent); background: color-mix(in oklab, var(--lane-image) 16%, transparent); }
+.lane-h3    { color: #ffc790; border-color: color-mix(in oklab, var(--lane-h3) 60%, transparent); background: color-mix(in oklab, var(--lane-h3) 16%, transparent); }
+.lane-html  { color: #93cdff; border-color: color-mix(in oklab, var(--lane-html) 60%, transparent); background: color-mix(in oklab, var(--lane-html) 16%, transparent); }
 
 /* Ordered shot strip in the Scene Editor. */
 .shot-strip {
@@ -427,7 +429,7 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 }
 .tl-grid {
   display: grid;
-  grid-template-columns: 96px auto;
+  grid-template-columns: var(--tl-label-w) auto;
   width: max-content;
   min-width: 100%;
 }
@@ -550,10 +552,10 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   box-shadow: 0 0 0 2px var(--accent-wash);
   z-index: 2;
 }
-.tl-shot.lane-real  { background: color-mix(in oklab, #4caf7d 34%, #10241a); border-color: color-mix(in oklab, #4caf7d 80%, transparent); }
-.tl-shot.lane-image { background: color-mix(in oklab, #8b72f0 32%, #171331); border-color: color-mix(in oklab, #8b72f0 80%, transparent); }
-.tl-shot.lane-h3    { background: color-mix(in oklab, #f08c3a 30%, #241505); border-color: color-mix(in oklab, #f08c3a 80%, transparent); }
-.tl-shot.lane-html  { background: color-mix(in oklab, #3d8fe0 32%, #0a1a2c); border-color: color-mix(in oklab, #3d8fe0 80%, transparent); }
+.tl-shot.lane-real  { background: color-mix(in oklab, var(--lane-real) 34%, #10241a); border-color: color-mix(in oklab, var(--lane-real) 80%, transparent); }
+.tl-shot.lane-image { background: color-mix(in oklab, var(--lane-image) 32%, #171331); border-color: color-mix(in oklab, var(--lane-image) 80%, transparent); }
+.tl-shot.lane-h3    { background: color-mix(in oklab, var(--lane-h3) 30%, #241505); border-color: color-mix(in oklab, var(--lane-h3) 80%, transparent); }
+.tl-shot.lane-html  { background: color-mix(in oklab, var(--lane-html) 32%, #0a1a2c); border-color: color-mix(in oklab, var(--lane-html) 80%, transparent); }
 .tl-shot .tl-shot-info {
   position: absolute; left: 4px; right: 4px; bottom: 2px;
   display: flex; gap: 4px; align-items: baseline;
@@ -848,10 +850,11 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 .outline-list li { font-size: var(--text-sm); color: var(--text-2); }
 
 /* --- Focus visibility --------------------------------------------------------------- */
+/* Ring only: never override border-radius here, or focused elements with a
+   larger radius (panels, cards, toasts) would jump shape on focus. */
 :focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
 }
 a { color: var(--accent); }
 a:focus-visible { box-shadow: var(--focus-ring); }
@@ -867,7 +870,7 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 .divider { border: 0; border-top: 1px solid var(--line); margin: var(--gap) 0; }
 .tag {
   display: inline-block; font-size: var(--text-xs); color: var(--text-2);
-  border: 1px solid var(--line-strong); border-radius: 4px; padding: 1px 6px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 1px 6px;
   background: var(--surface-2);
 }
 .tag-accent { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, transparent); background: var(--accent-wash); }
@@ -942,11 +945,11 @@ a:focus-visible { box-shadow: var(--focus-ring); }
   box-shadow: 0 0 0 3px var(--accent-wash);
 }
 /* Template tints: the left edge only, so reserved status colors stay clear. */
-.ed-card.tpl-archiveCanvas    { border-left-color: #c9a86a; }
-.ed-card.tpl-documentReveal   { border-left-color: #8fb8a8; }
-.ed-card.tpl-comparisonCanvas { border-left-color: #8b72f0; }
-.ed-card.tpl-illustrationCanvas { border-left-color: #3d8fe0; }
-.ed-card.tpl-bigTextReveal    { border-left-color: #ec835a; }
+.ed-card.tpl-archiveCanvas    { border-left-color: var(--tpl-archive-canvas); }
+.ed-card.tpl-documentReveal   { border-left-color: var(--tpl-document-reveal); }
+.ed-card.tpl-comparisonCanvas { border-left-color: var(--tpl-comparison-canvas); }
+.ed-card.tpl-illustrationCanvas { border-left-color: var(--tpl-illustration-canvas); }
+.ed-card.tpl-bigTextReveal    { border-left-color: var(--tpl-big-text-reveal); }
 .ed-card.selected.tpl-archiveCanvas,
 .ed-card.selected.tpl-documentReveal,
 .ed-card.selected.tpl-comparisonCanvas,

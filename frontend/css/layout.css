@@ -21,6 +21,7 @@ html, body {
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100vh;
+  height: 100dvh; /* mobile browsers: track the dynamic viewport */
   overflow: hidden;
 }
 
@@ -147,10 +148,7 @@ html, body {
 .nav-collapsed .nav-section { text-align: center; padding: 12px 4px 6px; font-size: 0; }
 .nav-collapsed .nav-item { justify-content: center; padding: 8px 4px; }
 .nav-collapsed .nav-label,
-.nav-collapsed .nav-count,
-.nav-collapsed .nav-section span { display: none; }
-.nav-collapsed .nav-item { text-decoration: none; }
-.nav-collapsed .nav-item { position: relative; }
+.nav-collapsed .nav-count { display: none; }
 
 .sidebar-foot { margin-top: auto; }
 

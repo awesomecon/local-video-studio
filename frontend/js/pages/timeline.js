@@ -34,13 +34,19 @@
 import { el, fmtDuration, shortId } from "../dom.js";
 import { state, needsProject, latestAssetForScene } from "../state.js";
 import { getProject } from "../api.js";
-import { loadingState, emptyState, errorPanel, badge, stageChip } from "../ui.js";
+import { loadingState, emptyState, errorPanel, badge, stageChip, icon } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute, sceneEditorHash } from "../router.js";
 import { compiledShotSpans, compiledSpanSeconds, fmtSecs } from "../shots.js";
 
-/** Width of the sticky label column (keep in sync with `.tl-grid`). */
-const LABEL_COL_PX = 96;
+/** Width of the sticky label column: read from the shared CSS custom
+ * property so the grid definition and the JS layout can never drift. */
+const LABEL_COL_PX = (() => {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue("--tl-label-w").trim();
+  const px = parseFloat(raw);
+  return Number.isFinite(px) && px > 0 ? px : 96;
+})();
 /** Smallest useful on-screen width for a scene thumbnail. */
 const MIN_CLIP_PX = 64;
 /** Below this width a scene clip hides its caption text. */
@@ -410,7 +416,7 @@ function renderSceneLane(lane, layout, scale, view, shotSpans, expandedSpanSecon
         "aria-expanded": String(isExpanded),
         "aria-label": `${isExpanded ? "Collapse" : "Expand"} scene S${num} shots`,
       });
-      expandBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+      expandBtn.append(icon("chevron", 12));
       expandBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
         view.expandedSceneId = isExpanded ? null : scene.id;

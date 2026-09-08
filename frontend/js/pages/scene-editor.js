@@ -677,7 +677,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
   })();
 
   function populatePredecessorOptions(allScenes) {
-    predecessorSelect.innerHTML = '<option value="">None (first in group)</option>';
+    predecessorSelect.replaceChildren(el("option", { value: "" }, "None (first in group)"));
     const currentId = scene.id;
     const currentIndex = scene.index ?? 0;
     (allScenes || [])
@@ -697,7 +697,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
   }
 
   function updateH3QualityOptions() {
-    h3Quality.innerHTML = "";
+    h3Quality.replaceChildren();
     const presets = h3Policy?.presets || {};
     const defaultQuality = currentH3Quality();
     const options = [
