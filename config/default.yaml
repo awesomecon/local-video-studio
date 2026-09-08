@@ -12,9 +12,6 @@ paths:
 
 hardware:
   preferred_device: cuda
-  max_vram_gb: 23
-  allow_cpu_offload: true
-  system_ram_budget_gb: 56
 
 gpu:
   minimum_free_vram_gb_for_heavy_job: 20

@@ -86,3 +86,7 @@ deterministic placeholder timings.
 No adapter may silently install packages or weights. A backend reports `available`, `unconfigured`, or
 `incompatible` with exact remediation. If it pins a conflicting PyTorch version, only that worker gets
 an isolated environment; shared caches prevent duplicate checkpoint downloads.
+
+VRAM needs are per backend and per card, not per application: the reference card is 24 GB-class and
+the typical free-VRAM needs of every backend, plus smaller-card alternatives, are tabulated in
+[gpu-memory](gpu-memory.md).

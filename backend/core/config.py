@@ -52,10 +52,11 @@ class PathsConfig(StrictModel):
 
 
 class HardwareConfig(StrictModel):
+    # Only the device preference is read by the application (caption alignment).
+    # Per-card VRAM needs are not a fixed number: each backend probes system-wide
+    # free VRAM at dispatch time, and per-backend floors are documented in
+    # docs/gpu-memory.md.
     preferred_device: str = "cuda"
-    max_vram_gb: float = Field(default=23, gt=0)
-    allow_cpu_offload: bool = True
-    system_ram_budget_gb: float = Field(default=56, gt=0)
 
 
 class GPUConfig(StrictModel):
