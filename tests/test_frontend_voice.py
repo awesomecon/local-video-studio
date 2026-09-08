@@ -100,7 +100,9 @@ def test_voice_settings_can_be_saved_without_generating_or_reloading() -> None:
         "generate.onclick = async () => {", 1,
     )[0]
     assert "await editProject" in handler
-    assert "voice: voiceSettings()" in handler
+    assert "const settings = voiceSettings();" in handler
+    assert "if (!settings) return;" in handler
+    assert "voice: settings" in handler
     assert "generateNarration(" not in handler
     assert "script.value" not in handler
     assert "refresh()" not in handler  # Keep unsaved script and recording inputs.
