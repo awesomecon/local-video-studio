@@ -193,6 +193,65 @@ class TTSManager:
                 return metadata.parent / stored.reference_audio.name
         return shared
 
+    def delete_voice_profile(self, project_id: str, profile_id: str) -> VoiceProfile:
+        """Remove a saved voice profile from shared or legacy project storage.
+
+        The identifier must match the stored metadata exactly. Profiles that
+        any project still selects for narration are refused so deletion can
+        never leave a dangling voice reference behind.
+        """
+        if not profile_id or any(char not in "0123456789abcdef-" for char in profile_id.lower()):
+            raise KeyError("voice profile not found")
+        self.pipeline._project(project_id)
+        profile: VoiceProfile | None = None
+        for path in self._voice_profile_metadata_paths(profile_id):
+            if not path.is_file():
+                continue
+            try:
+                stored = VoiceProfile.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                logger.warning("Skipping unreadable voice profile %s: %s", path, exc)
+                continue
+            if stored.id == profile_id:
+                profile = stored
+                break
+        if profile is None:
+            raise KeyError("voice profile not found")
+        projects, issues = self.pipeline.list_projects()
+        # Reconciliation can retain stale index rows or omit unreadable disk
+        # projects. Neither proves that the portable projects no longer use
+        # this voice. Successful recovery is informational, not a blocker.
+        unresolved = [issue for issue in issues if issue["type"] != "recovered"]
+        if unresolved:
+            raise ValueError(
+                "cannot safely delete a voice profile while project recovery issues remain; "
+                "resolve the project recovery issues on the Dashboard first"
+            )
+        using = [
+            project.title
+            for project in projects
+            if isinstance(project.settings.get("voice"), dict)
+            and project.settings["voice"].get("voice_profile_id") == profile.id
+        ]
+        if using:
+            raise ValueError(
+                f"voice profile is still selected in {', '.join(sorted(using))}; "
+                "change that project's voice and click Save voice settings first"
+            )
+        removed: list[Path] = []
+        for path in self._voice_profile_metadata_paths(profile.id):
+            if not path.is_file():
+                continue
+            shutil.rmtree(path.parent)
+            removed.append(path.parent)
+        if not removed:
+            raise KeyError("voice profile not found")
+        logger.info(
+            "Deleted voice profile %s from %s",
+            profile.id, redact_secrets(", ".join(str(path) for path in removed)),
+        )
+        return profile
+
     def _voice_library_root(self) -> Path:
         return self.pipeline.store.root / ".voices"
 

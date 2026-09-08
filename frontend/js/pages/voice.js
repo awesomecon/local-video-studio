@@ -3,8 +3,8 @@
 import { el, fmtDate, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
 import {
-  activateNarrationTake, clearPerformanceTags, editProject, generateNarration,
-  generatePerformanceTags, getPerformanceTags, getProject,
+  activateNarrationTake, clearPerformanceTags, deleteVoiceProfile, editProject,
+  generateNarration, generatePerformanceTags, getPerformanceTags, getProject,
   importRecordedNarration, listNarrationTakes, listVoiceProfiles,
   regenerateNarrationChunk, regeneratePerformanceSegment,
   savePerformanceTags,
@@ -215,7 +215,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     builtInOption,
     higgsBuiltInOption,
     ...qwenOptions,
-    el("option", { value: "" }, voices.length ? "Select a saved profile" : "No saved profiles"),
+    el("option", { value: "" }, "No saved profile selected"),
     ...voices.map((item) => el("option", { value: item.id }, item.name)));
   voice.value = current.voice_profile_id ||
     (provider.value === "chatterbox" ? chatterboxBuiltIn :
@@ -438,30 +438,16 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
   syncProviderControls();
-  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
-  generate.onclick = async () => {
+  const voiceSettings = () => {
     const seedValue = Number(seed.value);
     if (!seed.value.trim() || !Number.isSafeInteger(seedValue) || seedValue < 0) {
       toast("critical", "Invalid seed", "Enter a non-negative whole number up to 9007199254740991.");
-      return;
+      return null;
     }
-    const builtInChatterbox = voice.value === chatterboxBuiltIn;
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
-    const builtInHiggs = voice.value === higgsBuiltIn;
-    const builtIn = builtInChatterbox || builtInQwen || builtInHiggs;
-    if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
-        (builtInQwen && provider.value !== "qwen_tts") ||
-        (builtInHiggs && provider.value !== "higgs_tts_3")) {
-      toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
-      return;
-    }
-    if (!script.value.trim() && !hasPlannedNarration) {
-      toast("critical", "Script required",
-        "Run planning from the Script screen, or enter text in Script override.");
-      return;
-    }
+    const builtIn = voice.value === chatterboxBuiltIn || builtInQwen || voice.value === higgsBuiltIn;
     const settings = {
-      provider: provider.value, voice_profile_id: builtIn ? null : voice.value,
+      provider: provider.value, voice_profile_id: builtIn ? null : (voice.value || null),
       language: language.value,
       seed: seedValue,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
@@ -489,7 +475,38 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       settings.num_steps = omniSteps.value ? Number(omniSteps.value) : null;
       settings.speed = omniSpeed.value ? Number(omniSpeed.value) : null;
     }
-    generate.disabled = true;
+    return settings;
+  };
+  const saveVoice = el("button", { class: "btn", type: "button" }, "Save voice settings");
+  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
+  saveVoice.onclick = async () => {
+    const settings = voiceSettings();
+    if (!settings) return;
+    saveVoice.disabled = generate.disabled = true;
+    try {
+      await editProject(state.config, project.id, { settings: { voice: settings } });
+      toast("good", "Voice settings saved", "You can now delete any profile no project selects.");
+    } catch (err) { toastError(err, "save voice settings"); }
+    finally { saveVoice.disabled = generate.disabled = false; }
+  };
+  generate.onclick = async () => {
+    const builtInChatterbox = voice.value === chatterboxBuiltIn;
+    const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
+    const builtInHiggs = voice.value === higgsBuiltIn;
+    if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
+        (builtInQwen && provider.value !== "qwen_tts") ||
+        (builtInHiggs && provider.value !== "higgs_tts_3")) {
+      toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
+      return;
+    }
+    if (!script.value.trim() && !hasPlannedNarration) {
+      toast("critical", "Script required",
+        "Run planning from the Script screen, or enter text in Script override.");
+      return;
+    }
+    const settings = voiceSettings();
+    if (!settings) return;
+    saveVoice.disabled = generate.disabled = true;
     try {
       await editProject(state.config, project.id, { settings: { voice: settings } });
       // intensity / performance_notes are persisted settings, not NarrationRequest
@@ -500,7 +517,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} will run locally.`);
       refresh();
     } catch (err) { toastError(err, "generate narration"); }
-    finally { generate.disabled = false; }
+    finally { saveVoice.disabled = generate.disabled = false; }
   };
 
   return el("div", { class: "stack" },
@@ -522,7 +539,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       el("div", { class: "row" }, upload,
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, "Audio never leaves this machine.")),
-      savedVoicesPanel(voices)),
+      savedVoicesPanel(voices, project.id, refresh)),
     section("2. Use your recorded voiceover",
       el("p", { class: "muted small" },
         "This becomes the master narration without running TTS or cloning your voice. "
@@ -561,7 +578,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       enhanceRow,
       stepGrid,
       performance,
-      el("div", { class: "row" }, generate)),
+      el("div", { class: "row" }, saveVoice, generate)),
     workerControlsPanel(models, refresh),
     takeLibraryPanel(
       project.id, narrations.takes || [], narrations.active_asset_id || null,
@@ -576,7 +593,7 @@ function languageSelect(value) {
   return select;
 }
 
-function savedVoicesPanel(voices) {
+function savedVoicesPanel(voices, projectId, refresh) {
   if (!voices.length) {
     return el("p", { class: "muted small" },
       "No saved voices yet. Record or import your first reference above — it then appears in the Voice dropdown below.");
@@ -584,21 +601,50 @@ function savedVoicesPanel(voices) {
   return el("div", { class: "stack" },
     el("div", { class: "panel-title" }, "Saved voices"),
     el("div", { class: "voice-profile-list" },
-      ...voices.map((item) => el("div", { class: "voice-profile-row saved-voice" },
-        icon("mic", 15),
-        el("div", { class: "stack saved-voice-body" },
-          el("div", { class: "row" },
-            el("span", { class: "vp-name" }, item.name),
-            el("span", { class: "tag" }, String(item.language || "en").toUpperCase()),
-            item.authorized ? badge("good", "authorized", false)
-              : badge("warning", "unauthorized", false),
-            item.gain_db ? el("span", { class: "tag" }, `+${item.gain_db} dB boost`) : "",
-            el("span", { class: "spacer" }),
-            el("span", { class: "muted small" }, item.created_at ? fmtDate(item.created_at) : "")),
-          item.url ? el("audio", {
-            controls: true, preload: "metadata", src: item.url,
-            "aria-label": `Play reference voice ${item.name}`,
-          }) : el("span", { class: "muted small" }, "Reference audio unavailable."))))));
+      ...voices.map((item) => {
+        const remove = el("button", {
+          class: "btn btn-danger btn-sm", type: "button",
+          "aria-label": `Delete voice profile ${item.name}`,
+        }, "Delete");
+        remove.onclick = async () => {
+          remove.disabled = true;
+          try {
+            const ok = await confirm({
+              title: `Delete voice \u201c${item.name}\u201d?`,
+              message:
+                "Removes this profile from the shared local library, so it is no "
+                + "longer available in any project. Narration takes already "
+                + "generated with it keep their audio.",
+              confirmLabel: "Delete",
+            });
+            if (!ok) return;
+            await deleteVoiceProfile(state.config, projectId, item.id);
+            toast("good", "Voice profile deleted",
+              `\u201c${item.name}\u201d was removed from the shared library.`);
+            await refresh();
+          } catch (err) {
+            toastError(err, "delete voice profile");
+          } finally {
+            remove.disabled = false;
+          }
+        };
+        return el("div", { class: "voice-profile-row saved-voice" },
+          icon("mic", 15),
+          el("div", { class: "stack saved-voice-body" },
+            el("div", { class: "row" },
+              el("span", { class: "vp-name" }, item.name),
+              el("span", { class: "tag" }, String(item.language || "en").toUpperCase()),
+              item.authorized ? badge("good", "authorized", false)
+                : badge("warning", "unauthorized", false),
+              item.gain_db ? el("span", { class: "tag" }, `+${item.gain_db} dB boost`) : "",
+              el("span", { class: "spacer" }),
+              el("span", { class: "muted small" }, item.created_at ? fmtDate(item.created_at) : "")),
+            item.url ? el("audio", {
+              controls: true, preload: "metadata", src: item.url,
+              "aria-label": `Play reference voice ${item.name}`,
+            }) : el("span", { class: "muted small" }, "Reference audio unavailable."),
+            el("div", { class: "row" }, el("span", { class: "spacer" }), remove)));
+      })));
 }
 
 function fmtBytes(bytes) {

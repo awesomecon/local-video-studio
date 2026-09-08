@@ -1180,6 +1180,16 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return profile.model_dump(mode="json")
 
+    @application.delete("/api/projects/{project_id}/tts/voices/{profile_id}")
+    def delete_voice_profile(project_id: str, profile_id: str) -> dict[str, Any]:
+        try:
+            profile = service.tts.delete_voice_profile(project_id, profile_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"deleted": profile.model_dump(mode="json")}
+
     @application.get("/api/projects/{project_id}/tts/narrations")
     def list_narration_takes(project_id: str) -> dict[str, Any]:
         try:
