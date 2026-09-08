@@ -96,7 +96,8 @@ directory must be configured first, and nothing is downloaded automatically.
 
 Editorial composition cuts follow that same caption clock. Internal cuts snap to the nearest
 spoken sentence ending and keep the current composition visible for a configurable hold (0.5
-seconds by default); they are not assigned a fixed scene length. The per-plan hold can be changed
+seconds by default), limited to the available silence before the next sentence starts so short
+scenes retain their spoken time. They are not assigned a fixed scene length. The per-plan hold can be changed
 from Editorial settings or with `PATCH .../editorial/settings` and `sentence_hold_seconds` (0–5).
 The final composition runs through the end of the narration master. Motion-event offsets scale
 with the composition so retiming does not change event order.

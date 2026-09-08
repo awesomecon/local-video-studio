@@ -34,9 +34,16 @@ def caption_sentence_boundaries(
 
     # The final spoken sentence closes the timeline; it is never an internal
     # visual cut, even when the narration master has silence after that word.
+    # A hold may fill silence, but must never borrow time from the next
+    # sentence. Otherwise short sentences can finish before their visual starts,
+    # and large holds can collapse several cuts onto the timeline's end.
     points = {
-        frame_time(min(word.end_seconds + hold_seconds, timeline_duration))
-        for word in words[:-1]
+        frame_time(min(
+            word.end_seconds + hold_seconds,
+            max(word.end_seconds, following.start_seconds),
+            timeline_duration,
+        ))
+        for word, following in zip(words, words[1:])
         if _SENTENCE_END_RE.search(word.text.strip())
     }
     final_frame = frame_time(timeline_duration)
@@ -55,7 +62,7 @@ def retime_compositions_to_caption_sentences(
 
     The old boundaries select the nearest semantic caption boundary, after being
     scaled onto the active narration clock. A short tail keeps the current visual
-    on screen after the sentence finishes. Motion event timing is scaled with its
+    on screen during the pause before the next sentence. Motion event timing is scaled with its
     composition so the authored animation sequence remains intact.
     """
     if not compositions or timeline_duration <= 0 or fps <= 0:
