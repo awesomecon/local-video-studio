@@ -431,7 +431,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     higgsNote.hidden = !higgs;
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
-    // The shared artifact is usable only by the provider it was generated for.
+    // Show the selected provider's saved tags and preserve other editors.
     performance.syncProvider(provider.value);
     updateChunkingExplanation();
   };
@@ -736,7 +736,27 @@ function field(label, input, hint) {
  * Returns the panel element with `useTags`, `intensity`, and `notes` attached
  * so the generate handler can read them.
  */
-function performancePanel(project, current, tags, provider, script, refresh) {
+export function performancePanel(project, current, tags, provider, script, refresh) {
+  const panels = new Map();
+  const container = el("div", {});
+  container.syncProvider = (activeProvider) => {
+    if (!panels.has(activeProvider)) {
+      const scoped = tags?.providers?.[activeProvider] || (
+        tags?.script?.provider === activeProvider ? tags : null);
+      panels.set(activeProvider, providerPerformancePanel(
+        project, current, { ...scoped, llm: tags?.llm }, provider, script, refresh));
+    }
+    const panel = panels.get(activeProvider);
+    panel.syncProvider(activeProvider);
+    container.replaceChildren(panel);
+    Object.assign(container, { useTags: panel.useTags, intensity: panel.intensity, notes: panel.notes });
+  };
+  container.syncProvider(provider.value);
+  return container;
+}
+
+function providerPerformancePanel(project, current, tags, provider, script, refresh) {
+  const panelProvider = provider.value;
   const scriptData = tags?.script || null;
   const storedProvider = scriptData?.provider || null;
   const stale = !!tags?.stale;
@@ -769,7 +789,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
         `${scriptData.segments.length} segment${scriptData.segments.length === 1 ? "" : "s"}.`);
       if (storedProvider !== activeProvider) {
         parts.push(`These tags will not be sent to ${providerLabel(activeProvider)}. ` +
-          "Generate tags to replace the shared script for this provider.");
+          "Switch providers to edit these tags.");
       } else if (stale) {
         parts.push("The narration changed since these tags were generated — regenerate for a fresh pass.");
       }
@@ -789,7 +809,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
       const result = await generatePerformanceTags(state.config, project.id, {
         intensity: intensity.value,
         notes: notes.value.trim(),
-        provider: provider.value,
+        provider: panelProvider,
         force: !!scriptData,
         text: script.value.trim() || null,
       });
@@ -820,6 +840,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
       try {
         const result = await regeneratePerformanceSegment(state.config, project.id, {
           key: seg.key,
+          provider: panelProvider,
           intensity: intensity.value,
           notes: notes.value.trim(),
         });
@@ -849,6 +870,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
     button.disabled = true;
     try {
       await savePerformanceTags(state.config, project.id, {
+        provider: panelProvider,
         segments: segmentEditors.map((s) => ({ key: s.key, tagged: s.textarea.value })),
       }, { accept });
       toast("good", "Delivery tags saved",
@@ -872,12 +894,12 @@ function performancePanel(project, current, tags, provider, script, refresh) {
     if (!scriptData) return;
     const ok = await confirm({
       title: "Remove delivery tags",
-      message: "Remove all delivery tags for this project? The clean narration is untouched.",
+      message: `Remove ${providerLabel(panelProvider)} delivery tags? The clean narration and other providers' tags are untouched.`,
       confirmLabel: "Remove",
     });
     if (!ok) return;
     try {
-      await clearPerformanceTags(state.config, project.id);
+      await clearPerformanceTags(state.config, project.id, { provider: panelProvider });
       toast("good", "Delivery tags removed", "");
       refresh();
     } catch (err) { toastError(err, "remove delivery tags"); }
@@ -920,7 +942,7 @@ function performancePanel(project, current, tags, provider, script, refresh) {
       generateTags.textContent = scriptData && matchesStored
         ? `Regenerate ${label} tags`
         : scriptData
-          ? `Replace with ${label} tags`
+          ? `Add ${label} tags`
           : `Add ${label} tags with local LLM`;
       syntaxHint.textContent = activeProvider === "higgs_tts_3"
         ? "Higgs uses only its official <|category:value|> control-token vocabulary."

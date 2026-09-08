@@ -1159,31 +1159,51 @@ class TTSManager:
         )
 
     # ------------------------------------------------------------------
-    # Provider-scoped delivery tags (one shared artifact per project)
+    # Provider-scoped delivery tags (one artifact per provider)
     # ------------------------------------------------------------------
 
-    def _performance_path(self, project_id: str) -> Path:
+    def _performance_path(self, project_id: str, provider: PerformanceProvider | None = None) -> Path:
+        if provider is not None and provider not in PERFORMANCE_TAG_PROVIDERS:
+            raise ValueError("unsupported delivery-tag provider")
         project = self.pipeline._project(project_id)
         return (
             self.pipeline.store.project_path(project)
-            / "narration" / "performance-tags.json"
+            / "narration" / (f"performance-tags-{provider}.json" if provider else "performance-tags.json")
         )
 
-    def get_performance_script(self, project_id: str) -> PerformanceScript | None:
+    def get_performance_script(
+        self, project_id: str, provider: PerformanceProvider = "fish_s2_pro",
+    ) -> PerformanceScript | None:
         """Load the portable delivery-tag script, or ``None`` when absent."""
         self.pipeline._project(project_id)
-        path = self._performance_path(project_id)
+        path = self._performance_path(project_id, provider)
+        if not path.is_file():
+            path = self._performance_path(project_id)
         if not path.is_file():
             return None
         try:
-            return PerformanceScript.model_validate_json(path.read_text(encoding="utf-8"))
+            script = PerformanceScript.model_validate_json(path.read_text(encoding="utf-8"))
+            return script if script.provider == provider else None
         except (OSError, ValueError) as exc:
             logger.warning("Skipping unreadable performance script %s: %s", path, exc)
             return None
 
-    def clear_performance_script(self, project_id: str) -> None:
+    def clear_performance_script(
+        self, project_id: str, provider: PerformanceProvider = "fish_s2_pro",
+    ) -> None:
         self.pipeline._project(project_id)
-        self._performance_path(project_id).unlink(missing_ok=True)
+        path = self._performance_path(project_id, provider)
+        legacy = self._performance_path(project_id)
+        if legacy.is_file():
+            try:
+                script = PerformanceScript.model_validate_json(legacy.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # An unreadable legacy file cannot be attributed to this provider.
+                pass
+            else:
+                if script.provider == provider:
+                    legacy.unlink()
+        path.unlink(missing_ok=True)
 
     def save_performance_script(
         self,
@@ -1213,7 +1233,7 @@ class TTSManager:
                 "validation: %s", project_id, "; ".join(problems),
             )
         self._atomic_json(
-            self._performance_path(project_id), script.model_dump(mode="json"),
+            self._performance_path(project_id, script.provider), script.model_dump(mode="json"),
         )
         return script
 
@@ -1382,6 +1402,7 @@ class TTSManager:
         *,
         intensity: str = "balanced",
         notes: str = "",
+        provider: PerformanceProvider = "fish_s2_pro",
     ) -> tuple[PerformanceScript, list[str]]:
         """Re-tag one segment with the local LLM and persist the updated script.
 
@@ -1392,7 +1413,7 @@ class TTSManager:
         hand edits on the other segments.
         """
         project = self.pipeline._project(project_id)
-        script = self.get_performance_script(project_id)
+        script = self.get_performance_script(project_id, provider)
         if script is None:
             raise ValueError("no delivery-tag script exists to regenerate")
         segment = next((s for s in script.segments if s.key == key), None)
@@ -1430,7 +1451,7 @@ class TTSManager:
             return None, None
         if request.provider not in PERFORMANCE_TAG_PROVIDERS:
             return None, {"enabled": False, "reason": "provider"}
-        script = self.get_performance_script(project_id)
+        script = self.get_performance_script(project_id, request.provider)
         if script is None:
             return None, {"enabled": False, "reason": "no_script"}
         if script.provider != request.provider:

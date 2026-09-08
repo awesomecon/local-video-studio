@@ -83,8 +83,6 @@ class NarrationRequest(BaseModel):
     # Breeze TTS 2 execution engine (ignored by the other providers):
     # "eager" ≈7.7 GiB VRAM, "fast" ≈14.4 GiB and needs ~20 GiB free.
     breeze_mode: Literal["eager", "fast"] = "eager"
-    # Fish S2 Pro delivery tags: when true and the provider is fish_s2_pro,
-    # the project's performance-tags.json script is applied per scene segment
-    # (cue-aware chunking, scene sync preserved).  Ignored by every other
-    # provider, which always receives clean text.
+    # Apply this provider's delivery-tag script to matching scene segments
+    # for Fish S2 Pro and Higgs TTS 3. Other providers receive clean text.
     use_performance_tags: bool = False

@@ -594,9 +594,8 @@ class PerformanceScript(BaseModel):
 
     The artifact is provider-scoped: a script generated for one provider is
     recorded with that provider and is only ever applied to runs of that same
-    provider, so one model's cues can never leak into another's.  A project has
-    one shared ``narration/performance-tags.json`` artifact; generating for a
-    different provider replaces it.
+    provider, so one model's cues can never leak into another's. A project keeps
+    separate ``narration/performance-tags-{provider}.json`` artifacts.
     """
 
     model_config = ConfigDict(extra="forbid")

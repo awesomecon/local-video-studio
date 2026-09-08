@@ -269,6 +269,7 @@ class PerformanceTagsSaveRequest(BaseModel):
     """Body for PUT /api/projects/{id}/tts/performance-tags."""
 
     model_config = ConfigDict(extra="forbid")
+    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
     segments: list[PerformanceTagsSegmentEdit] = Field(min_length=1)
 
 
@@ -276,6 +277,7 @@ class PerformanceTagsRegenerateRequest(BaseModel):
     """Body for POST /api/projects/{id}/tts/performance-tags/regenerate."""
 
     model_config = ConfigDict(extra="forbid")
+    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
     #: Key of the single segment to re-tag (e.g. ``scene:<id>`` or ``override``).
     key: str = Field(min_length=1, max_length=200)
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
@@ -1350,11 +1352,14 @@ def create_app(
         return job.model_dump(mode="json")
 
     @application.get("/api/projects/{project_id}/tts/performance-tags")
-    def get_performance_tags(project_id: str) -> dict[str, Any]:
+    def get_performance_tags(
+        project_id: str,
+        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+    ) -> dict[str, Any]:
         """Current provider-scoped delivery-tag script, staleness, and LLM state."""
         try:
             project = service._project(project_id)
-            script = service.tts.get_performance_script(project_id)
+            script = service.tts.get_performance_script(project_id, provider)
             stale = (
                 service.tts.performance_script_is_stale(project_id, script)
                 if script is not None else False
@@ -1371,6 +1376,15 @@ def create_app(
                 else:
                     available = True
             return {
+                "providers": {
+                    name: {
+                        "script": saved.model_dump(mode="json") if saved else None,
+                        "stale": service.tts.performance_script_is_stale(project_id, saved) if saved else False,
+                        "tag_count": saved.tag_count if saved else 0,
+                    }
+                    for name in ("fish_s2_pro", "higgs_tts_3")
+                    for saved in [service.tts.get_performance_script(project_id, name)]
+                },
                 "script": script.model_dump(mode="json") if script is not None else None,
                 "stale": stale,
                 "tag_count": script.tag_count if script is not None else 0,
@@ -1386,7 +1400,7 @@ def create_app(
         """Tag the narration with the local LLM (synchronous, like POST /plan)."""
         try:
             if not request.force:
-                existing = service.tts.get_performance_script(project_id)
+                existing = service.tts.get_performance_script(project_id, request.provider)
                 if existing is not None and existing.provider == request.provider:
                     return {
                         "script": existing.model_dump(mode="json"),
@@ -1430,6 +1444,7 @@ def create_app(
             script, warnings = service.tts.regenerate_performance_segment(
                 project_id,
                 request.key,
+                provider=request.provider,
                 intensity=request.intensity,
                 notes=request.notes,
             )
@@ -1458,7 +1473,7 @@ def create_app(
     ) -> dict[str, Any]:
         """Save hand-edited tagged text; validates each segment against source."""
         try:
-            script = service.tts.get_performance_script(project_id)
+            script = service.tts.get_performance_script(project_id, request.provider)
             if script is None:
                 raise ValueError("no delivery-tag script exists to edit")
             by_key = {segment.key: segment for segment in script.segments}
@@ -1477,9 +1492,12 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @application.delete("/api/projects/{project_id}/tts/performance-tags")
-    def delete_performance_tags(project_id: str) -> dict[str, Any]:
+    def delete_performance_tags(
+        project_id: str,
+        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+    ) -> dict[str, Any]:
         try:
-            service.tts.clear_performance_script(project_id)
+            service.tts.clear_performance_script(project_id, provider)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {"deleted": True}
