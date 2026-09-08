@@ -50,14 +50,15 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
     assert 'new Set(["fish_s2_pro", "higgs_tts_3"])' in source
     assert "performance.syncProvider(provider.value)" in source
 
-    # The one shared artifact is identified by its stored provider. A mismatch
+    # Each artifact is identified by its stored provider. A mismatch
     # cannot look enabled or expose the wrong provider's tag editor.
     assert "const storedProvider = scriptData?.provider || null" in source
     assert "useTags.disabled = !!(scriptData && !matchesStored)" in source
     assert "if (!supported || !matchesStored) useTags.checked = false" in source
     assert "if (taggedEditors) taggedEditors.hidden = !matchesStored" in source
-    assert '"Generate tags to replace the shared script for this provider."' in source
-    assert "Replace with ${label} tags" in source
+    assert "tags?.providers?.[activeProvider]" in source
+    assert "provider: panelProvider" in source
+    assert "Replace with ${label} tags" not in source
     assert "official <|category:value|> control-token vocabulary" in source
     assert "free-form natural-language delivery cues in [square brackets]" in source
 

@@ -747,7 +747,7 @@ def test_generate_performance_script_saves_portable_artifact(
     assert script.source_sha256
 
     # The artifact is a portable, human-readable JSON file.
-    path = service.store.project_path(project) / "narration" / "performance-tags.json"
+    path = service.store.project_path(project) / "narration" / "performance-tags-fish_s2_pro.json"
     assert path.is_file()
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["provider"] == "fish_s2_pro"
@@ -807,7 +807,7 @@ def test_generate_performance_script_scopes_higgs_artifact(
     assert "Higgs Audio v3" in service.director.llm.complete_calls[0]["messages"][0]["content"]
 
 
-def test_generating_for_another_provider_replaces_the_shared_artifact(
+def test_generating_for_another_provider_preserves_both_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = narration_service(tmp_path, monkeypatch)
@@ -832,18 +832,24 @@ def test_generating_for_another_provider_replaces_the_shared_artifact(
     fish, _ = service.tts.generate_performance_script(
         project.id, provider="fish_s2_pro",
     )
-    path = service.store.project_path(project) / "narration" / "performance-tags.json"
+    path = service.store.project_path(project) / "narration" / "performance-tags-fish_s2_pro.json"
     assert path.is_file()
     assert fish.provider == "fish_s2_pro"
 
     higgs, _ = service.tts.generate_performance_script(
         project.id, provider="higgs_tts_3",
     )
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = json.loads(path.with_name("performance-tags-higgs_tts_3.json").read_text(encoding="utf-8"))
     assert higgs.provider == "higgs_tts_3"
     assert persisted["provider"] == "higgs_tts_3"
     assert persisted["segments"][0]["tagged"].startswith("<|emotion:contemplation|>")
-    assert list(path.parent.glob("performance-tags*.json")) == [path]
+    assert service.tts.get_performance_script(project.id, "fish_s2_pro") == fish
+    assert service.tts.get_performance_script(project.id, "higgs_tts_3") == higgs
+    service.tts.generate_performance_script(project.id, provider="fish_s2_pro")
+    assert service.tts.get_performance_script(project.id, "higgs_tts_3") == higgs
+    service.tts.clear_performance_script(project.id, "fish_s2_pro")
+    assert service.tts.get_performance_script(project.id, "fish_s2_pro") is None
+    assert service.tts.get_performance_script(project.id, "higgs_tts_3") == higgs
 
 
 def test_generate_performance_script_override_run(
@@ -1010,7 +1016,7 @@ def test_narration_feeds_higgs_tokens_only_to_matching_provider(
     )
     resolved, metadata = service.tts._resolve_performance(project.id, fish_request)
     assert resolved is None
-    assert metadata == {"enabled": False, "reason": "script_provider"}
+    assert metadata == {"enabled": False, "reason": "no_script"}
 
 
 def test_higgs_combines_tagged_scenes_into_one_short_chunk(
@@ -1486,6 +1492,55 @@ def test_performance_tags_api_roundtrip(
     assert response.status_code == 200
     assert response.json() == {"deleted": True}
     assert client.get(base).json()["script"] is None
+
+
+@pytest.mark.parametrize("legacy_provider", ["fish_s2_pro", "higgs_tts_3"])
+def test_provider_tags_preserve_legacy_scripts_and_scope_every_api_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_provider: str,
+) -> None:
+    app, service = _api_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(title="Separate tags", topic="test", target_duration=2))
+    source = "I thought everything was normal."
+    _add_scenes(service, project, [source])
+
+    def responder(messages: Any, calls: list[dict[str, Any]]) -> dict[str, Any]:
+        prefix = "<|emotion:contemplation|>" if "Higgs Audio v3" in messages[0]["content"] else "[calm]"
+        return {"segments": [{"index": 0, "tagged": f"{prefix} {source}"}]}
+
+    _enable_fake_llm(service, monkeypatch, responder)
+    service.update_project(project.id, {"selected_llm_model": "fake-local-model"})
+    client = TestClient(app)
+    base = f"/api/projects/{project.id}/tts/performance-tags"
+    first = client.post(base, json={"provider": legacy_provider}).json()["script"]
+    root = service.store.project_path(project) / "narration"
+    # Emulate an existing installation's single artifact without modifying its contents.
+    legacy = root / "performance-tags.json"
+    (root / f"performance-tags-{legacy_provider}.json").rename(legacy)
+    legacy_bytes = legacy.read_bytes()
+    other = "higgs_tts_3" if legacy_provider == "fish_s2_pro" else "fish_s2_pro"
+    assert client.get(base, params={"provider": other}).json()["script"] is None
+    response = client.post(base, json={"provider": other})
+    assert response.status_code == 200
+    other_script = response.json()["script"]
+    assert legacy.read_bytes() == legacy_bytes
+    assert client.get(base, params={"provider": legacy_provider}).json()["script"] == first
+    assert client.post(base, json={"provider": legacy_provider}).json()["script"] == first
+    assert all(value["script"] for value in client.get(base).json()["providers"].values())
+
+    key = first["segments"][0]["key"]
+    response = client.put(base, json={"provider": legacy_provider, "segments": [{"key": key, "tagged": source}]})
+    assert response.status_code == 200
+    assert client.get(base, params={"provider": other}).json()["script"] == other_script
+    response = client.post(base + "/regenerate", json={"provider": legacy_provider, "key": key})
+    assert response.status_code == 200
+    assert response.json()["script"]["provider"] == legacy_provider
+    assert client.get(base, params={"provider": other}).json()["script"] == other_script
+    response = client.delete(base, params={"provider": legacy_provider})
+    assert response.status_code == 200
+    assert not legacy.exists()
+    assert client.get(base, params={"provider": legacy_provider}).json()["script"] is None
+    assert client.get(base, params={"provider": other}).json()["script"] == other_script
+    assert client.delete(base, params={"provider": "../../bad"}).status_code == 422
 
 
 def test_performance_tags_api_error_mapping(

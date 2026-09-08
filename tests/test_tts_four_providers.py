@@ -557,6 +557,40 @@ def test_higgs_worker_builds_private_voice_clone_request(
     assert base64.b64decode(item["audio_path"].split(",", 1)[1]) == reference.read_bytes()
 
 
+def test_higgs_terminal_noise_cleanup_preserves_timing_and_speech() -> None:
+    import numpy as np
+
+    sample_rate = 24000
+    speech = (0.1 * np.sin(np.arange(sample_rate) * 0.1)).astype(np.float32)
+    quiet = np.full(sample_rate // 2, 0.0005, dtype=np.float32)
+    burst = np.random.default_rng(3).normal(0, 0.02, sample_rate // 10).astype(np.float32)
+    original = np.concatenate([speech, quiet, burst])
+    cleaned, silenced = HiggsTTS3Provider._clean_terminal_noise(original, sample_rate)
+    assert len(cleaned) == len(original)
+    assert silenced > len(burst)
+    np.testing.assert_array_equal(cleaned[:len(speech)], speech)
+    assert np.count_nonzero(cleaned[-len(burst):]) == 0
+    np.testing.assert_array_equal(original[-len(burst):], burst)
+
+
+@pytest.mark.parametrize("kind", ["continuous", "internal_breath", "silence", "short", "quiet_voice"])
+def test_higgs_tail_cleanup_leaves_other_endings_untouched(kind: str) -> None:
+    import numpy as np
+
+    sample_rate = 24000
+    speech = (0.1 * np.sin(np.arange(sample_rate) * 0.1)).astype(np.float32)
+    audio = {
+        "continuous": speech,
+        "internal_breath": np.concatenate([speech, np.zeros(12000), speech]),
+        "silence": np.zeros(sample_rate),
+        "short": speech[:1200],
+        "quiet_voice": speech * 0.001,
+    }[kind].astype(np.float32)
+    cleaned, silenced = HiggsTTS3Provider._clean_terminal_noise(audio, sample_rate)
+    assert silenced == 0
+    np.testing.assert_array_equal(cleaned, audio)
+
+
 def test_higgs_rejects_audio_at_token_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from urllib import request as urllib_request
 

@@ -131,6 +131,12 @@ or `scripts/install_higgs_tts_3.sh --download` to explicitly download the roughl
 Python installations.
 
 Higgs accepts a saved, consent-authorized reference voice or its default voice.
+
+The worker suppresses a short rising noise tail when it follows at least 120 ms
+of quiet at a chunk ending. Cleanup preserves the sample count and records its
+version and affected duration in chunk metrics. Continuous speech endings are
+left unchanged. Restart the backend and unload an already-running Higgs worker
+before generating with updated code; existing takes are not rewritten.
 For best clone fidelity, store the exact reference transcript. It also accepts
 inline controls such as `<|emotion:amusement|>`, `<|style:whispering|>`, and
 `<|prosody:long_pause|>` directly in narration text. The default generation
@@ -180,7 +186,10 @@ How it works:
   attempt. A segment that still fails after the repair degrades to its clean source
   and is reported in `warnings`, so one bad segment never fails the whole run.
 - The result is stored in a separate, portable project file
-  (`narration/performance-tags.json`). The clean scene narration and the caption
+  (`narration/performance-tags-{provider}.json`), independently for Fish S2 Pro
+  and Higgs TTS 3. Existing `performance-tags.json` files remain readable for
+  their recorded provider. Generating, editing, or removing one provider's tags
+  preserves the other's. The clean scene narration and the caption
   transcript are never touched, so cues can never leak into captions or into any
   other TTS model.
 - Every segment is editable in the UI. Edits are validated against the clean
@@ -199,8 +208,8 @@ How it works:
   record stores the exact tagged text that was sent, so regenerating a chunk
   reproduces the same audio.
 - Enabling the panel's **Use delivery tags** toggle makes the next narration run
-  feed the tagged text to `fish_s2_pro` only. Any other provider ignores the
-  tags entirely. If a stored segment's source no longer matches the current
+  feed the tagged text only to the matching Fish or Higgs provider. Unsupported
+  providers ignore tags. If a stored segment's source no longer matches the current
   narration it is skipped and counted as stale.
 
 The local LLM keeps its reasoning enabled; the tagger uses a modest dedicated
