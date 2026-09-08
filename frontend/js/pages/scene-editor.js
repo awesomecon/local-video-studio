@@ -328,7 +328,7 @@ const H3_CANVASES = [
   ["576x1024", "576 x 1024 (portrait)"],
 ];
 
-/** Krea 2 Turbo presets stay near one megapixel for reliable 24 GB operation. */
+/** Krea 2 Turbo presets stay near one megapixel, sized for the tested 24 GB card; smaller GPUs can use the lower presets. */
 const KREA_CANVASES = [
   ["auto", "Auto (match project aspect)"],
   ["1344x768", "1344 x 768 (landscape)"],
@@ -338,7 +338,7 @@ const KREA_CANVASES = [
   ["768x1344", "768 x 1344 (portrait)"],
 ];
 
-/** Official Qwen-Image-2512 aspect presets, capped for 24 GB operation. */
+/** Official Qwen-Image-2512 aspect presets, capped for the tested 24 GB card; smaller GPUs should pick smaller presets or another backend. */
 const QWEN_IMAGE_CANVASES = [
   ["auto", "Auto (match project aspect)"],
   ["1664x928", "1664 x 928 (landscape)"],

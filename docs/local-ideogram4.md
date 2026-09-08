@@ -107,8 +107,9 @@ curl -fsSL http://127.0.0.1:8190/object_info/Ideogram4PipelineLoader
 
 The app reuses a compatible service already running on port 8190 and never stops a service it did
 not start. If another service occupies the port, generation fails safely instead of terminating it.
-The first real generation loads the gated NF4 weights and can use nearly all of a
-24 GB GPU, so ensure system-wide VRAM is free first.
+The first real generation loads the gated NF4 weights and on the tested 24 GB card can use nearly all
+of its VRAM, so ensure system-wide VRAM is free first. On smaller cards the NF4 weights may not fit;
+use a different quantization or a different image backend there.
 
 The startup script enables Hugging Face offline mode after installation. This avoids authenticated
 metadata requests during generation, so `HF_TOKEN` is needed for installation only and should be

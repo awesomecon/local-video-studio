@@ -6,8 +6,9 @@ Local Video Studio generates background music through the existing ComfyUI servi
 `127.0.0.1:8188` using ACE-Step 1.5 XL native ComfyUI workflows. No separate ACE service,
 port, environment, or API key is required.
 
-This setup targets a 24 GB-class NVIDIA GPU; available headroom varies by card and desktop load. The
-Studio uses:
+This setup was tested on a 24 GB-class NVIDIA GPU; available headroom varies by card and desktop
+load. Smaller GPUs can run the same XL weights only with reduced headroom, a quantized
+checkpoint, or CPU offload of the encoders. The Studio uses:
 - **XL Turbo** (`acestep_v1.5_xl_turbo_bf16.safetensors`) — 8-step daily driver
 - **XL SFT** (`acestep_v1.5_xl_sft_bf16.safetensors`) — slower quality preset (optional)
 - **ACE encoders** `qwen_0.6b_ace15.safetensors` + `qwen_4b_ace15.safetensors`
@@ -199,7 +200,7 @@ If the Studio reports insufficient VRAM:
    The Studio never controls that process.
 3. Retry music generation.
 
-**Note:** A 24 GB GPU must accommodate the ~10 GB DiT, ~9.6 GB text encoders, and runtime tensors, but ComfyUI can offload pieces to system RAM. Do not reject generation solely because free VRAM is <20 GB unless actual benchmarking establishes that threshold. Warn when another application is consuming substantial VRAM.
+**Note:** On the tested 24 GB GPU the ~10 GB DiT, ~9.6 GB text encoders, and runtime tensors leave little headroom, but ComfyUI can offload pieces to system RAM; smaller cards can use a quantized encoder set or offload more. Do not reject generation solely because free VRAM is <20 GB unless actual benchmarking establishes that threshold. Warn when another application is consuming substantial VRAM.
 
 ## 6. Cancellation and memory release
 
