@@ -59,6 +59,11 @@ Configure ComfyUI first, then FLUX/Wan workflows, narration/transcription/music 
 H3. Follow each backend document and run its health check before enabling it. Large model downloads
 must be explicit and preceded by size, destination, and free-space review.
 
+Before enabling a backend, check [GPU memory management](gpu-memory.md) for the free-VRAM it
+typically needs and what fits on your card; the Models & System Status screen shows each backend's
+requirement and current free VRAM, and generation never fails silently when the card cannot hold
+the model.
+
 For Ideogram 4 NF4, follow `docs/local-ideogram4.md`. Its installer creates a separate runtime under
 a configurable service root and requires the gated model license plus an environment-only `HF_TOKEN`
 before it downloads weights. Once installed, the app starts that isolated service on demand by

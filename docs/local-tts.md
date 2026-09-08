@@ -119,8 +119,9 @@ waits for it to load, forwards WAV generation requests, and terminates it during
 unload. Voice references are sent as base64 data URLs, so the child receives no
 broad project-directory access.
 
-The worker defaults `LVS_HIGGS_TTS_MEM_FRACTION_STATIC` to `0.65` so a 24 GB
-card retains synthesis headroom alongside normal desktop GPU use. It requires
+The worker defaults `LVS_HIGGS_TTS_MEM_FRACTION_STATIC` to `0.65` so on the tested 24 GB card it
+retains synthesis headroom alongside normal desktop GPU use; on smaller cards lower that fraction
+or use a lighter provider. It requires
 18 GiB free before startup by default; override that safety threshold with
 `LVS_HIGGS_TTS_MIN_FREE_GB` only when the memory profile is understood.
 
