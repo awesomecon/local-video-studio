@@ -389,16 +389,16 @@ def test_editorial_timing_snaps_cuts_to_caption_sentences_with_hold() -> None:
 
     assert caption_sentence_boundaries(
         words, timeline_duration=6.5, fps=10,
-    ) == [1.5, 3.5]
+    ) == [1.2, 3.2]
     retimed = retime_compositions_to_caption_sentences(
         compositions, words, timeline_duration=6.5, fps=10,
     )
 
     assert retimed is not None
     assert [(item.start, item.duration) for item in retimed] == [
-        (0.0, 1.5), (1.5, 2.0), (3.5, 3.0),
+        (0.0, 1.2), (1.2, 2.0), (3.2, 3.3),
     ]
-    assert [item.events[0].time for item in retimed] == [0.8, 1.0, 1.5]
+    assert [item.events[0].time for item in retimed] == [0.6, 1.0, 1.6]
 
     no_hold = retime_compositions_to_caption_sentences(
         compositions, words, timeline_duration=6.5, fps=10, hold_seconds=0,
@@ -407,6 +407,49 @@ def test_editorial_timing_snaps_cuts_to_caption_sentences_with_hold() -> None:
     assert [(item.start, item.duration) for item in no_hold] == [
         (0.0, 1.0), (1.0, 2.0), (3.0, 3.5),
     ]
+
+
+@pytest.mark.parametrize("hold_seconds", [0.5, 5.0])
+def test_sentence_hold_preserves_short_back_to_back_scenes(hold_seconds: float) -> None:
+    words = [
+        CaptionWord(0, 1, "First."),
+        CaptionWord(1, 1.2, "Brief."),
+        CaptionWord(1.2, 2.2, "Last."),
+    ]
+    compositions = [
+        EditorialComposition(
+            id=f"short-{index}", start=start, duration=duration,
+            template=EditorialTemplate.BIG_TEXT_REVEAL,
+            elements=[EditorialElement(
+                id=f"title-{index}", type=EditorialElementType.TEXT,
+                text=str(index), role="headline",
+            )],
+            events=[],
+        )
+        for index, (start, duration) in enumerate([(0, 1), (1, 0.2), (1.2, 1)])
+    ]
+    retimed = retime_compositions_to_caption_sentences(
+        compositions, words, timeline_duration=2.2, fps=30, hold_seconds=hold_seconds,
+    )
+    assert retimed is not None
+    assert [(item.id, item.start, item.duration) for item in retimed] == [
+        (item.id, item.start, item.duration) for item in compositions
+    ]
+    again = retime_compositions_to_caption_sentences(
+        retimed, words, timeline_duration=2.2, fps=30, hold_seconds=hold_seconds,
+    )
+    assert again == retimed
+
+
+def test_sentence_hold_uses_only_available_silence() -> None:
+    words = [
+        CaptionWord(0, 1, "First."),
+        CaptionWord(2, 3, "Second."),
+        CaptionWord(3.2, 4, "Last."),
+    ]
+    assert caption_sentence_boundaries(
+        words, timeline_duration=4, fps=30, hold_seconds=0.5,
+    ) == [1.5, 3.2]
 
 
 def test_editorial_timing_needs_enough_sentence_boundaries() -> None:
