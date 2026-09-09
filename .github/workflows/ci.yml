@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -36,8 +36,29 @@ jobs:
       - name: Install application and test dependencies
         run: python -m pip install -e '.[dev]'
 
+      - name: Select and report CI browser
+        shell: bash
+        run: |
+          lvs_chrome=$(command -v google-chrome)
+          test -x "$lvs_chrome"
+          echo "LVS_CHROME=$lvs_chrome" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/test-reports"
+          {
+            echo "Browser executable: $lvs_chrome"
+            "$lvs_chrome" --version
+          } | tee "$RUNNER_TEMP/test-reports/browser.txt"
+
       - name: Run Python tests
-        run: python -m pytest
+        run: python -m pytest --junitxml="$RUNNER_TEMP/test-reports/pytest.xml"
+
+      - name: Upload test report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-reports/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Run frontend static checks
         run: python3 frontend/tests/static_checks.py

@@ -31,6 +31,18 @@ CI runs the Python and frontend checks on Python 3.11 and 3.12. A focused test c
 during development, but run the full relevant suite before requesting review. Automated tests must
 not download model weights or contact non-local services.
 
+CI explicitly selects the Google Chrome executable on GitHub's Ubuntu 24.04 runner through
+`LVS_CHROME` and logs its path and version. The browser version follows runner image updates;
+it is not pinned to an exact release. Missing Chrome fails setup instead of silently skipping
+browser tests or selecting a different browser.
+
+Test output stays compact: each passing test appears as a dot. For individual test names locally,
+use `python -m pytest -v`. Each CI job uploads a `test-report-python-<version>-attempt-<number>`
+artifact, retained for 14 days, even when tests fail. Download it from the workflow run's
+**Artifacts** section. It contains `pytest.xml` (JUnit XML with each test's name, result, and
+duration, including setup and teardown) and `browser.txt` (the selected browser path and version).
+If setup fails before pytest runs, there may be no test report to upload.
+
 ## Safety and architecture
 
 - Never commit secrets, `.env` files, private media or prompts, voice samples, machine-local
