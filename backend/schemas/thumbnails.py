@@ -16,7 +16,9 @@ ThumbnailSubjectPosition = Literal["left", "center", "right"]
 ThumbnailPalette = Literal["sunset", "electric", "midnight", "paper"]
 ThumbnailFontPreset = Literal["impact", "clean", "editorial"]
 ThumbnailLayoutPreset = Literal["stacked", "split", "banner"]
-ThumbnailImageModel = Literal["krea", "ideogram4_local"]
+ThumbnailImageModel = Literal[
+    "krea", "qwen_image", "qwen_image_native_text", "ideogram4_local",
+]
 ThumbnailIdeogramPromptMode = Literal["quick", "precise"]
 
 

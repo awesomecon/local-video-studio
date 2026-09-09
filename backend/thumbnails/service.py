@@ -67,6 +67,9 @@ _IDEOGRAM_THUMBNAIL_WIDTH = 1536
 _IDEOGRAM_THUMBNAIL_HEIGHT = 864
 _IDEOGRAM_THUMBNAIL_WORKFLOW_VERSION = "ideogram4-thumbnail-nf4-quality48-v2"
 _IDEOGRAM_MAGIC_PROMPT_FILENAME = "ideogram-magic-prompt.json"
+_QWEN_THUMBNAIL_WIDTH = 1664
+_QWEN_THUMBNAIL_HEIGHT = 928
+_QWEN_THUMBNAIL_WORKFLOW_VERSION = "qwen-image-2512-thumbnail-fp8-v1"
 
 
 class ThumbnailStudioService:
@@ -442,6 +445,8 @@ class ThumbnailStudioService:
         image_model = getattr(plan, "image_model", "krea") or "krea"
         if image_model == "ideogram4_local":
             default_backend = "ideogram4_local_comfyui"
+        elif image_model in {"qwen_image", "qwen_image_native_text"}:
+            default_backend = "qwen_image_2512_comfyui"
         else:
             default_backend = "krea2_comfyui"
         return self.pipeline.jobs.enqueue(GenerationJob(
@@ -483,6 +488,14 @@ class ThumbnailStudioService:
         temporary = Path(tempfile.mkdtemp(prefix=f".{candidate_id}-", dir=thumbnail_root))
         image_model = getattr(plan, "image_model", "krea") or "krea"
         is_ideogram = image_model == "ideogram4_local"
+        is_qwen_native_text = image_model == "qwen_image_native_text"
+        # Imported artwork never contains model-rendered copy, even when the
+        # saved plan currently selects a native-text generator.
+        renders_native_text = (
+            (is_ideogram or is_qwen_native_text)
+            and not source_asset_id
+            and not source_candidate_id
+        )
         try:
             self.pipeline.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
             with self.pipeline._lock:
@@ -504,8 +517,14 @@ class ThumbnailStudioService:
                         project,
                         "image",
                         project_dir=temporary,
-                        prompt=self._art_prompt(plan),
-                        negative_prompt=plan.concept.avoid_prompt,
+                        prompt=(
+                            self._qwen_native_text_prompt(plan)
+                            if is_qwen_native_text else self._art_prompt(plan)
+                        ),
+                        negative_prompt=(
+                            self._qwen_native_negative_prompt(plan)
+                            if is_qwen_native_text else plan.concept.avoid_prompt
+                        ),
                         seed=seed,
                         width=1280,
                         height=720,
@@ -514,18 +533,24 @@ class ThumbnailStudioService:
                 elif is_ideogram:
                     result = self._dispatch_ideogram4(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
+                elif image_model in {"qwen_image", "qwen_image_native_text"}:
+                    result = self._dispatch_qwen_image(project, plan, temporary, job.id, seed)
+                    os.replace(result.outputs[0], temporary / "artwork.png")
                 else:
                     result = self._dispatch_krea(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
                 self.pipeline.jobs.transition(job.id, JobStatus.GENERATING, progress=0.55)
                 self._normalize_artwork(temporary / "artwork.png")
-                # Ideogram renders text natively — skip Pillow overlay.
-                if is_ideogram:
+                # Native-text modes return a finished thumbnail; artwork-only
+                # modes still receive the deterministic Pillow compositor.
+                if renders_native_text:
                     composite_hash = hashlib.sha256(
                         (temporary / "artwork.png").read_bytes()
                     ).hexdigest()
                     shutil.copyfile(temporary / "artwork.png", temporary / "composite.png")
-                    font_identity = "ideogram-native"
+                    font_identity = (
+                        "qwen-image-native" if is_qwen_native_text else "ideogram-native"
+                    )
                     font_hash = None
                 else:
                     composite_hash, font_identity, font_hash = (
@@ -546,8 +571,11 @@ class ThumbnailStudioService:
                 "output_hashes": {"artwork": artwork_hash, "composite": composite_hash},
                 "original_title": plan.text_layout.title,
                 "original_hook": plan.text_layout.hook,
-                "krea_prompt": self._art_prompt(plan),
-                "avoid_prompt": plan.concept.avoid_prompt,
+                "krea_prompt": metadata.get("prompt", self._art_prompt(plan)),
+                "generation_prompt": metadata.get("prompt", self._art_prompt(plan)),
+                "avoid_prompt": metadata.get(
+                    "negative_prompt", plan.concept.avoid_prompt,
+                ),
                 "seed": seed,
                 "base_seed": plan.concept.seed,
                 "canvas": [1280, 720],
@@ -576,7 +604,8 @@ class ThumbnailStudioService:
                 "font_identity": font_identity,
                 "font_hash": font_hash,
                 "renderer_version": (
-                    "ideogram-native-text-v1" if is_ideogram
+                    "qwen-image-native-text-v1" if is_qwen_native_text
+                    else "ideogram-native-text-v1" if is_ideogram
                     else "graphic-screen-pillow-compositor-v2"
                 ),
                 "sanitizer_version": "typed-thumbnail-layout-v2",
@@ -655,7 +684,11 @@ class ThumbnailStudioService:
                 self.pipeline.database.save_attempt(GenerationAttempt(
                     job_id=job.id,
                     backend=job.backend or "thumbnail",
-                    model="Krea 2 Turbo" if job.backend == "krea2_comfyui" else "local",
+                    model={
+                        "krea2_comfyui": "Krea 2 Turbo",
+                        "qwen_image_2512_comfyui": "Qwen-Image-2512",
+                        "ideogram4_local_comfyui": "Ideogram 4",
+                    }.get(job.backend or "", "local"),
                     workflow_version="thumbnail-composite-v2",
                     parameters={"candidate_id": candidate_id},
                     seed=seed,
@@ -795,18 +828,61 @@ class ThumbnailStudioService:
 
     @staticmethod
     def _art_prompt(plan: ThumbnailPlan) -> str:
-        """Effective art prompt with the exact copy removed so Krea never paints the title."""
+        """Build artwork-only direction for generators followed by the text compositor."""
         prompt = plan.concept.prompt.strip()
         for literal in (plan.text_layout.title, plan.text_layout.hook):
             phrase = literal.strip()
             if phrase:
                 prompt = re.sub(re.escape(phrase), "the core idea", prompt, flags=re.IGNORECASE)
+        # Authored concepts sometimes describe the desired finished thumbnail
+        # ("bold readable headline above"). Remove those generic lettering cues
+        # too, or text-capable artwork models such as Qwen will paint gibberish
+        # underneath the later character-perfect overlay.
+        prompt = re.sub(
+            r"\b(?:(?:bold|large|small|readable|legible|exact)\s+)*"
+            r"(?:headline|title|subtitle|caption|typography|lettering|text)"
+            r"(?:\s+(?:above|below|at the top|at the bottom))?\b",
+            "clean negative space for the graphic overlay",
+            prompt,
+            flags=re.IGNORECASE,
+        )
         prompt = re.sub(r"\s{2,}", " ", prompt)
         return (
             f"{prompt}. Subject positioned {plan.concept.subject_position}; "
             f"leave the {plan.concept.text_placement} side empty for graphic copy. "
             "No text, no letters, no words, no logos, no watermarks."
         )
+
+    @staticmethod
+    def _qwen_native_text_prompt(plan: ThumbnailPlan) -> str:
+        """Describe a finished thumbnail whose lettering Qwen renders itself."""
+        layout = plan.text_layout
+        supporting = (
+            f' Render the smaller supporting line exactly as: "{layout.hook}".'
+            if layout.hook.strip() else ""
+        )
+        return (
+            f"{plan.concept.prompt.strip()}. Create a finished, polished landscape "
+            "YouTube thumbnail with one dominant focal subject and high mobile readability. "
+            f'Spell and render the main headline exactly as: "{layout.title}".'
+            f"{supporting} Put the lettering on the {plan.concept.text_placement} side "
+            f"in a {layout.layout_preset} layout using a {layout.font_preset} display style "
+            f"and a {layout.palette} color palette. "
+            f"Subject positioned {plan.concept.subject_position}. "
+            "Do not add, paraphrase, repeat, or invent any other words, letters, logos, "
+            "captions, labels, or watermarks."
+        )
+
+    @staticmethod
+    def _qwen_native_negative_prompt(plan: ThumbnailPlan) -> str:
+        """Retain visual exclusions without contradicting requested native lettering."""
+        text_exclusions = {"text", "letter", "letters", "word", "words", "typography"}
+        parts = re.split(r"[,;\n]+", plan.concept.avoid_prompt)
+        kept = [
+            part.strip() for part in parts
+            if part.strip() and part.strip().lower() not in text_exclusions
+        ]
+        return ", ".join(kept)
 
     def _dispatch_krea(
         self, project: Project, plan: ThumbnailPlan, directory: Path, job_id: str,
@@ -862,6 +938,80 @@ class ThumbnailStudioService:
             ))
             self.pipeline._release_comfyui_memory(
                 backend_name="krea2_comfyui", wait_for_vram=False, suppress_errors=True,
+            )
+            raise
+
+    def _dispatch_qwen_image(
+        self, project: Project, plan: ThumbnailPlan, directory: Path, job_id: str,
+        seed: int,
+    ) -> GenerationResult:
+        """Generate either Qwen artwork or a finished Qwen native-text thumbnail."""
+        backend_name = "qwen_image_2512_comfyui"
+        reusing_resident = self.pipeline._prepare_comfy_backend(backend_name)
+        if not reusing_resident:
+            self.pipeline._check_qwen_image_vram()
+        parameters = {
+            "width": _QWEN_THUMBNAIL_WIDTH,
+            "height": _QWEN_THUMBNAIL_HEIGHT,
+            "steps": 50,
+            "cfg": 4.0,
+            "sampler": "euler",
+            "scheduler": "simple",
+            "model_sampling_shift": 3.1,
+        }
+        native_text = plan.image_model == "qwen_image_native_text"
+        request = GenerationRequest(
+            job_id=job_id,
+            output_dir=directory,
+            prompt=(
+                self._qwen_native_text_prompt(plan) if native_text else self._art_prompt(plan)
+            ),
+            negative_prompt=(
+                self._qwen_native_negative_prompt(plan)
+                if native_text else plan.concept.avoid_prompt
+            ),
+            seed=seed,
+            width=_QWEN_THUMBNAIL_WIDTH,
+            height=_QWEN_THUMBNAIL_HEIGHT,
+            settings={
+                "kind": "image",
+                "workflow": self.pipeline.QWEN_IMAGE_2512_WORKFLOW,
+                "workflow_version": _QWEN_THUMBNAIL_WORKFLOW_VERSION,
+            },
+        )
+        backend = self.pipeline.registry.get(backend_name)
+        try:
+            backend.load()
+            generated = backend.generate(request)
+            self.pipeline._resident_comfy_backend = backend_name
+            return GenerationResult(
+                outputs=generated.outputs,
+                metadata={
+                    **dict(generated.metadata),
+                    "prompt": request.prompt,
+                    "negative_prompt": request.negative_prompt,
+                    "seed": request.seed,
+                    "workflow_version": _QWEN_THUMBNAIL_WORKFLOW_VERSION,
+                    "settings": {**parameters, "native_text": native_text},
+                },
+                peak_vram_gb=generated.peak_vram_gb,
+            )
+        except Exception as exc:
+            descriptor = backend.descriptor()
+            self.pipeline.database.save_attempt(GenerationAttempt(
+                job_id=job_id,
+                backend=descriptor.backend_name,
+                model=descriptor.model_name,
+                model_version=descriptor.model_version,
+                quantization=descriptor.quantization,
+                workflow_version=_QWEN_THUMBNAIL_WORKFLOW_VERSION,
+                parameters=parameters,
+                seed=seed,
+                success=False,
+                error=redact_secrets(exc),
+            ))
+            self.pipeline._release_comfyui_memory(
+                backend_name=backend_name, wait_for_vram=False, suppress_errors=True,
             )
             raise
 

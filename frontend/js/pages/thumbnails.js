@@ -1,4 +1,4 @@
-/** Local Krea artwork plus deterministic exact-text Thumbnail Studio. */
+/** Local thumbnail design, generation, and export selection. */
 
 import { el } from "../dom.js";
 import { state, needsProject } from "../state.js";
@@ -20,6 +20,15 @@ import { registerLiveUpdate } from "../app.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
 let refreshCurrentCandidates = () => {};
+let requireSavedPlan = () => true;
+
+// Keep model labels in one place as more local generators become available.
+const THUMBNAIL_MODELS = [
+  { value: "krea", label: "Krea · artwork + exact text overlay" },
+  { value: "qwen_image", label: "Qwen-Image-2512 · artwork + exact text overlay" },
+  { value: "qwen_image_native_text", label: "Qwen-Image-2512 · native text rendering" },
+  { value: "ideogram4_local", label: "Ideogram 4 · integrated text and image" },
+];
 
 export function renderThumbnails(_route) {
   const screen = el("div", { class: "screen" },
@@ -37,6 +46,7 @@ export function renderThumbnails(_route) {
 }
 
 function studio() {
+  requireSavedPlan = () => true;
   const root = el("div", { class: "stack" }, loadingState(5));
   const projectId = state.currentProjectId;
   let formHost = null;
@@ -94,7 +104,10 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
   const layoutPreset = select(["stacked", "split", "banner"], plan.text_layout.layout_preset);
   const outline = input("checkbox", "", { checked: !!plan.text_layout.outline });
   const shadow = input("checkbox", "", { checked: !!plan.text_layout.shadow });
-  const imageModel = select(["krea", "ideogram4_local"], plan.image_model || "krea");
+  const imageModel = el("select", { class: "input" },
+    ...THUMBNAIL_MODELS.map(({ value, label }) => el("option", { value }, label)),
+  );
+  imageModel.value = plan.image_model || "krea";
   const ideogramPromptMode = el("select", { class: "input" },
     el("option", { value: "quick" }, "Quick Generation"),
     el("option", { value: "precise" }, "Precise Text & Layout"),
@@ -107,9 +120,24 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
     class: "input mono small", rows: "18",
     placeholder: "Paste canonical Ideogram/KJNodes JSON",
   }, initialPrecisePrompt ? JSON.stringify(initialPrecisePrompt, null, 2) : "");
-  const status = el("span", { class: "muted small", role: "status" });
+  const status = el("span", { class: "muted small", role: "status" }, "All changes saved");
   const save = el("button", { class: "btn btn-primary", type: "button" }, "Save thumbnail plan");
+  let dirty = false;
+  let editVersion = 0;
+  function markDirty() {
+    dirty = true;
+    editVersion += 1;
+    status.textContent = "Unsaved changes — save before generating or selecting a thumbnail.";
+  }
+  requireSavedPlan = () => {
+    if (!dirty && !save.disabled) return true;
+    toast("warning", "Save your design first", "The candidates below use the saved design.");
+    save.scrollIntoView({ behavior: "smooth", block: "center" });
+    save.focus();
+    return false;
+  };
   const isIdeogram = () => imageModel.value === "ideogram4_local";
+  const isQwenNativeText = () => imageModel.value === "qwen_image_native_text";
   const artworkPanelHost = el("div");
   const avoidPromptHost = el("div");
   const artworkHint = el("p", { class: "muted small" });
@@ -118,34 +146,61 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
   const typographyHint = el("p", { class: "muted small" });
   const ideogramModeHost = el("div", { class: "stack" });
   const preciseJsonHost = el("div");
+  const preciseDetails = el("details", { open: !initialPrecisePrompt },
+    el("summary", {}, "Edit Precise layout JSON"),
+  );
+  const directionControls = el("div", { class: "stack" });
+  const modeHint = el("p", { class: "muted small" });
   function refreshPanels() {
     const ideogram = isIdeogram();
+    const qwenNativeText = isQwenNativeText();
     const precise = ideogram && ideogramPromptMode.value === "precise";
-    avoidPromptHost.style.display = ideogram ? "none" : "";
+    avoidPromptHost.style.display = (ideogram || qwenNativeText) ? "none" : "";
     ideogramModeHost.style.display = ideogram ? "" : "none";
     preciseJsonHost.style.display = precise ? "" : "none";
+    directionControls.hidden = precise;
+    typographyStyleHost.hidden = precise;
+    modeHint.textContent = qwenNativeText
+      ? "Qwen creates the artwork and lettering together for a more integrated design. It is creative rather than deterministic, so it may misspell, alter, or omit your wording; use the exact-overlay Qwen mode when copy accuracy matters."
+      : !ideogram
+      ? `${imageModel.value === "qwen_image" ? "Qwen-Image-2512" : "Krea"} creates the background. The studio adds your exact wording afterward, so spelling is deterministic.`
+      : precise
+        ? "Precise uses your saved layout JSON directly. Edit it below; it controls the image, lettering, colors, and positions."
+        : "Quick turns your artwork direction and exact wording into a detailed prompt using your local LLM.";
     artworkHint.replaceChildren(ideogram
       ? "Describe one concrete visual subject and environment. Avoid topic summaries, prose, documents, collages, and lists of ideas."
-      : "Artwork is generated by local Krea 2 Turbo with lettering explicitly prohibited.");
+      : qwenNativeText
+        ? "Describe the complete visual scene. The studio automatically tells Qwen to render only the headline and supporting text entered here."
+        : `Artwork is generated by local ${imageModel.value === "qwen_image" ? "Qwen-Image-2512" : "Krea 2 Turbo"} with lettering explicitly prohibited.`);
     typographyHint.replaceChildren(ideogram
       ? (precise
-        ? "Precise mode validates and sends this native JSON unchanged; bbox order is [y_min, x_min, y_max, x_max]."
+        ? "These phrases must also appear exactly in the layout JSON. Changing them here does not rewrite your JSON."
         : "Quick mode protects these exact strings, expands the concept with the local Ideogram Magic Prompt, then applies a collision-safe layout and renders the text natively.")
-      : "These exact strings are rendered locally and deterministically.");
+      : qwenNativeText
+        ? "Qwen receives these as exact-copy instructions, but generative lettering is not guaranteed. Palette, font, outline, shadow, and layout are visual guidance rather than pixel-exact controls in this mode."
+        : "These exact strings are rendered locally and deterministically.");
   }
   imageModel.onchange = refreshPanels;
   ideogramPromptMode.onchange = refreshPanels;
   refreshPanels();
   save.onclick = async () => {
+    const savingVersion = editVersion;
     save.disabled = true;
     status.replaceChildren("Saving…");
     let precisePrompt = null;
     if (isIdeogram() && ideogramPromptMode.value === "precise") {
       try {
         precisePrompt = JSON.parse(ideogramPromptJson.value);
+        const text = precisePrompt?.compositional_deconstruction?.elements
+          ?.filter((element) => element.type === "text").map((element) => element.text) || [];
+        const missing = [exactTitle.value.trim(), exactHook.value.trim()]
+          .filter((value) => value && !text.includes(value));
+        if (missing.length) throw new Error(`Add these exact phrases to the JSON text elements: ${missing.join(" · ")}`);
       } catch (_err) {
-        status.replaceChildren("Precise Ideogram JSON is not valid JSON.");
-        toast("warning", "Invalid Precise JSON", "Correct the JSON before saving.");
+        status.replaceChildren(_err instanceof SyntaxError ? "Enter valid layout JSON before saving." : _err.message);
+        toast("warning", "Check the Precise layout", status.textContent);
+        preciseDetails.open = true;
+        ideogramPromptJson.focus();
         save.disabled = false;
         return;
       }
@@ -185,7 +240,10 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
     try {
       const saved = await saveThumbnailPlan(state.config, state.currentProjectId, body);
       plan = saved;
-      status.replaceChildren("Saved. Existing candidate files are retained; selection was cleared.");
+      dirty = editVersion !== savingVersion;
+      status.replaceChildren(dirty
+        ? "New edits are still unsaved. Save again before generating."
+        : "Design saved. Generate a candidate below, then select your favorite.");
       toast("good", "Thumbnail plan saved");
       await afterSave();
     } catch (err) {
@@ -197,20 +255,17 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
   };
 
   avoidPromptHost.append(field({ label: "Avoid prompt", input: avoid }));
-  artworkPanelHost.append(panel("Artwork direction",
+  directionControls.append(
     artworkHint,
     field({
       label: "Concept prompt", input: prompt,
       hint: "Use a concrete person, object, place, lighting, and composition—not a synopsis.",
     }),
     avoidPromptHost,
-    field({
-      label: "Seed", input: seed,
-      hint: "Base seed — each slot and every regenerate attempt shifts it automatically",
-    }),
     field({ label: "Subject position", input: subject }),
     field({ label: "Text placement", input: textSide }),
-  ));
+  );
+  artworkPanelHost.append(panel("Artwork direction", directionControls));
   typographyStyleHost.append(
     field({ label: "Palette", input: palette }),
     field({ label: "Font preset", input: fontPreset }),
@@ -220,43 +275,84 @@ function buildPlanForm(plan, afterSave, savedPrompt = null) {
   );
   ideogramModeHost.append(field({
     label: "Ideogram prompt mode", input: ideogramPromptMode,
-    hint: "Quick uses your local LLM; Precise uses canonical native/KJNodes JSON without Magic Prompt.",
+    hint: "Choose Quick for a written description, or Precise for a custom layout.",
   }));
-  preciseJsonHost.append(field({
+  const useSaved = action("Copy saved prompt into editor", async () => {
+    useSaved.disabled = true;
+    try {
+      const snapshot = await getThumbnails(state.config, plan.project_id);
+      if (snapshot.magic_prompt?.status !== "saved") {
+        toast("warning", "No saved prompt yet", "Use Quick mode to save a design and generate its Magic Prompt first, or paste your own layout JSON.");
+        return;
+      }
+      ideogramPromptJson.value = JSON.stringify(snapshot.magic_prompt.structured_prompt, null, 2);
+      markDirty();
+    } catch (err) {
+      toastError(err, "copy saved thumbnail prompt");
+    } finally {
+      useSaved.disabled = false;
+    }
+  });
+  preciseDetails.append(
+    el("p", { class: "muted small" }, "Already have a Quick prompt? Copy it here as a starting point. Keep lettering away from the image edges; generated layouts can vary."),
+    useSaved,
+    field({
     label: "Precise Ideogram JSON", input: ideogramPromptJson,
     hint: "Text is literal. Coordinates use Ideogram's 0–1000 [y_min, x_min, y_max, x_max] order.",
   }));
+  preciseJsonHost.append(preciseDetails);
   // Exact copy, styling direction, and Save apply to both models. Ideogram
   // treats styling controls as prompt guidance rather than pixel-exact rules.
-  typPanelHost.append(panel("Typography",
+  typPanelHost.append(panel("Thumbnail wording",
     typographyHint,
-    ideogramModeHost,
-    preciseJsonHost,
-    field({ label: "Exact title", input: exactTitle }),
+    field({ label: "Headline on image", input: exactTitle, hint: "Short phrases are easier to read on a phone." }),
     field({
-      label: "Exact hook", input: exactHook,
-      hint: "Rendered as a small kicker above the title · skipped when it repeats the title",
+      label: "Supporting text (optional)", input: exactHook,
+      hint: "Use a second short phrase only if it adds something to the headline.",
     }),
     typographyStyleHost,
-    el("div", { class: "row mt" }, save, status),
   ));
-  return el("div", { class: "thumbnail-plan-grid" },
-    panel("Brief",
-      field({ label: "Proposed video title", input: proposedTitle }),
-      field({ label: "Thumbnail hook", input: briefHook, hint: "Keep it to 4–6 words for mobile." }),
-      field({ label: "Audience", input: audience }),
-      field({ label: "Topic", input: topic }),
-      field({ label: "Style", input: style }),
-      field({
-        label: "Image model", input: imageModel,
-        hint: "Krea: local art + Pillow text overlay · Ideogram: model renders text natively",
-      }),
-      el("div", { class: "thumbnail-safe-demo", "aria-label": "Mobile safe-area preview" },
-        el("span", {}, "Mobile-safe copy area")),
+  const form = el("div", { class: "stack thumbnail-editor" },
+    panel("1 · Choose your image model",
+      field({ label: "Image model", input: imageModel }),
+      ideogramModeHost,
+      modeHint,
     ),
-    artworkPanelHost,
-    typPanelHost,
+    panel("2 · Edit your design",
+      el("div", { class: "thumbnail-plan-grid" }, typPanelHost, artworkPanelHost),
+      preciseJsonHost,
+      el("details", {},
+        el("summary", {}, "Project brief & advanced settings"),
+        el("div", { class: "thumbnail-plan-grid mt" },
+          el("div", { class: "stack" },
+            field({ label: "Proposed video title", input: proposedTitle }),
+            field({ label: "Brief hook", input: briefHook, hint: "Planning context; use Headline on image for visible text." }),
+            field({ label: "Audience", input: audience }),
+          ),
+          el("div", { class: "stack" },
+            field({ label: "Topic", input: topic }),
+            field({ label: "Style", input: style }),
+            field({
+              label: "Seed", input: seed,
+              hint: "Each candidate and retry varies this base seed automatically.",
+            }),
+          ),
+        ),
+      ),
+      el("div", { class: "thumbnail-save-bar" }, save, status),
+    ),
   );
+  form.addEventListener("input", markDirty);
+  form.addEventListener("change", markDirty);
+  // Hide the empty direction panel as well as its controls in Precise mode.
+  const updateVisibility = () => {
+    refreshPanels();
+    artworkPanelHost.hidden = isIdeogram() && ideogramPromptMode.value === "precise";
+  };
+  imageModel.onchange = updateVisibility;
+  ideogramPromptMode.onchange = updateVisibility;
+  updateVisibility();
+  return form;
 }
 
 function buildCandidateArea(snapshot) {
@@ -268,21 +364,23 @@ function buildCandidateArea(snapshot) {
   const candidateById = new Map((snapshot.candidates || []).map((item) => [item.candidate_id, item]));
   const cards = [1, 2, 3].map((number) => {
     const id = `candidate-${String(number).padStart(2, "0")}`;
-    return candidateCard(id, candidateById.get(id), activeBySlot.get(id));
+    const lastJob = (snapshot.jobs || []).filter((job) => job.stage === `thumbnail:${id}`)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+    return candidateCard(id, candidateById.get(id), activeBySlot.get(id), lastJob);
   });
   const legacy = (snapshot.legacy_frames || []).length
     ? el("div", { class: "thumbnail-candidate-grid" },
         ...snapshot.legacy_frames.map(frameCard))
     : emptyState("No extracted frames yet", "Run a final render to create low-cost fallback frames.");
   return el("div", { class: "stack" },
-    buildMagicPromptArea(snapshot),
     el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Three candidate slots"),
-      el("p", { class: "muted small" }, "GPU generations are queued and run sequentially. Completed candidates survive failed regenerations. Deleting a candidate frees its slot for Duplicate or frame promotion."),
+      el("div", { class: "panel-title" }, "3 · Generate & choose"),
+      el("p", { class: "muted small" }, "Generate up to three options from your saved design, then select your favorite for export. Jobs run one at a time. A failed retry keeps the previous image."),
+      buildMagicPromptArea(snapshot),
       el("div", { class: "thumbnail-candidate-grid" }, ...cards),
     ),
-    el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Final-render frame sources"),
+    el("details", { class: "panel" },
+      el("summary", {}, "Use a frame from your final video instead"),
       el("p", { class: "muted small" }, "Promote a local extracted frame as artwork, then apply the typography settings above."),
       legacy,
     ),
@@ -308,6 +406,7 @@ function buildMagicPromptArea(snapshot) {
       ? "Validate & Save Precise Prompt"
       : (valid ? "Regenerate Magic Prompt" : "Generate Magic Prompt"),
     async () => {
+      if (!requireSavedPlan()) return;
       regenerate.disabled = true;
       regenerate.textContent = preciseMode
         ? "Validating Precise prompt…"
@@ -336,20 +435,21 @@ function buildMagicPromptArea(snapshot) {
   );
   const children = [
     el("div", { class: "row" },
-      el("div", { class: "panel-title" }, "Ideogram Structured Prompt"),
+      el("div", { class: "panel-title" }, preciseMode ? "Precise layout" : "Quick prompt"),
       el("span", { class: "spacer" }),
       stateBadge,
       regenerate,
     ),
     el("p", { class: "muted small" },
       preciseMode
-        ? "Precise mode validates the canonical JSON from the plan and bypasses the local LLM. Candidate generation reuses it unchanged."
-        : "Quick mode persists Magic Prompt before Ideogram checks VRAM. Candidate generation reuses it while the plan is unchanged.",
+        ? "Generate validates your saved layout automatically. You can also validate it here without creating an image."
+        : "Generate prepares the prompt automatically. You can also prepare and inspect it here before creating an image.",
     ),
   ];
   if (valid) {
     const pretty = JSON.stringify(saved.structured_prompt, null, 2);
-    children.push(
+    children.push(el("details", {},
+      el("summary", {}, "Inspect saved prompt & generation details"),
       el("div", { class: "muted small mono" },
         `${saved.path || "thumbnails/ideogram-magic-prompt.json"}`
         + `${saved.updated_at ? ` · ${saved.updated_at}` : ""}`
@@ -365,7 +465,7 @@ function buildMagicPromptArea(snapshot) {
           "aria-label": "Exact serialized Ideogram prompt",
         }, saved.serialized_prompt || ""),
       ),
-    );
+    ));
     if (Array.isArray(saved.protected_text) && saved.protected_text.length) {
       children.push(el("p", { class: "muted small" },
         `Protected exact text: ${saved.protected_text.map((item) => JSON.stringify(item)).join(", ")}`));
@@ -379,12 +479,12 @@ function buildMagicPromptArea(snapshot) {
   return el("section", { class: "panel" }, ...children);
 }
 
-function candidateCard(id, candidate, job) {
+function candidateCard(id, candidate, job, lastJob) {
   const body = el("article", { class: `thumbnail-card${candidate?.selected ? " selected" : ""}` });
   const statusBadge = candidate?.selected
     ? badge("good", "Selected export thumbnail")
     : candidate?.stale
-      ? badge("warning", "Stale · regenerate")
+      ? badge("warning", "Previous design · regenerate")
       : badge("neutral", candidate ? "Ready" : "Empty");
   body.append(el("div", { class: "row" },
     el("strong", {}, id.replace("candidate-", "Candidate ")),
@@ -407,13 +507,18 @@ function candidateCard(id, candidate, job) {
     };
     body.append(img);
     const provenance = candidate.provenance || {};
-    body.append(el("div", { class: "thumbnail-provenance" },
+    body.append(el("details", { class: "thumbnail-provenance" },
+      el("summary", {}, "Generation details"),
       el("span", {}, `${provenance.image_model === "ideogram4_local" ? "Ideogram 4" : provenance.model || "local"} · seed ${provenance.seed ?? "—"}`),
       el("span", {}, provenance.workflow_version || "thumbnail-v1"),
       el("span", { class: "mono" }, `${String(candidate.composite_hash || "").slice(0, 12)}…`),
     ));
   } else {
     body.append(el("div", { class: "thumbnail-placeholder" }, "No candidate generated"));
+  }
+  if (!job && lastJob?.status === "failed") {
+    body.append(el("p", { class: "readonly-note", role: "status" },
+      `Last attempt failed: ${lastJob.error || "See Jobs for details."}`));
   }
   if (job) {
     const cancel = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Cancel queued job");
@@ -433,8 +538,8 @@ function candidateCard(id, candidate, job) {
         if (ok) queue(id, true);
       }));
       actions.push(action("Duplicate", () => queue(null, false, null, id)));
-      if (!candidate.stale) {
-        actions.push(action("Set as export thumbnail", () => choose(id), "btn btn-primary btn-sm"));
+      if (!candidate.stale && !candidate.selected) {
+        actions.push(action("Use this thumbnail", () => choose(id), "btn btn-primary btn-sm"));
       }
       if (localMedia(candidate.file_url)) {
         actions.push(el("a", {
@@ -477,6 +582,7 @@ function frameCard(asset) {
 }
 
 async function queue(candidateId, regenerate, sourceAssetId = null, sourceCandidateId = null) {
+  if (!requireSavedPlan()) return;
   try {
     const body = sourceAssetId
       ? { source_asset_id: sourceAssetId }
@@ -495,6 +601,7 @@ async function queue(candidateId, regenerate, sourceAssetId = null, sourceCandid
 }
 
 async function choose(candidateId) {
+  if (!requireSavedPlan()) return;
   try {
     await selectThumbnailCandidate(state.config, state.currentProjectId, candidateId);
     toast("good", "Export thumbnail selected", candidateId);

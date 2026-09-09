@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 from backend.core import load_config
+from backend.models import GenerationResult
 from backend.pipeline import PipelineService
 from backend.pipeline.service import PipelineError
 from backend.schemas import (
@@ -53,6 +54,15 @@ def test_thumbnail_schema_is_bounded_and_canvas_is_fixed() -> None:
         ThumbnailConcept(prompt="x", seed=-1)
     with pytest.raises(ValidationError):
         ThumbnailTextLayout(title="x" * 121)
+    qwen_plan = ThumbnailPlan(
+        project_id="p", proposed_title="Title", topic="Topic",
+        concept=concept, text_layout=layout, image_model="qwen_image",
+    )
+    assert qwen_plan.image_model == "qwen_image"
+    qwen_native_plan = qwen_plan.model_copy(
+        update={"image_model": "qwen_image_native_text"},
+    )
+    assert ThumbnailPlan.model_validate(qwen_native_plan).image_model == "qwen_image_native_text"
 
 
 def test_art_prompt_scrubs_exact_copy_so_krea_never_paints_the_title(tmp_path: Path) -> None:
@@ -63,7 +73,7 @@ def test_art_prompt_scrubs_exact_copy_so_krea_never_paints_the_title(tmp_path: P
         topic="local llm tooling",
         concept=ThumbnailConcept(
             prompt=("A compelling documentary YouTube thumbnail artwork about "
-                    "How Local LLMs Work for beginners"),
+                    "How Local LLMs Work for beginners, bold readable headline above"),
         ),
         text_layout=ThumbnailTextLayout(
             title="How Local LLMs Work", hook="how local llms work",
@@ -71,8 +81,101 @@ def test_art_prompt_scrubs_exact_copy_so_krea_never_paints_the_title(tmp_path: P
     )
     prompt = service.thumbnails._art_prompt(plan)
     assert "How Local LLMs Work" not in prompt
+    assert "headline" not in prompt
+    assert "clean negative space for the graphic overlay" in prompt
     assert "the core idea" in prompt
     assert "No text, no letters" in prompt
+
+
+def test_qwen_thumbnail_routes_to_2512_workflow_with_exact_text_overlay(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    project = make_project(service)
+    plan = ThumbnailPlan.model_validate(service.thumbnails.snapshot(project.id)["plan"])
+    plan = service.thumbnails.save_plan(
+        project.id, plan.model_copy(update={"image_model": "qwen_image"}),
+    )
+    service.mock_mode = False
+    job = service.thumbnails.queue_candidate(
+        project.id, ThumbnailCandidateRequest(candidate_id="candidate-01"),
+    )
+    assert job.backend == "qwen_image_2512_comfyui"
+
+    captured = {}
+
+    class FakeQwenBackend:
+        def load(self) -> None:
+            captured["loaded"] = True
+
+        def generate(self, request):
+            captured["request"] = request
+            return GenerationResult(outputs=(tmp_path / "qwen.png",), metadata={})
+
+    service.registry.get = lambda name: (  # type: ignore[method-assign]
+        captured.setdefault("backend_name", name) and FakeQwenBackend()
+    )
+    service._prepare_comfy_backend = lambda name: (  # type: ignore[method-assign]
+        captured.setdefault("prepared", name) and True
+    )
+    result = service.thumbnails._dispatch_qwen_image(
+        project, plan, tmp_path, job.id, 2512,
+    )
+
+    request = captured["request"]
+    assert captured["backend_name"] == "qwen_image_2512_comfyui"
+    assert captured["prepared"] == "qwen_image_2512_comfyui"
+    assert captured["loaded"] is True
+    assert request.width == 1664 and request.height == 928
+    assert request.settings["workflow"] == service.QWEN_IMAGE_2512_WORKFLOW
+    assert "No text, no letters" in request.prompt
+    assert plan.text_layout.title not in request.prompt
+    assert result.metadata["workflow_version"] == "qwen-image-2512-thumbnail-fp8-v1"
+
+
+def test_qwen_native_text_uses_exact_copy_prompt_and_same_2512_backend(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    project = make_project(service)
+    plan = ThumbnailPlan.model_validate(service.thumbnails.snapshot(project.id)["plan"])
+    plan = service.thumbnails.save_plan(project.id, plan.model_copy(update={
+        "image_model": "qwen_image_native_text",
+        "concept": plan.concept.model_copy(update={
+            "avoid_prompt": "text, letters, blurry, watermark",
+        }),
+        "text_layout": plan.text_layout.model_copy(update={
+            "title": "READ THE CLOUDS", "hook": "SPOT THE WARNING SIGNS",
+        }),
+    }))
+    service.mock_mode = False
+    job = service.thumbnails.queue_candidate(
+        project.id, ThumbnailCandidateRequest(candidate_id="candidate-01"),
+    )
+    assert job.backend == "qwen_image_2512_comfyui"
+
+    captured = {}
+
+    class FakeQwenBackend:
+        def load(self) -> None:
+            pass
+
+        def generate(self, request):
+            captured["request"] = request
+            return GenerationResult(outputs=(tmp_path / "qwen-native.png",), metadata={})
+
+    service.registry.get = lambda _name: FakeQwenBackend()  # type: ignore[method-assign]
+    service._prepare_comfy_backend = lambda _name: True  # type: ignore[method-assign]
+    result = service.thumbnails._dispatch_qwen_image(
+        project, plan, tmp_path, job.id, 2513,
+    )
+
+    request = captured["request"]
+    assert 'exactly as: "READ THE CLOUDS"' in request.prompt
+    assert 'exactly as: "SPOT THE WARNING SIGNS"' in request.prompt
+    assert "Do not add, paraphrase" in request.prompt
+    assert request.negative_prompt == "blurry, watermark"
+    assert result.metadata["settings"]["native_text"] is True
 
 
 def test_ideogram_thumbnail_prompt_uses_horizontal_saved_styling(tmp_path: Path) -> None:
@@ -441,6 +544,34 @@ def test_mock_candidate_is_portable_restartable_and_selectable(tmp_path: Path) -
     restored = restarted.thumbnails.snapshot(project.id)
     assert restored["candidates"][0]["selected"] is True
     assert restored["selection"]["composite_hash"] == selection.composite_hash
+
+
+def test_qwen_native_text_candidate_skips_deterministic_overlay(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    service = make_service(tmp_path)
+    project = make_project(service)
+    plan = ThumbnailPlan.model_validate(service.thumbnails.snapshot(project.id)["plan"])
+    service.thumbnails.save_plan(project.id, plan.model_copy(update={
+        "image_model": "qwen_image_native_text",
+    }))
+
+    def fail_overlay(*_args, **_kwargs):
+        raise AssertionError("native Qwen text must not use the Pillow compositor")
+
+    monkeypatch.setattr(service.graphic_renderer, "render_thumbnail", fail_overlay)
+    job = service.thumbnails.queue_candidate(
+        project.id, ThumbnailCandidateRequest(candidate_id="candidate-01"),
+    )
+    candidate = service.thumbnails.run_candidate_job(job.id)
+    root = service.store.project_path(project)
+    manifest = json.loads((root / candidate.manifest_path).read_text(encoding="utf-8"))
+
+    assert candidate.artwork_hash == candidate.composite_hash
+    assert manifest["renderer_version"] == "qwen-image-native-text-v1"
+    assert manifest["font_identity"] == "qwen-image-native"
+    assert manifest["font_hash"] is None
+    assert 'exactly as: "Exact Local Title"' in manifest["generation_prompt"]
 
 
 def test_failed_regeneration_preserves_completed_candidate(tmp_path: Path, monkeypatch) -> None:
