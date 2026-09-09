@@ -39,6 +39,7 @@ matching response shapes (checked against `backend/api/main.py`):
 - Caption files use the same asset endpoint.
 - Local LLM model selection is available through `PUT /api/llm/models` and can be persisted to project metadata.
 - Implicit shots are materialized on first mutation: `PATCH`/`DELETE /api/shots/<scene>-implicit`, all three overlay routes, and `generate`/`regenerate` now materialize the legacy projection server-side (`_resolve_shot` in `pipeline/service.py`), so the Scene Editor no longer needs the create-and-archive placeholder workaround.
+- `shot_summary` carries a `stale` count and every shot payload carries a per-shot `stale` flag plus a `staleness` provenance marker (`{source_shot_id, reason, marked_at}`), so the Storyboard, Timeline, and Scene Editor surface real stale counts and an "approved but stale" explanation (approval keeps the marker by design; regeneration or media re-import clears it).
 
 ## Remaining gap
 
@@ -60,7 +61,7 @@ and the shared domain helper module `js/shots.js`:
 
 | Route | Frontend method | Notes |
 |---|---|---|
-| `GET /api/scenes/{id}/shots` | `listSceneShots()` | stored shots + implicit projection, `{count, materialized, ready, approved, failed, rendered_duration_seconds, scene_duration}` |
+| `GET /api/scenes/{id}/shots` | `listSceneShots()` | stored shots + implicit projection, `{count, materialized, ready, approved, failed, stale, rendered_duration_seconds, scene_duration}` |
 | `POST /api/scenes/{id}/shots` | `createShot()` | 201 → `Shot`; materializes the implicit shot first on legacy scenes |
 | `PATCH /api/shots/{shot_id}` | `editShot()` | partial edit; `index` moves reorder atomically; 409 when locked |
 | `DELETE /api/shots/{shot_id}` | `deleteShot()` | guarded archive; returns `{deleted_shot_id, archived_assets[], remaining_shots, scene_reverted_to_implicit}` |
@@ -72,20 +73,8 @@ and the shared domain helper module `js/shots.js`:
 | `PATCH /api/overlays/{overlay_id}?project_id=` | `patchProjectOverlay()` | project-scope resolution for embedded cues |
 
 Snapshot integration verified too: each scene payload carries `shots[]`
-(with `implicit: true` on projected entries) plus `shot_summary`.
-
-### Gap: shot_summary has ready/approved/failed but no stale count
-
-- **Affected screens:** Storyboard cards and Timeline (the plan asks cards to
-  show "stale/error counts").
-- **Verified:** `shot_summary` = `{count, materialized, ready, approved,
-  failed, rendered_duration_seconds}`; neither it nor the shot payloads carry
-  a stale flag (H3 continuity staleness is computed per-scene elsewhere).
-- **Current behavior:** the Storyboard shows `n/m ready`, a failed badge, and
-  a derived "pending" remainder (`count − ready − failed`) instead of a real
-  stale count.
-- **Requested change:** add `stale` to `shot_summary` (and a per-shot flag)
-  when the Phase 4 stale-dependency graph lands.
+(with `implicit: true` on projected entries, plus per-shot `stale`/`staleness`)
+plus `shot_summary` (including the `stale` count).
 
 ### Shot generation and scene rendering (implemented)
 

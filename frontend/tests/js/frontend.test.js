@@ -116,6 +116,9 @@ import {
   implicitShotFromScene,
   isWiredVisualType,
   sceneHasExplicitShots,
+  shotStaleBadge,
+  shotSummary,
+  staleReason,
 } from "../../js/shots.js";
 import { parseRoute, sceneEditorHash } from "../../js/router.js";
 import {
@@ -2436,6 +2439,81 @@ await recordAsync("voice tags: switching providers preserves edits and scopes sa
   assert(!panel.useTags.checked, "unsupported providers cannot send tags");
   switchTo("fish_s2_pro");
   eq(panel.querySelector("textarea").value, "[happy] Hello world.");
+});
+
+/* --- 14. Shot stale exposure ---------------------------------------------- */
+
+const STALE_SHOT = {
+  id: "shot-b",
+  scene_id: "scene-1",
+  index: 1,
+  title: "Close-up",
+  status: "ready",
+  stale: true,
+  staleness: {
+    source_shot_id: "0f3c9a12-abcd-4def-9012-3456789abcde",
+    reason: "predecessor_regenerated",
+    marked_at: "2026-09-08T12:30:00+00:00",
+  },
+};
+const PRODUCER_SHOT = {
+  id: "0f3c9a12-abcd-4def-9012-3456789abcde",
+  index: 0,
+  title: "Establishing",
+};
+
+record("stale: shotSummary prefers the backend stale count", () => {
+  const sum = shotSummary({
+    shot_summary: { count: 3, ready: 2, approved: 1, failed: 0, stale: 1 },
+    shots: [STALE_SHOT, { id: "a", status: "ready" }, { id: "c", status: "ready" }],
+  });
+  eq(sum.stale, 1);
+  eq(sum.pending, 1); // 3 - 2 ready - 0 failed
+});
+
+record("stale: shotSummary falls back to per-shot flags", () => {
+  const sum = shotSummary({
+    shots: [STALE_SHOT, { id: "a", status: "ready" }, { id: "c", status: "failed", stale: true }],
+  });
+  eq(sum.stale, 2);
+  eq(sum.count, 3);
+});
+
+record("stale: implicit projection carries the same shape", () => {
+  const projected = implicitShotFromScene({ id: "scene-1", duration: 5 });
+  eq(projected.stale, false);
+  eq(projected.staleness, null);
+});
+
+record("stale: staleReason names the producer shot and explains why", () => {
+  const why = staleReason(STALE_SHOT, [PRODUCER_SHOT, STALE_SHOT]);
+  assert(why.includes("Establishing"), `friendly producer name missing: ${why}`);
+  assert(/regenerated/i.test(why), `regeneration cause missing: ${why}`);
+  assert(!why.includes("0f3c9a12-abcd"), "raw UUID should be replaced by the shot title");
+});
+
+record("stale: staleReason degrades to a short id for unknown producers", () => {
+  const why = staleReason(STALE_SHOT, []);
+  assert(why && why.includes("0f3c9a12"), `short id missing: ${why}`);
+});
+
+record("stale: staleReason is null without a marker", () => {
+  eq(staleReason({ id: "a", status: "ready" }), null);
+  eq(staleReason(null), null);
+});
+
+record("stale: badge says Approved but stale for approved stale shots", () => {
+  const approved = { ...STALE_SHOT, status: "approved" };
+  const node = shotStaleBadge(approved, [PRODUCER_SHOT, approved]);
+  assert(node.textContent.includes("Approved but stale"),
+    `label wrong: ${node.textContent}`);
+  assert(node.classList.contains("badge-warning"), "expected warning styling");
+  assert(node.title.includes("Regenerate"), `clearance hint missing: ${node.title}`);
+});
+
+record("stale: badge says Stale (not Approved) for non-approved shots", () => {
+  const node = shotStaleBadge(STALE_SHOT, [PRODUCER_SHOT]);
+  assert(node.textContent === "Stale", `label wrong: ${node.textContent}`);
 });
 
 /* --- report -------------------------------------------------------------- */

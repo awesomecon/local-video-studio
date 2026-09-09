@@ -43,6 +43,7 @@ from backend.models.h3_shot_continuity import (
 from backend.models.lane_resolver import LaneResolutionError, resolve_lane_target
 from backend.models.provenance import (
     apply_regeneration_staleness,
+    clear_staleness,
     current_visual_asset,
     plan_regeneration,
 )
@@ -3272,13 +3273,24 @@ class PipelineService:
         return self.database.list_shots(scene.project_id, scene.id)
 
     def shots_snapshot(self, scene: Scene) -> dict[str, Any]:
-        """Stored shots plus the implicit legacy projection for empty scenes."""
+        """Stored shots plus the implicit legacy projection for empty scenes.
+
+        Per-shot payloads carry ``stale`` (bool) and ``staleness`` (the
+        provenance marker: which upstream shot regenerated and when), and the
+        summary carries a ``stale`` count. A shot is stale while its upstream
+        changed after its media was produced; regenerating or re-importing its
+        media clears the marker. Approval never clears it: approving a stale
+        shot is an explicit acceptance, and export preflight still asks for a
+        regeneration first.
+        """
         stored = self.shots_for_scene(scene)
         effective = effective_shots(scene, stored)
         payloads = []
         for shot in effective:
             payload = shot.model_dump(mode="json")
             payload["implicit"] = not stored
+            payload["stale"] = bool(shot.settings.get("staleness"))
+            payload["staleness"] = shot.settings.get("staleness") or None
             payloads.append(payload)
         statuses = [shot.status for shot in effective]
         return {
@@ -3288,6 +3300,7 @@ class PipelineService:
             "ready": sum(status in {ShotStatus.READY, ShotStatus.APPROVED} for status in statuses),
             "approved": sum(status is ShotStatus.APPROVED for status in statuses),
             "failed": sum(status is ShotStatus.FAILED for status in statuses),
+            "stale": sum(1 for shot in effective if shot.settings.get("staleness")),
             "rendered_duration_seconds": round(scene_rendered_duration(effective), 6),
         }
 
@@ -4295,7 +4308,7 @@ class PipelineService:
                 hash=digest,
             )
             self.database.save_asset(asset)
-            updated_shot = shot.model_copy(update={
+            updated_shot = clear_staleness(shot).model_copy(update={
                 "source": source,
                 "status": ShotStatus.READY,
                 "updated_at": utc_now(),
@@ -4312,10 +4325,12 @@ class PipelineService:
             return asset
 
     def _mark_shot_ready(self, shot: Shot) -> None:
-        if shot.locked:
-            updated = shot.model_copy(update={"updated_at": utc_now()})
+        # New media makes any upstream-regeneration staleness moot.
+        fresh = clear_staleness(shot)
+        if fresh.locked:
+            updated = fresh.model_copy(update={"updated_at": utc_now()})
         else:
-            updated = shot.model_copy(update={
+            updated = fresh.model_copy(update={
                 "status": ShotStatus.READY, "updated_at": utc_now(),
             })
         self.database.save_shot(updated)

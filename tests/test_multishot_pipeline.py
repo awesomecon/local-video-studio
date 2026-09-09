@@ -317,6 +317,66 @@ def test_queue_shot_generation_materializes_unmaterialized_implicit_shot(
     assert service.list_scene_shots(scene.id)["materialized"] is True
 
 
+def test_stale_flag_surfaces_in_summary_and_clears_on_regeneration(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    project, scene = make_project_with_scene(service)
+    source = service.create_shot(scene.id, {
+        "duration_seconds": 5, "lane": "image", "visual_type": "krea2_still",
+    })
+    dependent = service.create_shot(scene.id, {
+        "duration_seconds": 5, "lane": "h3", "visual_type": "h3_audiovisual",
+    })
+
+    # Give the source real media, then make the dependent consume it so a
+    # source regeneration marks it stale through the real impact path.
+    job = service.queue_shot_generation(source.id, regenerate=False)
+    service.run_shot_generation_job(job.id)
+    source_asset = current_visual_asset(
+        service.database.get_shot(source.id),
+        service.database.list_assets(project.id),
+    )
+    assert source_asset is not None
+    service.update_shot(dependent.id, {
+        "reference_assets": [{"role": "first_frame", "asset_id": source_asset.id}],
+    })
+    job = service.queue_shot_generation(source.id, regenerate=True)
+    service.run_shot_generation_job(job.id)
+
+    view = service.list_scene_shots(scene.id)
+    by_id = {item["id"]: item for item in view["shots"]}
+    assert by_id[dependent.id]["status"] == "draft"
+    assert by_id[dependent.id]["stale"] is True
+    assert by_id[dependent.id]["staleness"]["source_shot_id"] == source.id
+    assert by_id[source.id]["stale"] is False
+    assert view["stale"] == 1
+
+    # Approval is explicit acceptance: it keeps the marker, and export
+    # preflight keeps warning until the shot is regenerated.
+    approved = service.approve_shot(dependent.id)
+    assert approved.status is ShotStatus.APPROVED
+    assert approved.settings.get("staleness")
+    issues = service.render_preflight(project.id)["scenes"][0]["issues"]
+    assert any(
+        item["code"] == "stale_dependency" and item["shot_id"] == dependent.id
+        for item in issues
+    )
+
+    # Regenerating the dependent produces fresh media and resolves it.
+    job = service.queue_shot_generation(dependent.id, regenerate=True)
+    service.run_shot_generation_job(job.id)
+
+    view = service.list_scene_shots(scene.id)
+    by_id = {item["id"]: item for item in view["shots"]}
+    assert by_id[dependent.id]["stale"] is False
+    assert by_id[dependent.id]["staleness"] is None
+    assert by_id[dependent.id]["status"] == "ready"
+    assert view["stale"] == 0
+    issues = service.render_preflight(project.id)["scenes"][0]["issues"]
+    assert not any(item["code"] == "stale_dependency" for item in issues)
+
+
 def test_locked_scene_blocks_shot_writes(tmp_path: Path) -> None:
     from backend.pipeline.service import PipelineError
 

@@ -37,7 +37,7 @@ import { getProject } from "../api.js";
 import { loadingState, emptyState, errorPanel, badge, stageChip, icon } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute, sceneEditorHash } from "../router.js";
-import { compiledShotSpans, compiledSpanSeconds, fmtSecs } from "../shots.js";
+import { compiledShotSpans, compiledSpanSeconds, fmtSecs, shotSummary, staleReason } from "../shots.js";
 
 /** Width of the sticky label column: read from the shared CSS custom
  * property so the grid definition and the JS layout can never drift. */
@@ -384,10 +384,12 @@ function renderSceneLane(lane, layout, scale, view, shotSpans, expandedSpanSecon
     const seconds = expanded ? expandedSpanSeconds(item) : duration;
     const width = Math.max(2, seconds * scale - 2);
     const sizeClass = width < TINY_CLIP_PX ? " tiny" : width < NARROW_CLIP_PX ? " narrow" : "";
+    const staleCount = shotSummary(scene).stale;
     const narrationExcerpt = scene.narration
       ? ` · ${(scene.narration.length > 140 ? `${scene.narration.slice(0, 140)}…` : scene.narration)}`
       : "";
     const tooltip = `S${num} · ${scene.title} · ${fmtDuration(expanded ? seconds : duration)} · ${scene.transition || "cut"}`
+      + (staleCount ? ` · ${staleCount} stale shot(s) — upstream regeneration` : "")
       + (asset ? "" : " · no visual generated yet") + narrationExcerpt;
 
     const clip = el("div", {
@@ -454,6 +456,10 @@ function renderSceneLane(lane, layout, scale, view, shotSpans, expandedSpanSecon
       el("span", { class: "tl-scene-name" }, `S${num}`),
       el("span", { class: "tl-scene-title" }, scene.title),
       el("span", { class: "tl-scene-dur" }, fmtDuration(expanded ? seconds : duration)),
+      staleCount ? el("span", {
+        class: "tl-scene-stale",
+        title: `${staleCount} shot(s) marked stale: an upstream shot regenerated after their media was produced. Regenerate before final export.`,
+      }, "stale") : null,
     ));
     parts.push(clip);
   });
@@ -501,16 +507,20 @@ function appendExpandedShots(clip, _lane, item, scale, shotSpans) {
     }
 
     const overlayCount = Array.isArray(shot.overlays) ? shot.overlays.length : 0;
+    const staleTag = shot.stale
+      ? ` · STALE (${staleReason(shot, item.scene.shots || []) || "upstream regeneration"})`
+      : "";
     const segTooltip = `Shot #${shot.index + 1} · ${shot.title || "(untitled)"}`
       + ` · ${fmtSecs(shot.duration_seconds)}`
       + (j === 0 ? "" : ` · in: ${kind}${overlap > 0 ? ` ${fmtSecs(overlap)}` : ""}`)
       + ` · starts ${fmtSecs(span.start)} into the scene`
       + ` · ${shot.lane} lane · status ${shot.status}`
+      + staleTag
       + (overlayCount ? ` · ${overlayCount} overlay(s)` : "")
       + ". Click to edit this shot in the Scene Editor.";
 
     const seg = el("div", {
-      class: `tl-shot lane-${shot.lane || "image"}`,
+      class: `tl-shot lane-${shot.lane || "image"}${shot.stale ? " stale" : ""}`,
       style: { left: `${span.start * scale + 1}px`, width: `${segWidth}px` },
       title: segTooltip,
       role: "button",
@@ -529,6 +539,7 @@ function appendExpandedShots(clip, _lane, item, scale, shotSpans) {
       seg.append(el("span", { class: "tl-shot-info" },
         el("span", {}, `#${shot.index + 1}`),
         el("span", {}, shot.title || "(untitled)"),
+        shot.stale ? el("span", { class: "tl-shot-stale" }, "stale") : null,
         el("span", { class: "tl-shot-dur" }, fmtSecs(shot.duration_seconds)),
       ));
     }

@@ -64,6 +64,7 @@ from .mock import MockGeneratorBackend, MockLLMBackend
 from .provenance import (
     RegenerationImpact,
     apply_regeneration_staleness,
+    clear_staleness,
     current_visual_asset,
     dependency_edges,
     plan_regeneration,
@@ -132,6 +133,7 @@ __all__ = [
     "build_qwen_image_request",
     "build_shot_request",
     "build_shots_index",
+    "clear_staleness",
     "current_visual_asset",
     "dependency_edges",
     "describe_lane_targets",

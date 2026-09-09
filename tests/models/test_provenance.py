@@ -20,6 +20,7 @@ from backend.models.h3_shot_continuity import (
 from backend.models.provenance import (
     RegenerationImpact,
     apply_regeneration_staleness,
+    clear_staleness,
     current_visual_asset,
     dependency_edges,
     plan_regeneration,
@@ -307,6 +308,39 @@ def test_apply_regeneration_staleness_mutates_only_impacted_copies() -> None:
     assert shots[1].status is ShotStatus.READY
     # Media records were never rewritten: hashes stay exactly as recorded.
     assert all(asset.hash is None for asset in media)
+
+
+def test_clear_staleness_drops_only_the_marker() -> None:
+    shots, media = chain_with_media()
+    stamp = datetime(2026, 8, 25, 14, 0, tzinfo=timezone.utc)
+
+    impact = plan_regeneration("shot-a", shots, media)
+    marked = apply_regeneration_staleness(shots, impact, marked_at=stamp)
+    by_id = {item.id: item for item in marked}
+
+    cleared_b = clear_staleness(by_id["shot-b"])
+    assert "staleness" not in cleared_b.settings
+    # Approval is an explicit acceptance: clearing never touches status.
+    assert cleared_b.status is ShotStatus.DRAFT
+
+    # A fresh (never-marked) shot is returned as the same object.
+    assert clear_staleness(by_id["shot-d"]) is by_id["shot-d"]
+    # The input is never mutated in place.
+    assert "staleness" in by_id["shot-b"].settings
+
+
+def test_clear_staleness_resolves_after_regeneration_marker() -> None:
+    shots, media = chain_with_media()
+    stamp = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+
+    impact = plan_regeneration("shot-a", shots, media)
+    by_id = {
+        item.id: item
+        for item in apply_regeneration_staleness(shots, impact, marked_at=stamp)
+    }
+    assert "staleness" in by_id["shot-b"].settings
+    # Producing new media for the dependent clears its own marker.
+    assert "staleness" not in clear_staleness(by_id["shot-b"]).settings
 
 
 def test_apply_regeneration_keeps_queued_status_instead_of_drafting_it() -> None:

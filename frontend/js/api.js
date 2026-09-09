@@ -1554,18 +1554,25 @@ export function retryJob(config, id, opts = {}) {
  * @property {string} created_at
  * @property {string} updated_at
  * @property {boolean} [implicit]
+ * @property {boolean} [stale] — true while an upstream shot regenerated after
+ *   this shot's media was produced; regenerating/re-importing clears it,
+ *   approval intentionally does not (explicit acceptance; preflight still
+ *   asks for a regeneration before export)
+ * @property {{source_shot_id: string, reason: string, marked_at: string}|null} [staleness] —
+ *   provenance of the stale marker (which upstream shot, why, when)
  */
 
 /**
  * Per-scene shot block embedded in project snapshots (`shot_summary`).
- * There is no explicit stale count yet; `count - ready - failed` is the
- * honest pending remainder (see frontend/API_GAPS.md).
+ * `stale` counts shots carrying a staleness marker; `count - ready - failed`
+ * is the honest pending remainder.
  * @typedef {Object} ShotSummary
  * @property {number} count
  * @property {boolean} materialized
  * @property {number} ready
  * @property {number} approved
  * @property {number} failed
+ * @property {number} stale
  * @property {number} rendered_duration_seconds — Σduration − Σincoming overlap
  */
 
@@ -1578,6 +1585,7 @@ export function retryJob(config, id, opts = {}) {
  * @property {number} ready
  * @property {number} approved
  * @property {number} failed
+ * @property {number} stale
  * @property {number} rendered_duration_seconds
  * @property {string} scene_id
  * @property {number} scene_duration

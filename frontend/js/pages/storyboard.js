@@ -544,6 +544,19 @@ function buildShotsRow(scene) {
   ));
   if (sum.failed > 0) row.append(badge("critical", `${sum.failed} failed`));
   if (sum.pending > 0) row.append(badge("neutral", `${sum.pending} pending`));
+  if (sum.stale > 0) {
+    const approvedStale = (scene.shots || []).filter(
+      (x) => x && x.stale && x.status === "approved",
+    ).length;
+    const staleBadge = badge(
+      "warning",
+      `${sum.stale} stale${approvedStale ? ` (${approvedStale} approved)` : ""}`,
+    );
+    staleBadge.title = approvedStale
+      ? "An upstream shot regenerated after this media was produced. Some flagged shots were approved anyway — approval records acceptance but keeps the flag. Regenerate before final export."
+      : "An upstream shot regenerated after this media was produced. Regenerate the flagged shots before final export.";
+    row.append(staleBadge);
+  }
   if (Array.isArray(scene.shots)) row.append(...laneChips(scene.shots));
   const planned = Number(scene.duration) || 0;
   if (Math.abs(planned - sum.rendered) > 0.05) {

@@ -87,6 +87,8 @@ import {
   defaultNewShot,
   sceneHasExplicitShots,
   shotStatusBadge,
+  shotStaleBadge,
+  staleReason,
   transitionOverlap,
   fmtSecs,
   numOrNull,
@@ -1392,6 +1394,7 @@ function shotsController(scene, opts = {}) {
         el("span", { class: "sch-meta" },
           el("span", { class: `lane-chip lane-${shot.lane || "image"}` }, laneLabel(shot.lane)),
           shotStatusBadge(shot.status, false),
+          shot.stale ? shotStaleBadge(shot, shots) : null,
           el("span", { class: "tag" }, fmtSecs(shot.duration_seconds)),
           kind !== "cut"
             ? el("span", { class: "tag", title: "Incoming transition overlapping the previous shot" }, `${kind}${overlap > 0 ? ` ${fmtSecs(overlap)}` : ""}`)
@@ -1662,7 +1665,9 @@ function shotsController(scene, opts = {}) {
     const approveBtn = el("button", {
       class: "btn btn-sm", type: "button",
       hidden: shot.status === "approved",
-      title: "Mark this shot approved.",
+      title: shot.stale
+        ? "Mark this shot approved. Approval records your acceptance; the stale flag stays until you regenerate."
+        : "Mark this shot approved.",
     }, "Approve");
     const lockBtn = el("button", {
       class: "btn btn-sm", type: "button",
@@ -1895,11 +1900,28 @@ function shotsController(scene, opts = {}) {
       ));
     }
 
+    if (shot.stale) {
+      const why = staleReason(shot, shots)
+        || "an upstream shot regenerated after this shot's media was produced";
+      const approved = shot.status === "approved";
+      container.append(el("div", { class: "readonly-note", role: "note" },
+        icon("info", 14),
+        el("span", {},
+          el("strong", {}, approved ? "Approved but stale. " : "Stale. "),
+          why + ".",
+          approved
+            ? " You approved it — that records your acceptance but keeps the flag. "
+            : " ",
+          "Regenerate this shot to clear the flag before final export."),
+      ));
+    }
+
     container.append(
       el("div", { class: "row", style: { flexWrap: "wrap" } },
         el("span", { class: "sc-title", style: { fontSize: "var(--text-md)" } },
           `Shot #${idx + 1}`),
         shotStatusBadge(shot.status, shot.locked),
+        shot.stale ? shotStaleBadge(shot, shots) : null,
         el("span", { class: "muted small" },
           `contributes ${fmtSecs(Math.max(0, Number(shot.duration_seconds) - transitionOverlap(shot)))} of ${fmtSecs(shot.duration_seconds)} to the scene`),
         el("span", { class: "spacer" }),
