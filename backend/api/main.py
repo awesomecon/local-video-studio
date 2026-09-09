@@ -1701,6 +1701,41 @@ def create_app(
         return job.model_dump(mode="json")
 
     @application.post(
+        "/api/projects/{project_id}/render/stages/{stage}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def render_project_stage(
+        project_id: str,
+        stage: str,
+        background_tasks: BackgroundTasks,
+        request: RenderRequest = RenderRequest(),
+    ) -> dict[str, Any]:
+        """Re-run a single deterministic render stage (never LLM/TTS/visuals).
+
+        ``stage`` is one of ``timeline``, ``render_preview``, ``quality_control``,
+        ``render_final``, ``thumbnails`` (plus ``editorial_visual`` for Editorial
+        Mode projects). 404 for an unknown stage or project, 400 for an
+        inapplicable ``editorial_visual``, 409 while a render/pipeline/stage
+        job is in flight.
+        """
+        try:
+            job = service.queue_render_stage(project_id, stage, force=request.force)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        background_tasks.add_task(
+            service.run_render_stage,
+            project_id,
+            stage,
+            force=request.force,
+            parent_job_id=job.id,
+        )
+        return job.model_dump(mode="json")
+
+    @application.post(
         "/api/projects/{project_id}/visuals/batch",
         status_code=status.HTTP_202_ACCEPTED,
     )

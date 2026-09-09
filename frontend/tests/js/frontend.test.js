@@ -158,6 +158,8 @@ import {
   editorialDisplaySettings,
   renderInputSummary,
   renderStageLabel,
+  stageRerunLabel,
+  stageRerunMessage,
 } from "../../js/pages/export.js";
 
 const results = [];
@@ -1233,6 +1235,135 @@ await recordAsync("export: classic force-render confirmation is unchanged", asyn
 // Leave shared app state the way later screens expect it.
 state.currentProjectId = null;
 closeModals();
+
+/* --- 9b. Export per-stage re-run ------------------------------------------ */
+
+record("export rerun: stageRerunLabel maps every deterministic stage", () => {
+  eq(stageRerunLabel("timeline"), "Timeline");
+  eq(stageRerunLabel("render_preview"), "Preview render");
+  eq(stageRerunLabel("quality_control"), "Quality check");
+  eq(stageRerunLabel("render_final"), "Final render");
+  eq(stageRerunLabel("thumbnails"), "Thumbnails");
+  eq(stageRerunLabel("editorial_visual"), "Editorial canvas");
+  eq(stageRerunLabel("nope"), "nope", "unknown stages pass through");
+});
+
+record("export rerun: stageRerunMessage scopes the rebuild to one stage", () => {
+  const thumbs = stageRerunMessage("thumbnails", CLASSIC_EXPORT_PROJECT);
+  assert(thumbs.includes("Thumbnails"), "names the stage");
+  assert(thumbs.includes("not regenerated"), "content is never regenerated");
+  assert(!thumbs.includes("preview") && !thumbs.includes("final"), "does not promise other stages");
+  const finalMsg = stageRerunMessage("render_final", CLASSIC_EXPORT_PROJECT);
+  assert(finalMsg.includes("Final render"), "names the final stage");
+});
+
+async function renderRerunControls(projectId, snap) {
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}`) return { payload: snap };
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}/thumbnails`) return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "POST" && /\/render\/stages\//.test(call.url)) {
+      return { payload: {
+        id: "job-rs", project_id: projectId, scene_id: null, stage: "render_stage", backend: "ffmpeg",
+        status: "queued", progress: 0, priority: 0,
+        parameters: { stage: "thumbnails", force: true, current_stage: "thumbnails" },
+        attempt_count: 0, max_attempts: 3, error: null,
+        created_at: "2026-01-04T00:00:00Z", updated_at: "2026-01-04T00:00:00Z",
+        started_at: null, completed_at: null,
+      } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = projectId;
+  const screen = renderExport({ name: "export", param: null });
+  await flush();
+  return { screen, calls };
+}
+
+function stageRerunButtons(panel) {
+  return [...panel.querySelectorAll("button")].filter((b) => b.textContent === "Re-run");
+}
+
+await recordAsync("export rerun: each deterministic stage row exposes a Re-run button", async () => {
+  const classic = await renderRerunControls(
+    CLASSIC_EXPORT_PROJECT.id,
+    exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS }),
+  );
+  const classicButtons = stageRerunButtons(renderControlsPanel(classic.screen));
+  eq(classicButtons.length, 5, "classic has five deterministic stages");
+  assert(classicButtons.every((b) => !b.disabled), "no active job, so all are enabled");
+
+  const editorial = await renderRerunControls(
+    EDITORIAL_EXPORT_PROJECT.id,
+    exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT),
+  );
+  const edButtons = stageRerunButtons(renderControlsPanel(editorial.screen));
+  eq(edButtons.length, 6, "editorial adds the Editorial canvas stage");
+  closeModals();
+});
+
+await recordAsync("export rerun: Re-run confirms scope then posts force to the stage endpoint", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
+  const row = renderControlsPanel(screen).querySelector(".row.mt");
+  const rerunButtons = [...row.querySelectorAll("button")];
+  eq(rerunButtons.length, 5, "one Re-run per stage row");
+  rerunButtons[4].click(); // thumbnails is the last classic stage
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation dialog opened");
+  eq(modal.querySelector(".modal-head h2").textContent, "Re-run Thumbnails?");
+  assert(modal.querySelector(".modal-body").textContent.includes("Only the Thumbnails output will be rebuilt"),
+    "rebuild is scoped to the one stage");
+  assert(modal.querySelector(".modal-body").textContent.includes("not regenerated"), "content preserved");
+  const confirmBtn = [...modal.querySelectorAll(".modal-foot button")].find((b) => b.textContent === "Re-run Thumbnails");
+  assert(confirmBtn, "confirm action present");
+  confirmBtn.click();
+  await flush();
+  const posts = calls.filter((c) => c.method === "POST");
+  eq(posts.length, 1, "one stage POST after confirmation");
+  eq(posts[0].url, "/api/projects/proj-xc/render/stages/thumbnails", "posts to the stage endpoint");
+  eq(posts[0].body, { force: true }, "force flag set");
+  closeModals();
+});
+
+await recordAsync("export rerun: canceling the confirmation issues no request", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
+  const row = renderControlsPanel(screen).querySelector(".row.mt");
+  [...row.querySelectorAll("button")][0].click(); // timeline
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation opened");
+  eq(modal.querySelector(".modal-head h2").textContent, "Re-run Timeline?");
+  const cancelBtn = [...modal.querySelectorAll(".modal-foot button")].find((b) => b.textContent === "Cancel");
+  cancelBtn.click();
+  await flush();
+  eq(calls.filter((c) => c.method === "POST").length, 0, "canceling issues no stage request");
+  closeModals();
+});
+
+await recordAsync("export rerun: Re-run buttons are disabled while a deterministic job is active", async () => {
+  const job = {
+    id: "job-rs1", project_id: "proj-xc", scene_id: null, stage: "render_stage", backend: "ffmpeg",
+    status: "generating", progress: 0.5, priority: 0,
+    parameters: { stage: "thumbnails", force: true, current_stage: "thumbnails" },
+    attempt_count: 1, max_attempts: 3, error: null,
+    created_at: "2026-01-05T00:00:00Z", updated_at: "2026-01-05T00:00:01Z",
+    started_at: null, completed_at: null,
+  };
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS, jobs: [job] });
+  const { screen } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
+  const panel = renderControlsPanel(screen);
+  const rerunButtons = stageRerunButtons(panel);
+  assert(rerunButtons.length > 0, "buttons present");
+  assert(rerunButtons.every((b) => b.disabled), "every Re-run button is disabled while a stage job runs");
+  const runBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Render final video");
+  assert(runBtn.disabled, "the full render is disabled too");
+  closeModals();
+});
+
+state.currentProjectId = null;
 
 /* --- 10. Editorial display settings (Project Details) --------------------- */
 

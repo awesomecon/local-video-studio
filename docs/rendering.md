@@ -16,6 +16,10 @@ render stages themselves never invoke LLM, TTS, or generation backends.)
 - `POST /api/projects/{id}/render` queues only the deterministic render stages from existing
   narration and current scene visuals. `{"force": true}` re-runs the render stages without
   regenerating content.
+- `POST /api/projects/{id}/render/stages/{stage}` re-runs a single deterministic stage
+  (`timeline`, `render_preview`, `quality_control`, `render_final`, `thumbnails`; plus
+  `editorial_visual` for Editorial Mode projects) as its own `render_stage` job, leaving the
+  other stages untouched.
 - Every stage is restartable: completion and outputs persist, and a restart resumes from the
   first incomplete stage.
 

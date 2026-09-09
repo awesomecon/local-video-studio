@@ -59,6 +59,7 @@ let generation = 0;
 const CURRENT_STAGE_LABELS = {
   queued: "Waiting for a worker",
   validating_inputs: "Validating inputs",
+  editorial_visual: "Rendering Editorial canvas",
   timeline: "Building timeline",
   render_preview: "Rendering preview",
   quality_control: "Quality check",

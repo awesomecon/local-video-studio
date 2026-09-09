@@ -20,7 +20,7 @@
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
-import { getProject, getThumbnails, renderProject, cancelJob } from "../api.js";
+import { getProject, getThumbnails, renderProject, renderStage, cancelJob } from "../api.js";
 import {
   loadingState,
   errorPanel,
@@ -205,7 +205,12 @@ function exportPanel() {
       ]);
       if (token !== inflight) return;
       const stages = (snap.stage_state && /** @type {any} */ (snap.stage_state).stages) || {};
-      const jobs = (snap.jobs || []).filter((j) => j.stage === "render" || j.stage === "pipeline");
+      // A full render, a pipeline, or a single-stage re-run all own the
+      // deterministic chain: any of them active disables the render controls
+      // and is shown with its progress and Cancel action.
+      const jobs = (snap.jobs || []).filter(
+        (j) => j.stage === "render" || j.stage === "pipeline" || j.stage === "render_stage",
+      );
       const active = jobs.find((j) => !TERMINAL.includes(j.status)) || null;
       const last = jobs.slice().sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0] || null;
       region.replaceChildren(build(snap, stages, active, last, thumbnails));
@@ -236,6 +241,7 @@ function build(snap, stages, active, last, thumbnails) {
   const project = snap.project;
   const mode = exportVideoMode(project);
   const parts = [];
+  const onRerun = (stage) => doRerunStage(stage, project);
 
   const selected = (thumbnails.candidates || []).find((candidate) => candidate.selected);
   // Only a project-scoped local URL is rendered/downloadable; a candidate
@@ -328,12 +334,14 @@ function build(snap, stages, active, last, thumbnails) {
           el("span", { class: "muted small" }, exportWorkflowText(project)),
         ),
         el("div", { class: "row mt" },
-          mode === "editorial" ? labeledChip("Editorial canvas", stages.editorial_visual) : null,
-          stageChip("timeline", stages.timeline),
-          stageChip("render_preview", stages.render_preview),
-          stageChip("quality_control", stages.quality_control),
-          stageChip("render_final", stages.render_final),
-          stageChip("thumbnails", stages.thumbnails),
+          mode === "editorial"
+            ? stageRerunCell("editorial_visual", stages.editorial_visual, { active, onRerun })
+            : null,
+          stageRerunCell("timeline", stages.timeline, { active, onRerun }),
+          stageRerunCell("render_preview", stages.render_preview, { active, onRerun }),
+          stageRerunCell("quality_control", stages.quality_control, { active, onRerun }),
+          stageRerunCell("render_final", stages.render_final, { active, onRerun }),
+          stageRerunCell("thumbnails", stages.thumbnails, { active, onRerun }),
         ),
         statusRegion,
       ),
@@ -456,6 +464,86 @@ async function doRender(force, project) {
   } catch (err) {
     toastError(err, "queue render");
   }
+}
+
+/**
+ * Readable noun label for a deterministic stage's Re-run action.
+ * @param {string} stage
+ * @returns {string}
+ */
+export function stageRerunLabel(stage) {
+  return ({
+    editorial_visual: "Editorial canvas",
+    timeline: "Timeline",
+    render_preview: "Preview render",
+    quality_control: "Quality check",
+    render_final: "Final render",
+    thumbnails: "Thumbnails",
+  })[stage] || stage;
+}
+
+/**
+ * Confirmation text for a forced single-stage re-run. The rebuild is scoped to
+ * the one named output; the project's content (script, narration, scene media,
+ * music, captions) is never regenerated.
+ * @param {string} stage
+ * @param {import("../api.js").Project} _project — kept for parity with the
+ *   full-render confirmation; the wording is stage-scoped, not mode-scoped.
+ * @returns {string}
+ */
+export function stageRerunMessage(stage, _project) {
+  const label = stageRerunLabel(stage);
+  return `Only the ${label} output will be rebuilt. Your script, narration, scene media, music, and captions are not regenerated.`;
+}
+
+/**
+ * Re-run a single deterministic render stage. A confirmation explains the
+ * rebuild scope (matching the deterministic re-render pattern), then the job
+ * is queued via POST /render/stages/{stage} and the shared live feed follows
+ * it.
+ * @param {string} stage
+ * @param {import("../api.js").Project} project
+ */
+async function doRerunStage(stage, project) {
+  const label = stageRerunLabel(stage);
+  const ok = await confirm({
+    title: `Re-run ${label}?`,
+    message: stageRerunMessage(stage, project),
+    confirmLabel: `Re-run ${label}`,
+  });
+  if (!ok) return;
+  try {
+    const job = await renderStage(state.config, state.currentProjectId, stage, { force: true });
+    toast("good", `${label} re-run queued`, `job ${job.id}`);
+    renderExportRefresh();
+  } catch (err) {
+    toastError(err, `re-run ${label}`);
+  }
+}
+
+/**
+ * A deterministic stage cell: its status chip plus a small Re-run button. The
+ * chip keeps the shared STAGE_LABELS wording (editorial_visual uses the
+ * caller-supplied label, as before); the button is disabled while any
+ * deterministic job is in flight so two chain owners never race.
+ * @param {string} stage
+ * @param {{status?: string} | null | undefined} st
+ * @param {{active: boolean, onRerun: (stage: string) => void}} opts
+ * @returns {Array<HTMLElement>}
+ */
+function stageRerunCell(stage, st, { active, onRerun }) {
+  const chip = stage === "editorial_visual"
+    ? labeledChip("Editorial canvas", st)
+    : stageChip(stage, st);
+  const label = stageRerunLabel(stage);
+  const button = el("button", {
+    class: "btn btn-ghost btn-sm",
+    type: "button",
+    disabled: active,
+    title: active ? "Wait for the active render to finish" : `Re-run ${label}`,
+  }, "Re-run");
+  button.onclick = () => onRerun(stage);
+  return [chip, button];
 }
 
 /**

@@ -1266,6 +1266,28 @@ export function renderProject(config, id, body = {}, opts = {}) {
 }
 
 /**
+ * POST /api/projects/{id}/render/stages/{stage} — re-run a single
+ * deterministic render stage. Only the FFmpeg/chromium output stages are
+ * addressable: "timeline", "render_preview", "quality_control",
+ * "render_final", "thumbnails", and "editorial_visual" for Editorial Mode
+ * projects. It never contacts the LLM, runs TTS, or generates replacement
+ * media. 404 for an unknown stage or project, 400 for an inapplicable
+ * editorial_visual, 409 while a render/pipeline/stage job is in flight.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {"timeline"|"render_preview"|"quality_control"|"render_final"|"thumbnails"|"editorial_visual"} stage
+ * @param {{force?: boolean, signal?: AbortSignal}} [opts]
+ * @returns {Promise<GenerationJob>} the queued stage-re-run job
+ */
+export function renderStage(config, projectId, stage, { force = false, signal, timeoutMs = 30000 } = {}) {
+  return request(
+    config,
+    `/api/projects/${encodeURIComponent(projectId)}/render/stages/${encodeURIComponent(stage)}`,
+    { method: "POST", body: { force }, timeoutMs, signal },
+  );
+}
+
+/**
  * POST /api/projects/{id}/visuals/batch — queue sequential generation for
  * every unlocked scene that is still missing a visual, optionally restricted
  * to one visual type or one effective image model. Existing visuals are never
