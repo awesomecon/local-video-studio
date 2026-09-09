@@ -19,6 +19,7 @@ const ICONS = {
   menu: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round'><path d='M4 6h16M4 12h16M4 18h16'/></svg>",
   script: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3h9l4 4v14H6z'/><path d='M9 9h7M9 13h7M9 17h5'/></svg>",
   storyboard: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/><rect x='12' y='14' width='9' height='7' rx='1'/></svg>",
+  thumbnail: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><circle cx='9' cy='10' r='1.6'/><path d='M5 18l5-5 4 4 3-3 4 4'/></svg>",
   mic: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='9' y='3' width='6' height='11' rx='3'/><path d='M5 11a7 7 0 0 0 14 0M12 18v3'/></svg>",
   music: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M9 18V6l10-2v12'/><circle cx='6.5' cy='18' r='2.5'/><circle cx='16.5' cy='16' r='2.5'/></svg>",
   captions: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='5' width='18' height='14' rx='2'/><path d='M7 13h4M7 16h8M13 13h4'/></svg>",
@@ -153,7 +154,7 @@ export const STAGE_LABELS = {
   quality_control: "Quality check",
   thumbnails: "Thumbnails",
   metadata: "Metadata",
-  render: "Final video render",
+  render: "Final render",
   pipeline: "Full render",
 };
 
@@ -249,8 +250,9 @@ export function toastError(err, context) {
 
 /**
  * Open a modal. Native <dialog> provides backdrop, Esc-to-close, and top-layer
- * stacking. Initial focus goes to the first actionable element; focus is
- * returned to the opener on close.
+ * stacking. Initial focus goes to the first footer action (Cancel in
+ * confirms), else the first body control, else the dialog itself — never the
+ * header close button. Focus is returned to the opener on close.
  *
  * @param {object} opts
  * @param {string} opts.title
@@ -293,9 +295,15 @@ export function openModal({ title, body, actions = [] }) {
   dialog.querySelector(".modal-x").addEventListener("click", close);
   document.body.append(dialog);
   dialog.showModal();
-  // Keep initial focus inside the dialog.
-  const first = dialog.querySelector("button, input, select, textarea, [tabindex]");
-  if (first) first.focus();
+  // Initial focus: the first footer action (Cancel in confirms), else the
+  // first body control, else the dialog itself — never the header close
+  // button, which would put destructive dialogs on the escape hatch.
+  const target =
+    dialog.querySelector(".modal-foot button:not([disabled])")
+    || dialog.querySelector(".modal-body button, .modal-body input, .modal-body select, .modal-body textarea")
+    || null;
+  if (target) target.focus();
+  else { dialog.setAttribute("tabindex", "-1"); dialog.focus(); }
   // Basic focus trap.
   dialog.addEventListener("keydown", (ev) => {
     if (ev.key !== "Tab") return;

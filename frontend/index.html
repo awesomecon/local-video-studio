@@ -16,6 +16,45 @@
       <span class="empty-title">Loading…</span>
     </div>
   </div>
+  <script>
+    // Boot guard (classic, non-module script, so it survives ES-module graph
+    // failures such as a syntax error in any imported page): if the app
+    // module never settles the shell within a few seconds, or a script load
+    // error is reported, swap the perpetual "Loading..." spinner for a
+    // diagnostic message instead of leaving a blank shell.
+    (function () {
+      function fail(reason) {
+        var app = document.getElementById("app");
+        if (!app || app.getAttribute("aria-busy") === "false") return;
+        app.setAttribute("aria-busy", "false");
+        var box = document.createElement("div");
+        box.className = "empty-state";
+        box.style.marginTop = "20%";
+        var title = document.createElement("div");
+        title.className = "empty-title";
+        title.textContent = "Failed to load the studio UI";
+        var msg = document.createElement("div");
+        msg.textContent = reason + " Open the browser console for details.";
+        box.appendChild(title);
+        box.appendChild(msg);
+        app.replaceChildren(box);
+      }
+      // Script/link load errors do not bubble; listen in the capture phase.
+      window.addEventListener("error", function (ev) {
+        var t = ev.target;
+        if (t && (t.tagName === "SCRIPT" || t.tagName === "LINK")) {
+          fail("A script or stylesheet failed to load.");
+        }
+      }, true);
+      setTimeout(function () {
+        fail("The app never finished starting.");
+      }, 6000);
+    })();
+  </script>
   <script type="module" src="js/app.js"></script>
+  <noscript>
+    <p style="padding:24px;font-family:system-ui">Local Video Studio needs
+    JavaScript enabled. Please enable it and reload the page.</p>
+  </noscript>
 </body>
 </html>

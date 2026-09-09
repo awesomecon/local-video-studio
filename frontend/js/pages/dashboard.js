@@ -23,6 +23,7 @@ import {
   toast,
   toastError,
   stageChip,
+  badge,
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
@@ -108,14 +109,16 @@ function renderProjectList() {
             el("div", { style: { fontWeight: "650" } }, p.title),
             el("div", { class: "muted small mono" }, p.slug),
           ),
+          selected ? badge("good", "Selected", false) : null,
           projectStatusBadge(p.status),
           el("div", { class: "muted small nowrap" }, `${fmtDuration(p.target_duration)} · ${p.aspect_ratio}`),
           el("div", { class: "muted small nowrap" }, fmtDate(p.created_at)),
           el("button", {
-            class: "btn btn-sm" + (selected ? "" : " btn-primary"),
+            class: `btn btn-sm${selected ? "" : " btn-primary"}`,
             type: "button",
+            title: "Open project details",
             onclick: () => openProject(p.id),
-          }, selected ? "Selected" : "Open"),
+          }, "Open"),
           el("button", {
             class: "btn btn-sm btn-danger",
             type: "button",
@@ -145,10 +148,8 @@ function renderProjectList() {
       // locally but absent from the incoming list, so the deleted project
       // must be dropped from state first or it would be resurrected.
       const wasSelected = state.currentProjectId === p.id;
-      setState({
-        projects: state.projects.filter((item) => item.id !== p.id),
-        ...(wasSelected ? { currentProjectId: null, snapshot: null } : {}),
-      });
+      if (wasSelected) setState({ currentProjectId: null });
+      setState({ projects: state.projects.filter((item) => item.id !== p.id) });
       if (wasSelected) persistCurrentProject(null);
       toast("good", "Project deleted", p.title);
       load(body, { skeleton: false });

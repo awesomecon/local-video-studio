@@ -1,12 +1,13 @@
 /**
- * Shared application state with a tiny subscription mechanism.
+ * Shared application state.
  *
- * No state-management library: pages read `state` and subscribe to changes
- * via `subscribe`. The only persisted value is the current project id
- * (sessionStorage) — never anything sensitive.
+ * No state-management library: pages read `state` and refresh themselves via
+ * the job-feed live-update hook (see app.js `registerLiveUpdate`). The only
+ * persisted value is the current project id (sessionStorage) — never
+ * anything sensitive.
  */
 
-import { el, fill } from "./dom.js";
+import { el } from "./dom.js";
 
 /**
  * @typedef {"connecting"|"online"|"offline"} ConnectionState
@@ -22,7 +23,6 @@ import { el, fill } from "./dom.js";
  * @property {import("./api.js").SystemStatus | null} systemStatus
  * @property {import("./api.js").Project[]} projects
  * @property {string | null} currentProjectId
- * @property {import("./api.js").ProjectSnapshot | null} snapshot
  * @property {import("./api.js").GenerationJob[]} jobs
  * @property {import("./api.js").ModelList | null} models
  * @property {import("./api.js").LlmModels | null} llmModels
@@ -39,7 +39,6 @@ export const state = {
   systemStatus: null,
   projects: [],
   currentProjectId: null,
-  snapshot: null,
   jobs: [],
   models: null,
   llmModels: null,
@@ -71,25 +70,13 @@ export function persistCurrentProject(id) {
   }
 }
 
-const listeners = new Set();
-
 /**
- * Update state and notify subscribers.
+ * Update state fields in one assignment. Pages refresh via the live-update
+ * hook rather than observing state directly.
  * @param {Partial<AppState>} patch
  */
 export function setState(patch) {
   Object.assign(state, patch);
-  for (const fn of [...listeners]) fn(state);
-}
-
-/**
- * Subscribe to state changes.
- * @param {(s: AppState) => void} fn
- * @returns {() => void} unsubscribe
- */
-export function subscribe(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
 }
 
 /**

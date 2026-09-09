@@ -7,6 +7,9 @@
  * timeline shot clips and other shortcuts can land on the exact shot in the
  * editor's strip. Hash routing keeps deep links working under the FastAPI
  * static mount without a server-side route table.
+ *
+ * Any hash that matches no known route falls through to the `not-found`
+ * screen instead of silently landing on the Dashboard.
  */
 
 /**
@@ -33,6 +36,8 @@ const ROUTES = [
   { re: /^#\/jobs$/, name: "jobs", param: null },
   { re: /^#\/settings$/, name: "settings", param: null },
   { re: /^#\/models$/, name: "models", param: null },
+  // Catch-all: unknown hashes get an honest not-found screen.
+  { re: /./, name: "not-found", param: null },
 ];
 
 /**
@@ -47,7 +52,8 @@ export function sceneEditorHash(sceneId, shotId = null) {
 }
 
 /**
- * Parse the current hash into a route.
+ * Parse the current hash into a route. Unknown hashes resolve to the
+ * `not-found` screen (final catch-all route).
  * @returns {Route}
  */
 export function parseRoute() {
@@ -62,7 +68,7 @@ export function parseRoute() {
       };
     }
   }
-  return { name: "dashboard", param: null };
+  return { name: "not-found", param: null };
 }
 
 /**

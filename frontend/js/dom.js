@@ -16,7 +16,7 @@ const EVENT_ATTRS = new Set([
 const PROPERTY_ATTRS = new Set([
   "value", "for", "colspan", "rowspan", "maxlength", "min", "max", "step",
   "placeholder", "name", "checked", "disabled", "hidden", "open", "multiple",
-  "autofocus", "tabindex", "readonly", "selected", "autofocus",
+  "autofocus", "tabindex", "readonly", "selected",
 ]);
 
 /**
@@ -24,20 +24,22 @@ const PROPERTY_ATTRS = new Set([
  * @template {keyof HTMLElementTagNameMap} T
  * @param {T} tag
  * @param {Record<string, any>} [attrs] — keys: class, style, dataset, onX events,
- *   or any HTML attribute.
+ *   or any HTML attribute. `null`/`undefined` skip the entry; `false` also
+ *   skips plain attributes, but boolean *properties* (disabled, hidden, …)
+ *   honor `false` so an in-place re-build can clear them.
  * @param {(Node | string)[]} children
  * @returns {HTMLElementTagNameMap[T]}
  */
 export function el(tag, attrs = {}, ...children) {
   const node = /** @type {HTMLElementTagNameMap[T]} */ (document.createElement(tag));
   for (const [key, value] of Object.entries(attrs)) {
-    if (value === null || value === undefined || value === false) continue;
+    if (value === null || value === undefined) continue;
     if (key === "class") node.className = value;
     else if (key === "style" && typeof value === "object") Object.assign(node.style, value);
     else if (key === "dataset") Object.assign(node.dataset, value);
-    else if (EVENT_ATTRS.has(key)) node.addEventListener(key.slice(2), value);
+    else if (EVENT_ATTRS.has(key)) { if (value) node.addEventListener(key.slice(2), value); }
     else if (PROPERTY_ATTRS.has(key)) node[key] = value;
-    else node.setAttribute(key, value);
+    else if (value !== false) node.setAttribute(key, value);
   }
   append(node, ...children);
   return node;

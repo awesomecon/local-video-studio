@@ -43,6 +43,7 @@ import { renderExport } from "./pages/export.js";
 import { renderSettings } from "./pages/settings.js";
 import { renderModels } from "./pages/models.js";
 import { renderJobs } from "./pages/jobs.js";
+import { renderNotFound } from "./pages/not-found.js";
 
 /** @typedef {{name: string, hash: string, label: string, icon: string}} NavItem */
 
@@ -53,7 +54,7 @@ const NAV_PRIMARY = /** @type {NavItem[]} */ ([
   { name: "project", hash: "#/project", label: "Project", icon: "folder" },
   { name: "script", hash: "#/script", label: "Script", icon: "script" },
   { name: "storyboard", hash: "#/storyboard", label: "Storyboard", icon: "storyboard" },
-  { name: "thumbnails", hash: "#/thumbnails", label: "Thumbnails", icon: "storyboard" },
+  { name: "thumbnails", hash: "#/thumbnails", label: "Thumbnails", icon: "thumbnail" },
   { name: "voice", hash: "#/voice", label: "Voice", icon: "mic" },
   { name: "music", hash: "#/music", label: "Music", icon: "music" },
   { name: "captions", hash: "#/captions", label: "Captions", icon: "captions" },
@@ -255,8 +256,7 @@ function renderSystem(sys) {
   const gpu = sys.gpu || /** @type {any} */ ({});
   if (gpu.error) {
     slot("gpu").replaceChildren(el("span", {
-      class: "small",
-      style: { color: "var(--critical)" },
+      class: "small critical",
       title: gpu.error.message || "GPU inspection failed",
     }, "GPU unavailable"));
     return;
@@ -269,8 +269,7 @@ function renderSystem(sys) {
   const minFree = Number(gpu.minimum_free_vram_gb) || 0;
   const tight = device.free_gb < minFree;
   slot("gpu").replaceChildren(el("span", {
-    class: "small",
-    style: { color: tight ? "var(--warning)" : "var(--text-2)" },
+    class: `small${tight ? " warning" : " muted"}`,
     title: `${device.used_gb.toFixed(1)} of ${device.total_gb.toFixed(1)} GiB used - heavy jobs need ${minFree.toFixed(0)} GiB free`,
   }, `${device.name} - ${fmtGb(device.free_gb)} free`));
 }
@@ -298,7 +297,7 @@ function renderSwitcher() {
   for (const p of state.projects) {
     select.append(el("option", { value: p.id }, `${p.title} (${p.slug})`));
   }
-  select.disabled = state.connection !== "online";
+  select.disabled = state.connection !== "online" || state.projects.length === 0;
   select.value = state.currentProjectId && state.projects.some((p) => p.id === state.currentProjectId)
     ? state.currentProjectId
     : "";
@@ -466,6 +465,7 @@ const SCREENS = {
   settings: renderSettings,
   models: renderModels,
   jobs: renderJobs,
+  "not-found": renderNotFound,
 };
 
 /**

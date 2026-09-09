@@ -25,12 +25,10 @@
   /* --- Lines ------------------------------------------------------------ */
   --line: #2c2c2a;
   --line-strong: #383835;
-  --hairline: rgba(255, 255, 255, 0.10);
 
   /* --- Accent (restrained) -------------------------------------------- */
   --accent: #3987e5;
   --accent-2: #256abf;
-  --accent-ink: #081726;
   --accent-wash: color-mix(in oklab, var(--accent) 16%, transparent);
 
   /* --- Status (reserved: icon + label, never color alone) -------------- */
@@ -46,6 +44,21 @@
   --critical-ink: color-mix(in oklab, var(--critical) 16%, transparent);
   --offline-ink: color-mix(in oklab, var(--offline) 16%, transparent);
 
+  /* --- Secondary palette ------------------------------------------------ */
+  /* Shot/lane source policy (real | image | h3 | html) and editorial template
+     tints. These are a deliberate secondary palette outside the reserved
+     status set; they are always paired with a label or text, never color
+     alone. */
+  --lane-real: #4caf7d;
+  --lane-image: #8b72f0;
+  --lane-h3: #f08c3a;
+  --lane-html: #3d8fe0;
+  --tpl-archive-canvas: #c9a86a;
+  --tpl-document-reveal: #8fb8a8;
+  --tpl-comparison-canvas: #8b72f0;
+  --tpl-illustration-canvas: #3d8fe0;
+  --tpl-big-text-reveal: #ec835a;
+
   /* --- Typography ------------------------------------------------------ */
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -53,7 +66,6 @@
   --text-sm: 0.82rem;
   --text-md: 0.95rem;
   --text-lg: 1.05rem;
-  --text-xl: 1.3rem;
   --text-2xl: 1.7rem;
   --leading: 1.45;
 
@@ -75,6 +87,11 @@
   --gap: 16px;
   --gap-sm: 10px;
   --gap-lg: 24px;
+
+  /* --- Timeline --------------------------------------------------------- */
+  /* Sticky label column width; timeline.js reads this (single source of
+     truth, no magic number duplicated in JS). */
+  --tl-label-w: 96px;
 }
 
 @media (prefers-reduced-motion: reduce) {
