@@ -218,6 +218,21 @@ def apply_regeneration_staleness(
     return updated
 
 
+def clear_staleness(shot: Shot) -> Shot:
+    """Drop a shot's staleness marker; its visual is fresh again.
+
+    The marker means "an upstream shot regenerated after this shot's media
+    was produced". Producing new media — a generation completing or a
+    manual import replacing the visual — resolves it. Status is untouched:
+    approving a stale shot is an explicit acceptance and keeps the marker.
+    """
+    if not shot.settings.get("staleness"):
+        return shot
+    settings = dict(shot.settings)
+    settings.pop("staleness", None)
+    return shot.model_copy(update={"settings": settings})
+
+
 def provenance_summary(
     shot: Shot,
     assets: Sequence[Asset],
@@ -261,6 +276,7 @@ def provenance_summary(
 __all__ = [
     "RegenerationImpact",
     "apply_regeneration_staleness",
+    "clear_staleness",
     "current_visual_asset",
     "dependency_edges",
     "plan_regeneration",

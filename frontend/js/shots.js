@@ -12,7 +12,7 @@
  * Nothing here fetches or mutates: API calls stay in api.js and the pages.
  */
 
-import { el } from "./dom.js";
+import { el, fmtDate, shortId } from "./dom.js";
 import { badge } from "./ui.js";
 
 /** Editorial lanes (backend ShotLane): source policy, not implementation. */
@@ -344,6 +344,8 @@ export function implicitShotFromScene(scene) {
     overlays: [],
     audio_cues: [],
     implicit: true,
+    stale: false,
+    staleness: null,
   };
 }
 
@@ -360,12 +362,38 @@ export function effectiveShots(scene) {
 }
 
 /**
+ * Human-readable explanation for a shot's staleness marker.
+ * `staleness` carries provenance from the backend: which upstream shot
+ * regenerated, why, and when — surfaced verbatim in the UI ("…tell them why").
+ * @param {Record<string, any>} shot
+ * @param {Array<Record<string, any>>} [shots] — optional known shots used to
+ *   turn the producer's id into a friendly name; falls back to a short id.
+ * @returns {string|null}
+ */
+export function staleReason(shot, shots = []) {
+  const marker = shot && shot.staleness;
+  if (!marker || typeof marker !== "object") return null;
+  let source = "an upstream shot";
+  if (marker.source_shot_id) {
+    const producer = (Array.isArray(shots) ? shots : [])
+      .find((x) => x && x.id === marker.source_shot_id);
+    if (producer) {
+      source = producer.title ? `shot “${producer.title}”` : `shot #${(Number(producer.index) || 0) + 1}`;
+    } else {
+      source = shortId(marker.source_shot_id);
+    }
+  }
+  const when = marker.marked_at ? ` on ${fmtDate(marker.marked_at)}` : "";
+  return `${source} regenerated after this shot's media was produced${when}`;
+}
+
+/**
  * Completion summary preferring the backend's per-scene `shot_summary`
  * block and falling back to local computation from effective shots.
- * `pending` counts shots that are neither ready nor failed; the backend
- * does not expose an explicit stale flag yet (see API_GAPS.md).
+ * `pending` counts shots that are neither ready nor failed; `stale` counts
+ * shots carrying a staleness marker (upstream regeneration after their media).
  * @param {Record<string, any>} scene
- * @returns {{count: number, ready: number, approved: number, failed: number, pending: number, materialized: boolean, rendered: number}}
+ * @returns {{count: number, ready: number, approved: number, failed: number, pending: number, stale: number, materialized: boolean, rendered: number}}
  */
 export function shotSummary(scene) {
   const s = scene && scene.shot_summary;
@@ -374,9 +402,11 @@ export function shotSummary(scene) {
   const readyOf = (list) => list.filter((x) => x.status === "ready" || x.status === "approved").length;
   const approvedOf = (list) => list.filter((x) => x.status === "approved").length;
   const failedOf = (list) => list.filter((x) => x.status === "failed").length;
+  const staleOf = (list) => list.filter((x) => x.stale).length;
   const ready = s ? s.ready || 0 : readyOf(shots);
   const approved = s ? s.approved || 0 : approvedOf(shots);
   const failed = s ? s.failed || 0 : failedOf(shots);
+  const stale = s ? s.stale || 0 : staleOf(shots);
   const rendered = s && Number.isFinite(s.rendered_duration_seconds)
     ? s.rendered_duration_seconds
     : renderedDuration(shots);
@@ -386,6 +416,7 @@ export function shotSummary(scene) {
     approved,
     failed,
     pending: Math.max(0, count - ready - failed),
+    stale,
     materialized: Boolean(s && s.materialized),
     rendered,
   };
@@ -426,6 +457,39 @@ export function shotStatusBadge(status, locked) {
   };
   const pair = map[status] || ["neutral", status || "Unknown"];
   return badge(pair[0], pair[1]);
+}
+
+/**
+ * Imperative phrase describing how a shot's stale marker is cleared.
+ * Reused-media shots are refreshed by re-importing the local file —
+ * regeneration is a no-op for them and never clears the marker — while
+ * every other lane clears by regenerating.
+ * @param {Record<string, any>} shot
+ * @returns {string} e.g. "Regenerate this shot" / "Re-import this shot's media"
+ */
+export function staleClearAction(shot) {
+  return shot && shot.visual_type === "reused_media"
+    ? "Re-import this shot's media"
+    : "Regenerate this shot";
+}
+
+/**
+ * Warning badge for a shot carrying a staleness marker. Approving a stale
+ * shot does NOT clear the marker (approval = explicit acceptance; preflight
+ * still says "regenerate before export"), so approved + stale reads
+ * "Approved but stale" — and the tooltip explains why from the marker's
+ * provenance (which shot regenerated, when).
+ * @param {Record<string, any>} shot
+ * @param {Array<Record<string, any>>} [shots] — known shots for a friendly name
+ * @returns {HTMLElement}
+ */
+export function shotStaleBadge(shot, shots = []) {
+  const why = staleReason(shot, shots)
+    || "an upstream shot regenerated after this shot's media was produced";
+  const label = shot && shot.status === "approved" ? "Approved but stale" : "Stale";
+  const b = badge("warning", label);
+  b.title = `${why}. ${staleClearAction(shot)} to clear the flag; export preflight keeps warning until you do.`;
+  return b;
 }
 
 /**
