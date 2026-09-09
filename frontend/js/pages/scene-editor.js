@@ -1416,36 +1416,6 @@ function shotsController(scene, opts = {}) {
     renderDetail();
   }
 
-  /**
-   * Materialize a legacy scene's projected implicit shot before mutating it.
-   *
-   * API gap (see frontend/API_GAPS.md): PATCH/DELETE/overlay endpoints 404
-   * on the deterministic `<scene>-implicit` id because only /approve
-   * materializes it. Client-side workaround: create one placeholder shot at
-   * index 0 (which materializes the projection verbatim) and immediately
-   * archive that placeholder, leaving exactly the materialized shot behind.
-   * @param {Record<string, any>|null} shot
-   */
-  async function ensureMaterialized(shot) {
-    if (!shot || !shot.implicit) return;
-    const seedDur = Number(shot.duration_seconds) > 0
-      ? Number(shot.duration_seconds)
-      : (plannedDuration > 0 ? plannedDuration : 5);
-    const placeholder = await createShot(state.config, scene.id, {
-      index: 0,
-      title: "",
-      duration_seconds: seedDur,
-    });
-    try {
-      await deleteShot(state.config, placeholder.id);
-    } catch (err) {
-      toastError(err, "archive the materialization placeholder");
-      throw err;
-    }
-    toast("info", "Legacy shot materialized",
-      "The projected single-visual shot is now a real, stored shot.");
-  }
-
   /* --- selected-shot detail ------------------------------------------- */
 
   function renderDetail() {
@@ -1737,7 +1707,6 @@ function shotsController(scene, opts = {}) {
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
       try {
-        await ensureMaterialized(shot);
         await editShot(state.config, shot.id, built.body);
         if (reusedFile) {
           await importShotReusedMedia(state.config, shot.id, reusedFile, {
@@ -1785,7 +1754,6 @@ function shotsController(scene, opts = {}) {
       upBtn.disabled = true;
       downBtn.disabled = true;
       try {
-        await ensureMaterialized(shot);
         await editShot(state.config, shot.id, { index: targetIdx });
         dirty = false;
         await pull();
@@ -1846,7 +1814,6 @@ function shotsController(scene, opts = {}) {
       if (!ok) return;
       archiveBtn.disabled = true;
       try {
-        await ensureMaterialized(shot);
         const result = await deleteShot(state.config, shot.id);
         toast("info", "Shot archived",
           `${result.archived_assets.length} media file(s) archived`
@@ -1901,7 +1868,6 @@ function shotsController(scene, opts = {}) {
       const activeBtn = force ? regenerateBtn : generateBtn;
       activeBtn.textContent = force ? "Regenerating…" : "Generating…";
       try {
-        await ensureMaterialized(shot);
         const job = force
           ? await regenerateShot(state.config, shot.id)
           : await generateShot(state.config, shot.id);
@@ -2166,7 +2132,6 @@ function shotsController(scene, opts = {}) {
       if (!ok) return;
       removeBtn.disabled = true;
       try {
-        await ensureMaterialized(shot);
         await removeShotOverlay(state.config, shot.id, cue.id);
         toast("info", "Overlay removed", `Shot #${shot.index + 1}`);
         await pullQuietPreservingForm();
@@ -2356,7 +2321,6 @@ function shotsController(scene, opts = {}) {
 
       submitBtn.disabled = true;
       try {
-        await ensureMaterialized(shot);
         if (isEdit && existing) {
           await patchShotOverlay(state.config, shot.id, existing.id, body);
           toast("good", "Overlay saved", `Shot #${shot.index + 1}`);

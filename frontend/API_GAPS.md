@@ -38,6 +38,7 @@ matching response shapes (checked against `backend/api/main.py`):
 - Generated assets are exposed through project- and asset-scoped, traversal-safe local URLs.
 - Caption files use the same asset endpoint.
 - Local LLM model selection is available through `PUT /api/llm/models` and can be persisted to project metadata.
+- Implicit shots are materialized on first mutation: `PATCH`/`DELETE /api/shots/<scene>-implicit`, all three overlay routes, and `generate`/`regenerate` now materialize the legacy projection server-side (`_resolve_shot` in `pipeline/service.py`), so the Scene Editor no longer needs the create-and-archive placeholder workaround.
 
 ## Remaining gap
 
@@ -72,27 +73,6 @@ and the shared domain helper module `js/shots.js`:
 
 Snapshot integration verified too: each scene payload carries `shots[]`
 (with `implicit: true` on projected entries) plus `shot_summary`.
-
-### Gap: implicit shots are refused by every mutation endpoint except approve (workaround shipped)
-
-- **Affected screens:** Scene Editor shot strip/forms for any scene that
-  predates stored shots (i.e. every existing project).
-- **Verified:** `GET .../shots` projects a deterministic implicit shot with id
-  `<scene-id>-implicit`, but `PATCH /api/shots/<scene>-implicit`,
-  `DELETE /api/shots/<scene>-implicit`, and all three overlay routes return
-  404 `shot not found` for that id, because `_update_shot_locked`,
-  `_delete_shot_locked`, and `_editable_shot_context` resolve through
-  `database.get_shot()` and never materialize. Only `POST .../approve`
-  special-cases the implicit id (`pipeline/service.py` `approve_shot`).
-- **Frontend workaround:** before the first save/move/archive/overlay
-  mutation of an implicit shot, the Scene Editor creates a placeholder shot
-  at index 0 (which materializes the projection verbatim) and immediately
-  archives that placeholder, leaving exactly the materialized shot behind.
-  This works but costs two extra requests and briefly inserts a row.
-- **Requested change (integration):** materialize-on-first-mutation inside
-  `update_shot` / `delete_shot` / `_editable_shot_context` (mirroring
-  `approve_shot`), or expose an explicit
-  `POST /api/scenes/{scene_id}/shots/materialize`.
 
 ### Gap: shot_summary has ready/approved/failed but no stale count
 

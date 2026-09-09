@@ -1616,6 +1616,7 @@ export function createShot(config, sceneId, body, opts = {}) {
 /**
  * PATCH /api/shots/{shot_id} — partial edit (extra="forbid"); approval and
  * locking go through approveShot only. Refuses locked shots with 409.
+ * Materializes a legacy scene's implicit shot id before applying the edit.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} shotId
  * @param {Record<string, any>} body — ShotEdit fields; omitted keys keep values
@@ -1631,7 +1632,8 @@ export function editShot(config, shotId, body, opts = {}) {
 /**
  * DELETE /api/shots/{shot_id} — guarded archive: refuses locked shots with
  * 409, archives shot media, reverts to the implicit projection when the last
- * stored shot goes away (non-idempotent).
+ * stored shot goes away (non-idempotent). Materializes a legacy scene's
+ * implicit shot id before archiving it.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} shotId
  * @param {{archiveMedia?: boolean, signal?: AbortSignal}} [opts]
@@ -1645,8 +1647,8 @@ export function deleteShot(config, shotId, opts = {}) {
 }
 
 /**
- * POST /api/shots/{shot_id}/approve — approve and optionally lock; also the
- * materialization path for a legacy scene's implicit shot id.
+ * POST /api/shots/{shot_id}/approve — approve and optionally lock; like every
+ * other shot mutation it materializes a legacy scene's implicit shot id.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} shotId
  * @param {{lock?: boolean}} [body]

@@ -227,6 +227,96 @@ def test_approve_shot_on_legacy_scene_materializes_and_locks_state(tmp_path: Pat
     assert view["approved"] == 1
 
 
+def test_update_shot_materializes_unmaterialized_implicit_id(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    project, scene = make_project_with_scene(service)
+    asset = service.database.save_asset(Asset(
+        project_id=project.id, scene_id=scene.id, type=AssetType.IMAGE,
+        filepath=Path("scenes/001/visual.png"), backend="mock", model="mock-v1",
+        seed=3, settings={"role": "visual"},
+    ))
+
+    updated = service.update_shot(f"{scene.id}-implicit", {"title": "first edit"})
+
+    assert updated.id == f"{scene.id}-implicit"
+    assert updated.title == "first edit"
+    view = service.list_scene_shots(scene.id)
+    assert view["materialized"] is True
+    assert view["count"] == 1
+    # The scene's current visual asset is attached, never replaced.
+    reloaded = service.database.get_asset(asset.id)
+    assert reloaded is not None
+    assert reloaded.shot_id == updated.id
+    assert reloaded.settings.get("role") == "visual"
+
+
+def test_delete_shot_materializes_unmaterialized_implicit_id(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    _, scene = make_project_with_scene(service)
+
+    result = service.delete_shot(f"{scene.id}-implicit")
+
+    assert result["deleted_shot_id"] == f"{scene.id}-implicit"
+    assert result["remaining_shots"] == 0
+    assert result["scene_reverted_to_implicit"] is True
+    assert service.list_scene_shots(scene.id)["materialized"] is False
+
+
+def test_stale_implicit_id_is_rejected_once_scene_has_stored_shots(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    _, scene = make_project_with_scene(service)
+    # Creating a second beat materializes the projection; deleting it leaves
+    # stored shots under non-implicit ids, so the implicit id is stale.
+    service.create_shot(scene.id, {"duration_seconds": 4})
+    service.delete_shot(f"{scene.id}-implicit")
+
+    with pytest.raises(KeyError, match="shot not found"):
+        service.update_shot(f"{scene.id}-implicit", {"title": "too late"})
+    with pytest.raises(KeyError, match="shot not found"):
+        service.delete_shot(f"{scene.id}-implicit")
+
+
+def test_overlay_endpoints_materialize_unmaterialized_implicit_shot(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    _, scene = make_project_with_scene(service)
+    implicit_id = f"{scene.id}-implicit"
+
+    with_overlay = service.add_shot_overlay(implicit_id, {
+        "kind": "exact_text",
+        "exact_text": "AUGUST 7, 1976",
+        "start_seconds": 0.5,
+        "duration_seconds": 1.5,
+    })
+    assert with_overlay.id == implicit_id
+    overlay = with_overlay.overlays[0]
+    assert overlay.exact_text == "AUGUST 7, 1976"
+
+    patched = service.patch_shot_overlay(implicit_id, overlay.id, {"opacity": 0.8})
+    assert patched.overlays[0].opacity == 0.8
+
+    scoped = service.patch_project_overlay(
+        scene.project_id, overlay.id, {"start_seconds": 1.0},
+    )
+    assert scoped.overlays[0].start_seconds == 1.0
+
+    removed = service.remove_shot_overlay(implicit_id, overlay.id)
+    assert removed.overlays == []
+    assert service.list_scene_shots(scene.id)["materialized"] is True
+
+
+def test_queue_shot_generation_materializes_unmaterialized_implicit_shot(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    _, scene = make_project_with_scene(service)
+    implicit_id = f"{scene.id}-implicit"
+
+    job = service.queue_shot_generation(implicit_id, regenerate=False)
+
+    assert job.shot_id == implicit_id
+    assert service.list_scene_shots(scene.id)["materialized"] is True
+
+
 def test_locked_scene_blocks_shot_writes(tmp_path: Path) -> None:
     from backend.pipeline.service import PipelineError
 
@@ -533,6 +623,43 @@ def test_api_shot_generation_and_scene_render_endpoints(api) -> None:
 
     missing = client.post("/api/shots/does-not-exist/generate", json={})
     assert missing.status_code == 404
+
+
+def test_api_implicit_id_endpoints_materialize_on_first_mutation(api) -> None:
+    """PATCH/DELETE/overlays/generate used to 404 on the projected id."""
+    client, service, _, scene = api
+    implicit_id = f"{scene.id}-implicit"
+
+    listed = client.get(f"/api/scenes/{scene.id}/shots")
+    assert listed.json()["materialized"] is False
+
+    patched = client.patch(f"/api/shots/{implicit_id}", json={"title": "via api"})
+    assert patched.status_code == 200
+    assert patched.json()["title"] == "via api"
+
+    added = client.post(f"/api/shots/{implicit_id}/overlays", json={
+        "kind": "exact_text", "exact_text": "CANNAL",
+        "start_seconds": 0.2, "duration_seconds": 1.0,
+    })
+    assert added.status_code == 201
+    overlay = added.json()["overlays"][0]
+
+    removed = client.delete(f"/api/shots/{implicit_id}/overlays/{overlay['id']}")
+    assert removed.status_code == 200
+
+    generated = client.post(f"/api/shots/{implicit_id}/generate", json={})
+    assert generated.status_code == 202
+
+    deleted = client.delete(f"/api/shots/{implicit_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["scene_reverted_to_implicit"] is True
+
+    # The scene is back to its legacy projection; a fresh implicit mutation
+    # materializes again instead of 404ing.
+    relisted = client.get(f"/api/scenes/{scene.id}/shots")
+    assert relisted.json()["materialized"] is False
+    repatched = client.patch(f"/api/shots/{implicit_id}", json={"title": "again"})
+    assert repatched.status_code == 200
 
 
 # ---------------------------------------------------------------------------
