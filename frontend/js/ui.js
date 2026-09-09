@@ -196,8 +196,11 @@ const TOAST_TTL = 6000;
  * @param {"good"|"warning"|"critical"|"info"} kind
  * @param {string} title
  * @param {string} [message]
+ * @param {{label: string, onClick: () => void} | null} [action] - optional
+ *   single button; clicking it dismisses the toast, then runs the callback
+ *   (e.g. navigate to the screen the message is about).
  */
-export function toast(kind, title, message) {
+export function toast(kind, title, message, action = null) {
   let region = document.getElementById("toasts");
   if (!region) {
     region = el("div", { id: "toasts" });
@@ -209,10 +212,17 @@ export function toast(kind, title, message) {
       el("div", { class: "t-title" }, title),
       message ? el("div", { class: "muted small" }, message) : null,
     ),
+    action ? el("button", { class: "btn btn-sm t-action", type: "button" }, action.label) : null,
     el("button", { class: "btn btn-ghost btn-sm t-close", type: "button", "aria-label": "Dismiss" }, icon("x", 14)),
   );
   const dismiss = () => node.remove();
   node.querySelector(".t-close").addEventListener("click", dismiss);
+  if (action) {
+    node.querySelector(".t-action").addEventListener("click", () => {
+      dismiss();
+      action.onClick();
+    });
+  }
   region.append(node);
   while (region.children.length > 4) region.firstElementChild?.remove();
   setTimeout(dismiss, TOAST_TTL);

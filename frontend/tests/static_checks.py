@@ -10,7 +10,7 @@ Node is not assumed, so the whole suite runs on python3 (stdlib only):
   3. Route wiring          - every router.js route name has a SCREENS entry in
      app.js (and vice versa); every sidebar nav hash matches a router regex.
   4. Security              - no LLM key name in the frontend; no 0.0.0.0;
-     storage keys restricted to the two known non-sensitive ones; no external
+     storage keys restricted to the known non-sensitive ones; no external
      http(s) hosts; no telemetry APIs.
   5. Structure             - no package/lock/build artifacts; index.html loads
      the module entry and every referenced local asset exists.
@@ -208,7 +208,11 @@ def check_routes() -> None:
 # 4. security
 # ---------------------------------------------------------------------------
 
-ALLOWED_STORAGE_KEYS = {"lvs-current-project", "lvs-nav-collapsed"}
+ALLOWED_STORAGE_KEYS = {
+    "lvs-current-project",
+    "lvs-nav-collapsed",
+    "lvs-recovery-seen",
+}
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "www.w3.org"}  # last: SVG namespace
 STORAGE_CALL_RE = re.compile(
     r"(?:localStorage|sessionStorage)\.(?:set|get|remove)Item\(\s*([^,)]+)")

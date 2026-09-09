@@ -925,7 +925,7 @@ export function buildEditorialDisplayControls(
 
   /** @type {HTMLInputElement[]} */
   const controls = [];
-  const row = el("div", { class: "row mt", "aria-label": "Editorial display settings" },
+  const row = el("div", { class: "row mt ed-settings-row", "aria-label": "Editorial display settings" },
     el("span", { class: "muted small" }, "Display settings:"));
   const makeCheckbox = (key, label, value) => {
     const input = el("input", { type: "checkbox", checked: value });

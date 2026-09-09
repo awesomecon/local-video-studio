@@ -15,7 +15,7 @@
 import { el } from "../dom.js";
 import { state } from "../state.js";
 import {
-  health, systemStatus, models, projectModels, freeComfyMemory, unloadIdeogram4, llmModels, selectLlmModel,
+  health, systemStatus, models, projectModels, freeComfyMemory, unloadIdeogram4, llmModels, selectLlmModel, listProjects,
 } from "../api.js";
 import { loadingState, errorPanel, badge, icon, toast, toastError } from "../ui.js";
 import { parseRoute } from "../router.js";
@@ -87,13 +87,14 @@ function modelsPanel() {
   async function load(region) {
     region.replaceChildren(loadingState(6));
     try {
-      const [sys, list] = await Promise.all([
+      const [sys, list, projects] = await Promise.all([
         systemStatus(state.config),
         state.currentProjectId
           ? projectModels(state.config, state.currentProjectId)
           : models(state.config),
+        listProjects(state.config),
       ]);
-      region.replaceChildren(buildAll(sys, list));
+      region.replaceChildren(buildAll(sys, list, projects.recovery));
     } catch (err) {
       region.replaceChildren(errorPanel(err,
         el("button", { class: "btn", type: "button", onclick: () => load(region) }, "Retry"),
@@ -106,14 +107,50 @@ function modelsPanel() {
 }
 
 /**
+ * Persistent on-disk recovery entries from `GET /api/projects` (recovered /
+ * orphaned / conflict / unreadable project directories). The boot toast
+ * reports the same entries transiently; this panel keeps a persistent
+ * conflict visible across boots and is the destination of the toast's View
+ * button. Nothing is mutated here — the backend already left the files
+ * untouched, we only read its report.
+ * @param {Array<{type: string, slug?: string, project_id?: string, detail: string}> | null | undefined} recovery
+ * @returns {HTMLElement | null}
+ */
+function recoveryPanel(recovery) {
+  if (!Array.isArray(recovery) || !recovery.length) return null;
+  return el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("span", { class: "panel-title" }, "Project recovery"),
+      el("span", { class: "spacer" }),
+      badge("warning", `${recovery.length} ${recovery.length === 1 ? "issue" : "issues"}`),
+    ),
+    el("div", { class: "panel-body" },
+      el("div", { class: "warning-list" },
+        ...recovery.map((r) =>
+          el("div", { class: "witem" }, icon("alert", 16),
+            el("span", {}, `${r.slug || r.type}: ${r.detail || "no detail"}`),
+          ),
+        ),
+      ),
+      el("p", { class: "small muted" },
+        "The backend reconciled on-disk project state at startup and left the files untouched. "
+        + "These entries reappear on every boot until the underlying mismatch is resolved, "
+        + "for example by renaming the on-disk directory to the slug stored in its project.json."),
+    ),
+  );
+}
+
+/**
  * @param {import("../api.js").SystemStatus} sys
  * @param {import("../api.js").ModelList} list
+ * @param {Array<{type: string, slug?: string, project_id?: string, detail: string}> | null | undefined} recovery
  * @returns {HTMLElement}
  */
-function buildAll(sys, list) {
+function buildAll(sys, list, recovery) {
   const env = sys.environment;
   const parts = [
     classificationPanel(env),
+    recoveryPanel(recovery),
     runtimePanel(env),
     gpuPanel(sys),
     h3ReadinessPanel(sys),

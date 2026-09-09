@@ -207,7 +207,10 @@ function buildTimeline(scenes, assets, stages, project, zoom, view) {
     renderSceneLane(sceneLane, layout, scale, view, shotSpans, expandedSpanSeconds, rerender);
     renderOverlayLane(overlayLane, layout, scale, view, shotSpans);
     renderStageLane(narrationLane, stages, "narration", total, scale);
-    renderStageLane(musicLane, stages, "music", total, scale);
+    // A recorded music input is not the generation stage: name it as such so
+    // a pending stage doesn't read as "no music" (the Export page says
+    // "music recorded" for the same input).
+    renderStageLane(musicLane, stages, "music", total, scale, hasRecordedInput(assets, "music"));
     renderStageLane(captionsLane, stages, "subtitles", total, scale);
     rendered = true;
   }
@@ -575,18 +578,34 @@ function renderOverlayLane(lane, layout, scale, view, shotSpans) {
 }
 
 /**
+ * Does the snapshot carry a recorded input asset for a role (e.g. a music
+ * track the user uploaded instead of generating)? Same check the Export
+ * page's readiness summary uses.
+ * @param {import("../api.js").Asset[]} assets
+ * @param {string} role
+ * @returns {boolean}
+ */
+function hasRecordedInput(assets, role) {
+  return assets.some((a) => a.settings && a.settings.role === role);
+}
+
+/**
  * A single full-length clip for a stage: solid when the stage has completed,
  * a dashed placeholder (honest "not yet") when it has not.
  * @param {Record<string, {status?: string}>} stages
  * @param {string} stage
  * @param {number} total
  * @param {number} scale
+ * @param {boolean} [recordedInput] - a recorded input for this stage's role
+ *   exists; a pending stage then says so instead of "not generated yet"
  */
-function renderStageLane(lane, stages, stage, total, scale) {
+function renderStageLane(lane, stages, stage, total, scale, recordedInput = false) {
   const record = stages[stage];
   const status = (record && record.status) || "pending";
   const done = status === "completed";
-  const label = done ? "complete" : `not generated yet (${status})`;
+  const label = done ? "complete"
+    : recordedInput ? "recorded input in use; generation stage pending"
+    : `not generated yet (${status})`;
   lane.replaceChildren(el("div", {
     class: `tl-clip tl-stage ${done ? "done" : "pending"}`,
     style: { left: "1px", width: `${Math.max(2, total * scale - 2)}px` },
