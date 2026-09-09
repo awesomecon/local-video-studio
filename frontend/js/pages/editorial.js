@@ -336,13 +336,18 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
   function paintStatusAndNotes(editorial) {
     const planState = editorialPlanState(editorial);
     if (statusHost) {
+      // Spread an array for the conditional second child: native
+      // replaceChildren() coerces a bare `null` argument to the text "null"
+      // (unlike the local el()/fill() helpers, which skip nulls).
       statusHost.replaceChildren(
         planState.kind === "stale"
           ? badge("warning", "Edit Plan is stale")
           : planState.kind === "untracked"
             ? badge("neutral", "Edit Plan available")
             : badge("good", "Edit Plan available"),
-        planState.kind === "current" ? el("span", { class: "muted small" }, "Current") : null,
+        ...(planState.kind === "current"
+          ? [el("span", { class: "muted small" }, "Current")]
+          : []),
       );
     }
     if (noteHost) {

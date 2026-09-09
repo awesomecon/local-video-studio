@@ -239,6 +239,10 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 .toast .t-msg { min-width: 0; }
 .toast .t-msg .t-title { font-weight: 650; }
 .toast .t-close { margin-left: auto; }
+/* Optional action button (e.g. the recovery toast's View): sits against the
+   dismiss button; without it, the dismiss button keeps the auto margin. */
+.toast .t-action { margin-left: auto; flex: none; }
+.toast .t-action + .t-close { margin-left: 0; }
 
 /* --- Job monitor rows --------------------------------------------------------- */
 .job-row {
@@ -910,7 +914,10 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 }
 
 /* Time-proportional composition strip (flex-grow tracks duration; the
-   min/max width clamp keeps short and long compositions both readable). */
+   min/max width clamp keeps short and long compositions both readable).
+   The strip scrolls; make that legible instead of a hard clip: a thin
+   visible scrollbar plus a soft fade on the right edge, so a cut-off card
+   reads as "more, scroll" rather than "broken". */
 .ed-strip {
   display: flex;
   align-items: stretch;
@@ -918,6 +925,16 @@ a:focus-visible { box-shadow: var(--focus-ring); }
   overflow-x: auto;
   overscroll-behavior-x: contain;
   padding: 6px 2px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
+.ed-strip::-webkit-scrollbar { height: 8px; }
+.ed-strip::-webkit-scrollbar-track { background: transparent; }
+.ed-strip::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 4px;
 }
 .ed-card {
   flex: 1 1 0;
@@ -1038,6 +1055,17 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 .ed-layout .row > .muted { flex: none; white-space: nowrap; }
 .ed-layout .row input[type="number"] { width: 130px; }
 .ed-layout .row input[type="text"] { max-width: 100%; }
+/* Editorial display-settings row (built by buildEditorialDisplayControls):
+   in the narrow right column the row wraps, and a plain inline label can
+   split between its text and its control, leaving the label flush against
+   the control. Making each label an atomic inline-flex item with an
+   explicit gap keeps every label+control pair intact when it wraps. */
+.ed-settings-row > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ed-settings-row > label input[type="checkbox"] { flex: none; }
 .ed-layout select { min-width: 168px; }
 
 /* Shared inline error surface above the workspace grid. */

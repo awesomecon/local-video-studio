@@ -351,19 +351,68 @@ async function bootSystem() {
   }
 }
 
+/**
+ * localStorage key for the recovery-set fingerprint (see
+ * recoveryFingerprint). Non-sensitive: a sorted list of backend-provided
+ * recovery entries, used only to avoid re-toasting a persistent conflict on
+ * every boot.
+ */
+const RECOVERY_SEEN_KEY = "lvs-recovery-seen";
+
+/**
+ * Stable fingerprint of a recovery set: it changes exactly when the set of
+ * entries (type, slug, project, detail) changes.
+ * @param {Array<{type: string, slug?: string, project_id?: string, detail: string}>} recovery
+ * @returns {string}
+ */
+function recoveryFingerprint(recovery) {
+  return JSON.stringify(
+    recovery
+      .map((r) => [r.type || "", r.slug || "", r.project_id || "", r.detail || ""])
+      .sort(),
+  );
+}
+
+/**
+ * Surface the backend's on-disk recovery report once per *change*, not once
+ * per boot: the same persistent conflict (e.g. a directory whose name does
+ * not match its project slug) is returned by GET /api/projects on every
+ * startup, so a boot-time-only toast is noise. The fingerprint is persisted
+ * in localStorage; when storage is unavailable the toast falls back to
+ * showing every time (honest over silent). The message names each entry
+ * (slug + human detail) and offers a View button to the Models screen, which
+ * renders the same entries persistently.
+ * @param {Array<{type: string, slug?: string, project_id?: string, detail: string}>} recovery
+ */
+function noteRecoveryChange(recovery) {
+  const current = recoveryFingerprint(recovery);
+  let previous = null;
+  try { previous = localStorage.getItem(RECOVERY_SEEN_KEY); } catch { /* storage unavailable */ }
+  if (previous === current) return;
+  try { localStorage.setItem(RECOVERY_SEEN_KEY, current); } catch { /* storage unavailable */ }
+  if (!recovery.length) {
+    if (previous !== null) {
+      toast("good", "Project recovery", "The previously reported recovery issues no longer appear on startup.");
+    }
+    return;
+  }
+  const shown = recovery.slice(0, 3).map((r) => {
+    const detail = (r.detail || "no detail").replace(/[.!?\s]+$/, "");
+    return `${r.slug || r.type}: ${detail}.`;
+  });
+  if (recovery.length > 3) shown.push(`…and ${recovery.length - 3} more`);
+  toast("warning", "Project recovery",
+    `${shown.join(" — ")} No files were deleted.`,
+    { label: "View", onClick: () => navigate("#/models") },
+  );
+}
+
 async function bootProjects() {
   try {
     const list = await listProjects(state.config);
     const incoming = Array.isArray(list.projects) ? list.projects : [];
     reconcileProjects(incoming);
-    if (Array.isArray(list.recovery) && list.recovery.length) {
-      const counts = list.recovery.reduce((acc, r) => {
-        acc[r.type] = (acc[r.type] || 0) + 1;
-        return acc;
-      }, {});
-      const summary = Object.entries(counts).map(([t, n]) => `${n} ${t}`).join(", ");
-      toast("warning", "Project recovery", `Reconciled on-disk state: ${summary}. No files were deleted.`);
-    }
+    noteRecoveryChange(Array.isArray(list.recovery) ? list.recovery : []);
   } catch {
     // Keep the existing in-memory list (e.g. a just-created project) rather than
     // clearing it because a background boot fetch failed.
