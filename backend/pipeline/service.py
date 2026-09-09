@@ -3470,6 +3470,29 @@ class PipelineService:
         self._invalidate_compiled_scene(project, scene)
         return persisted
 
+    def _resolve_shot(self, shot_id: str) -> Shot:
+        """Resolve a stored shot, materializing a legacy implicit projection.
+
+        A deterministic ``<scene-id>-implicit`` id may refer to a legacy scene
+        whose single shot was never stored. The first mutation materializes
+        the projection verbatim (attaching the scene's current visual asset),
+        so every shot endpoint shares one behavior instead of only ``approve``
+        understanding the implicit id. Callers must hold ``self._lock``.
+        """
+        shot = self.database.get_shot(shot_id)
+        if shot is not None:
+            return shot
+        if not shot_id.endswith("-implicit"):
+            raise KeyError(f"shot not found: {shot_id}")
+        scene = self._scene_or_key_error(shot_id[: -len("-implicit")])
+        if self.shots_for_scene(scene):
+            raise KeyError(f"shot not found: {shot_id}")
+        self._materialize_implicit_shot(self._project(scene.project_id), scene)
+        shot = self.database.get_shot(shot_id)
+        if shot is None:
+            raise KeyError(f"shot not found: {shot_id}")
+        return shot
+
     def _materialize_implicit_shot(self, project: Project, scene: Scene) -> Shot:
         """Turn a legacy single-visual scene into one concrete stored shot.
 
@@ -3539,9 +3562,7 @@ class PipelineService:
             return self._update_shot_locked(shot_id, changes)
 
     def _update_shot_locked(self, shot_id: str, changes: dict[str, Any]) -> Shot:
-        shot = self.database.get_shot(shot_id)
-        if shot is None:
-            raise KeyError(f"shot not found: {shot_id}")
+        shot = self._resolve_shot(shot_id)
         if shot.locked:
             raise PipelineError("unlock the shot before editing it")
         scene = self._scene_or_key_error(shot.scene_id)
@@ -3595,9 +3616,7 @@ class PipelineService:
             return self._delete_shot_locked(shot_id, archive_media=archive_media)
 
     def _delete_shot_locked(self, shot_id: str, *, archive_media: bool) -> dict[str, Any]:
-        shot = self.database.get_shot(shot_id)
-        if shot is None:
-            raise KeyError(f"shot not found: {shot_id}")
+        shot = self._resolve_shot(shot_id)
         if shot.locked:
             raise PipelineError("unlock the shot before archiving it")
         scene = self._scene_or_key_error(shot.scene_id)
@@ -3654,23 +3673,7 @@ class PipelineService:
 
     def approve_shot(self, shot_id: str, *, lock: bool = False) -> Shot:
         with self._lock:
-            shot = self.database.get_shot(shot_id)
-            if shot is None:
-                # The deterministic implicit id may refer to a legacy scene
-                # whose single shot was never materialized.
-                scene_id = shot_id[: -len("-implicit")] if shot_id.endswith("-implicit") \
-                    else None
-                scene = (
-                    self._scene_or_key_error(scene_id)
-                    if scene_id else None
-                )
-                if scene is None or self.shots_for_scene(scene):
-                    raise KeyError(f"shot not found: {shot_id}")
-                self._materialize_implicit_shot(
-                    self._project(scene.project_id), scene,
-                )
-                shot = self.database.get_shot(shot_id)
-                assert shot is not None
+            shot = self._resolve_shot(shot_id)
             scene = self._scene_or_key_error(shot.scene_id)
             project = self._project(scene.project_id)
             status = ShotStatus.APPROVED
@@ -3686,9 +3689,7 @@ class PipelineService:
             return updated
 
     def _editable_shot_context(self, shot_id: str) -> tuple[Shot, Scene, Project]:
-        shot = self.database.get_shot(shot_id)
-        if shot is None:
-            raise KeyError(f"shot not found: {shot_id}")
+        shot = self._resolve_shot(shot_id)
         if shot.locked:
             raise PipelineError("unlock the shot before editing it")
         scene = self._scene_or_key_error(shot.scene_id)
@@ -3838,9 +3839,7 @@ class PipelineService:
     ) -> Asset:
         """Generate (or regenerate) one shot's visual through its production lane."""
         with self._lock:
-            shot = self.database.get_shot(shot_id)
-            if shot is None:
-                raise KeyError(f"shot not found: {shot_id}")
+            shot = self._resolve_shot(shot_id)
             if shot.locked:
                 raise PipelineError("unlock the shot before regenerating it")
             scene = self._scene_or_key_error(shot.scene_id)
@@ -4330,9 +4329,7 @@ class PipelineService:
         """
         if self.mock_mode:
             return
-        shot = self.database.get_shot(shot_id)
-        if shot is None:
-            raise KeyError(f"shot not found: {shot_id}")
+        shot = self._resolve_shot(shot_id)
         try:
             resolve_lane_target(shot, self.registry, mock_mode=False)
         except LaneResolutionError as exc:
@@ -4344,32 +4341,31 @@ class PipelineService:
         Unwired lanes raise here, so a rejected request never leaves a doomed
         job row behind.
         """
-        self.validate_shot_lane(shot_id)
-        shot = self.database.get_shot(shot_id)
-        if shot is None:
-            raise KeyError(f"shot not found: {shot_id}")
-        scene = self._scene_or_key_error(shot.scene_id)
-        project = self._project(scene.project_id)
-        active = next(
-            (
-                j for j in self.jobs.list(project.id)
-                if j.stage == "shot_generate" and j.shot_id == shot_id
-                and j.status not in {
-                    JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED,
-                }
-            ),
-            None,
-        )
-        if active is not None:
-            raise PipelineError(
-                "A generation job for this shot is already queued or running."
+        with self._lock:
+            self.validate_shot_lane(shot_id)
+            shot = self._resolve_shot(shot_id)
+            scene = self._scene_or_key_error(shot.scene_id)
+            project = self._project(scene.project_id)
+            active = next(
+                (
+                    j for j in self.jobs.list(project.id)
+                    if j.stage == "shot_generate" and j.shot_id == shot_id
+                    and j.status not in {
+                        JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED,
+                    }
+                ),
+                None,
             )
-        return self.jobs.enqueue(GenerationJob(
-            project_id=project.id, scene_id=scene.id, shot_id=shot_id,
-            stage="shot_generate",
-            backend="mock" if self.mock_mode else "automatic",
-            parameters={"force": regenerate},
-        ))
+            if active is not None:
+                raise PipelineError(
+                    "A generation job for this shot is already queued or running."
+                )
+            return self.jobs.enqueue(GenerationJob(
+                project_id=project.id, scene_id=scene.id, shot_id=shot_id,
+                stage="shot_generate",
+                backend="mock" if self.mock_mode else "automatic",
+                parameters={"force": regenerate},
+            ))
 
     def run_shot_generation_job(self, job_id: str) -> None:
         """Background runner: drive one queued shot_generate row to a terminal state."""
