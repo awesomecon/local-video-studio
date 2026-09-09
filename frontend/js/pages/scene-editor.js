@@ -88,6 +88,7 @@ import {
   sceneHasExplicitShots,
   shotStatusBadge,
   shotStaleBadge,
+  staleClearAction,
   staleReason,
   transitionOverlap,
   fmtSecs,
@@ -1666,7 +1667,7 @@ function shotsController(scene, opts = {}) {
       class: "btn btn-sm", type: "button",
       hidden: shot.status === "approved",
       title: shot.stale
-        ? "Mark this shot approved. Approval records your acceptance; the stale flag stays until you regenerate."
+        ? `Mark this shot approved. Approval records your acceptance; the stale flag stays until you ${shot.visual_type === "reused_media" ? "re-import its media" : "regenerate it"}.`
         : "Mark this shot approved.",
     }, "Approve");
     const lockBtn = el("button", {
@@ -1912,7 +1913,7 @@ function shotsController(scene, opts = {}) {
           approved
             ? " You approved it — that records your acceptance but keeps the flag. "
             : " ",
-          "Regenerate this shot to clear the flag before final export."),
+          staleClearAction(shot) + " to clear the flag before final export."),
       ));
     }
 

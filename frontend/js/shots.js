@@ -460,6 +460,20 @@ export function shotStatusBadge(status, locked) {
 }
 
 /**
+ * Imperative phrase describing how a shot's stale marker is cleared.
+ * Reused-media shots are refreshed by re-importing the local file —
+ * regeneration is a no-op for them and never clears the marker — while
+ * every other lane clears by regenerating.
+ * @param {Record<string, any>} shot
+ * @returns {string} e.g. "Regenerate this shot" / "Re-import this shot's media"
+ */
+export function staleClearAction(shot) {
+  return shot && shot.visual_type === "reused_media"
+    ? "Re-import this shot's media"
+    : "Regenerate this shot";
+}
+
+/**
  * Warning badge for a shot carrying a staleness marker. Approving a stale
  * shot does NOT clear the marker (approval = explicit acceptance; preflight
  * still says "regenerate before export"), so approved + stale reads
@@ -474,7 +488,7 @@ export function shotStaleBadge(shot, shots = []) {
     || "an upstream shot regenerated after this shot's media was produced";
   const label = shot && shot.status === "approved" ? "Approved but stale" : "Stale";
   const b = badge("warning", label);
-  b.title = `${why}. Regenerate this shot to clear the flag; export preflight keeps warning until you do.`;
+  b.title = `${why}. ${staleClearAction(shot)} to clear the flag; export preflight keeps warning until you do.`;
   return b;
 }
 

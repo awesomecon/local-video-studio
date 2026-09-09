@@ -118,6 +118,7 @@ import {
   sceneHasExplicitShots,
   shotStaleBadge,
   shotSummary,
+  staleClearAction,
   staleReason,
 } from "../../js/shots.js";
 import { parseRoute, sceneEditorHash } from "../../js/router.js";
@@ -2514,6 +2515,22 @@ record("stale: badge says Approved but stale for approved stale shots", () => {
 record("stale: badge says Stale (not Approved) for non-approved shots", () => {
   const node = shotStaleBadge(STALE_SHOT, [PRODUCER_SHOT]);
   assert(node.textContent === "Stale", `label wrong: ${node.textContent}`);
+});
+
+record("stale: clear action switches on visual type", () => {
+  eq(staleClearAction({ visual_type: "reused_media" }), "Re-import this shot's media");
+  eq(staleClearAction({ visual_type: "krea2_still" }), "Regenerate this shot");
+  eq(staleClearAction(null), "Regenerate this shot");
+});
+
+record("stale: reused-media badge suggests re-import, not regeneration", () => {
+  const node = shotStaleBadge(
+    { ...STALE_SHOT, visual_type: "reused_media" }, [PRODUCER_SHOT],
+  );
+  assert(node.title.includes("Re-import this shot's media to clear the flag"),
+    `re-import hint missing: ${node.title}`);
+  assert(!node.title.includes("Regenerate this shot to clear"),
+    `should not suggest regeneration: ${node.title}`);
 });
 
 /* --- report -------------------------------------------------------------- */

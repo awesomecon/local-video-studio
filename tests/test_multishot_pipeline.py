@@ -377,6 +377,33 @@ def test_stale_flag_surfaces_in_summary_and_clears_on_regeneration(
     assert not any(item["code"] == "stale_dependency" for item in issues)
 
 
+def test_create_shot_drops_inherited_staleness_marker(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    _, scene = make_project_with_scene(service)
+
+    # Duplicating a stale shot passes its settings (marker included) to
+    # create_shot; a brand-new shot has no media, so it cannot be stale and
+    # the marker must not survive creation.
+    created = service.create_shot(scene.id, {
+        "duration_seconds": 5, "lane": "image", "visual_type": "krea2_still",
+        "settings": {
+            "staleness": {
+                "source_shot_id": "upstream-shot",
+                "reason": "predecessor_regenerated",
+                "marked_at": "2026-09-08T12:30:00+00:00",
+            }
+        },
+    })
+    assert "staleness" not in created.settings
+    view = service.list_scene_shots(scene.id)
+    payload = next(item for item in view["shots"] if item["id"] == created.id)
+    assert payload["stale"] is False
+    assert payload["staleness"] is None
+    assert view["stale"] == 0
+
+
 def test_locked_scene_blocks_shot_writes(tmp_path: Path) -> None:
     from backend.pipeline.service import PipelineError
 

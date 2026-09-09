@@ -458,7 +458,7 @@ function renderSceneLane(lane, layout, scale, view, shotSpans, expandedSpanSecon
       el("span", { class: "tl-scene-dur" }, fmtDuration(expanded ? seconds : duration)),
       staleCount ? el("span", {
         class: "tl-scene-stale",
-        title: `${staleCount} shot(s) marked stale: an upstream shot regenerated after their media was produced. Regenerate before final export.`,
+        title: `${staleCount} shot(s) marked stale: an upstream shot regenerated after their media was produced. Regenerate before final export (re-import for reused-media shots).`,
       }, "stale") : null,
     ));
     parts.push(clip);

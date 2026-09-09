@@ -3555,6 +3555,16 @@ class PipelineService:
             "settings",
         }
         payload = {key: value for key, value in fields.items() if key in allowed}
+        if isinstance(payload.get("settings"), dict) and "staleness" in payload["settings"]:
+            # A brand-new shot has no media yet, so it cannot be stale: the
+            # marker is owned by the regeneration/production lifecycle (see
+            # clear_staleness), never by the creator. Dropping it keeps
+            # duplicates of stale shots from inheriting the flag.
+            payload["settings"] = {
+                key: value
+                for key, value in payload["settings"].items()
+                if key != "staleness"
+            }
         try:
             shot = Shot(
                 project_id=scene.project_id,

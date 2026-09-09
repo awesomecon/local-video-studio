@@ -553,8 +553,8 @@ function buildShotsRow(scene) {
       `${sum.stale} stale${approvedStale ? ` (${approvedStale} approved)` : ""}`,
     );
     staleBadge.title = approvedStale
-      ? "An upstream shot regenerated after this media was produced. Some flagged shots were approved anyway — approval records acceptance but keeps the flag. Regenerate before final export."
-      : "An upstream shot regenerated after this media was produced. Regenerate the flagged shots before final export.";
+      ? "An upstream shot regenerated after this media was produced. Some flagged shots were approved anyway — approval records acceptance but keeps the flag. Regenerate the flagged shots (or re-import their media for reused-media shots) before final export."
+      : "An upstream shot regenerated after this media was produced. Regenerate the flagged shots (or re-import their media for reused-media shots) before final export.";
     row.append(staleBadge);
   }
   if (Array.isArray(scene.shots)) row.append(...laneChips(scene.shots));

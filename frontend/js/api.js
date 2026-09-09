@@ -1572,7 +1572,7 @@ export function retryJob(config, id, opts = {}) {
  * @property {number} ready
  * @property {number} approved
  * @property {number} failed
- * @property {number} stale
+ * @property {number} [stale]
  * @property {number} rendered_duration_seconds — Σduration − Σincoming overlap
  */
 
@@ -1585,7 +1585,7 @@ export function retryJob(config, id, opts = {}) {
  * @property {number} ready
  * @property {number} approved
  * @property {number} failed
- * @property {number} stale
+ * @property {number} [stale]
  * @property {number} rendered_duration_seconds
  * @property {string} scene_id
  * @property {number} scene_duration
