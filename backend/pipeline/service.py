@@ -2472,21 +2472,39 @@ class PipelineService:
                     self.jobs.fail(parent_job_id, redact_secrets(exc))
             raise
 
-    def queue_render(self, project_id: str, *, force: bool = False) -> GenerationJob:
-        project = self._project(project_id)  # 404 before any conflict/validation error
-        # One in-flight render/pipeline per project: both run_render and
-        # run_project write preview.mp4/final.mp4 and race _archive_output.
-        active = next(
+    # The deterministic render chain, in execution order. Only these stages are
+    # addressable by the single-stage re-run endpoint (never LLM/TTS/visuals).
+    # ``editorial_visual`` is only valid for Editorial Mode projects.
+    RENDER_STAGE_NAMES = (
+        "editorial_visual",
+        "timeline",
+        "render_preview",
+        "quality_control",
+        "render_final",
+        "thumbnails",
+    )
+
+    def _inflight_deterministic_render(self, project_id: str) -> GenerationJob | None:
+        """First in-flight render/pipeline/stage-re-run job for the project.
+
+        ``run_render``, ``run_project``, and single-stage re-runs all write
+        preview.mp4/final.mp4 and race ``_archive_output``, so at most one may
+        run per project.
+        """
+        return next(
             (
                 j for j in self.jobs.list(project_id)
-                if j.stage in {"render", "pipeline"}
+                if j.stage in {"render", "pipeline", "render_stage"}
                 and j.status not in {
                     JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED,
                 }
             ),
             None,
         )
-        if active is not None:
+
+    def queue_render(self, project_id: str, *, force: bool = False) -> GenerationJob:
+        project = self._project(project_id)  # 404 before any conflict/validation error
+        if self._inflight_deterministic_render(project_id) is not None:
             raise PipelineError(
                 "A render or pipeline job is already running for this project. "
                 "Wait for it to finish, or cancel it, before queueing another render."
@@ -2506,6 +2524,42 @@ class PipelineService:
                     "render_final",
                     "thumbnails",
                 ],
+            },
+        )
+        return self.jobs.enqueue(job)
+
+    def queue_render_stage(self, project_id: str, stage: str, *, force: bool = False) -> GenerationJob:
+        """Queue a re-run of a single deterministic render stage.
+
+        Only the FFmpeg/chromium deterministic stages are addressable (never
+        LLM, TTS, or visual generation). ``editorial_visual`` is accepted only
+        for Editorial Mode projects. Unknown stages raise ``KeyError`` (404),
+        an inapplicable ``editorial_visual`` raises ``ValueError`` (400), and
+        an in-flight render/pipeline/stage job raises ``PipelineError`` (409)
+        with the same single-flight rule as :meth:`queue_render`.
+        """
+        project = self._project(project_id)  # 404 before any other error
+        if stage not in self.RENDER_STAGE_NAMES:
+            known = ", ".join(self.RENDER_STAGE_NAMES)
+            raise KeyError(f"unknown render stage {stage!r}; expected one of: {known}")
+        if stage == "editorial_visual" and project.video_mode is not VideoMode.EDITORIAL:
+            raise ValueError(
+                "The editorial_visual stage is only available for Editorial Mode projects."
+            )
+        if self._inflight_deterministic_render(project_id) is not None:
+            raise PipelineError(
+                "A render or pipeline job is already running for this project. "
+                "Wait for it to finish, or cancel it, before queueing another render."
+            )
+        self.validate_render_inputs(project_id)
+        job = GenerationJob(
+            project_id=project_id,
+            stage="render_stage",
+            backend="ffmpeg",
+            parameters={
+                "stage": stage,
+                "force": force,
+                "current_stage": stage,
             },
         )
         return self.jobs.enqueue(job)
@@ -2688,8 +2742,98 @@ class PipelineService:
                     self.jobs.fail(parent_job_id, redact_secrets(exc))
             raise
 
+    def run_render_stage(
+        self,
+        project_id: str,
+        stage: str,
+        *,
+        force: bool = False,
+        parent_job_id: str | None = None,
+    ) -> Any:
+        """Re-run one deterministic render stage (retryable, cancelable).
+
+        Mirrors :meth:`run_render` but executes only the named stage's
+        ``_ensure_*`` runner; completed upstream stages are reused as-is.
+        """
+        with media_process_scope(parent_job_id):
+            return self._run_render_stage_impl(
+                project_id, stage, force=force, parent_job_id=parent_job_id,
+            )
+
+    def _run_render_stage_impl(
+        self,
+        project_id: str,
+        stage: str,
+        *,
+        force: bool,
+        parent_job_id: str | None,
+    ) -> Any:
+        project = self._project(project_id)
+        if parent_job_id:
+            self._start_parent_job(parent_job_id)
+        try:
+            self._update_parent_job(parent_job_id, progress=0.08, current_stage="validating_inputs")
+            self.validate_render_inputs(project_id)
+            if force:
+                self._invalidate_stages(project, {stage})
+            self._save_project(
+                project.model_copy(update={"status": ProjectStatus.RENDERING, "updated_at": utc_now()})
+            )
+            self._update_parent_job(parent_job_id, progress=0.35, current_stage=stage)
+            self._run_single_stage(project, stage, force=force)
+            self._check_parent_job(parent_job_id)
+            self._update_parent_job(parent_job_id, progress=0.95, current_stage=stage)
+            current = self._project(project_id)
+            self._save_project(
+                current.model_copy(update={"status": ProjectStatus.COMPLETED, "updated_at": utc_now()})
+            )
+            if parent_job_id:
+                self.jobs.transition(parent_job_id, JobStatus.POSTPROCESSING, progress=0.98)
+                self.jobs.complete(parent_job_id)
+            return self._stage_paths(project, stage)
+        except Exception as exc:
+            current = self._project(project_id)
+            parent = self.jobs.get(parent_job_id) if parent_job_id else None
+            failed_status = (
+                ProjectStatus.CANCELED
+                if parent and parent.status is JobStatus.CANCELED
+                else ProjectStatus.FAILED
+            )
+            self._save_project(
+                current.model_copy(update={"status": failed_status, "updated_at": utc_now()})
+            )
+            if parent_job_id:
+                active = self.jobs.get(parent_job_id)
+                if active and active.status not in {
+                    JobStatus.FAILED,
+                    JobStatus.CANCELED,
+                    JobStatus.COMPLETED,
+                }:
+                    self.jobs.fail(parent_job_id, redact_secrets(exc))
+            raise
+
+    def _run_single_stage(self, project: Project, stage: str, *, force: bool) -> Any:
+        """Run exactly one deterministic ``_ensure_*`` stage runner.
+
+        Each runner is idempotent and cache-aware: with ``force`` it rebuilds
+        the stage and rewrites its ``stage_state`` record; without ``force`` a
+        completed stage is reused and a missing one is built.
+        """
+        runners = {
+            "editorial_visual": self._ensure_editorial_visual,
+            "timeline": self._ensure_timeline,
+            "render_preview": self._ensure_preview,
+            "quality_control": self._ensure_qc,
+            "render_final": self._ensure_final,
+            "thumbnails": self._ensure_thumbnails,
+        }
+        runner = runners.get(stage)
+        if runner is None:
+            raise PipelineError(f"Unknown render stage: {stage!r}")
+        return runner(project, force=force)
+
     _EXECUTABLE_STAGES = {
-        "pipeline", "render", "narration", "narration_chunk",
+        "pipeline", "render", "render_stage", "narration", "narration_chunk",
         "visual_batch", "caption_alignment", "shot_generate", "scene_render",
     }
 
@@ -2731,6 +2875,16 @@ class PipelineService:
             elif job.stage == "render":
                 self.run_render(
                     job.project_id,
+                    force=bool(job.parameters.get("force")),
+                    parent_job_id=job.id,
+                )
+            elif job.stage == "render_stage":
+                stage = job.parameters.get("stage")
+                if not stage:
+                    raise PipelineError("render_stage job has no stage to run")
+                self.run_render_stage(
+                    job.project_id,
+                    stage,
                     force=bool(job.parameters.get("force")),
                     parent_job_id=job.id,
                 )

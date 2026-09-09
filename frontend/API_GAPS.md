@@ -23,6 +23,7 @@ matching response shapes (checked against `backend/api/main.py`):
 | `POST /api/projects/{id}/plan` | `planProject()` | → `ProjectPlan` |
 | `POST /api/projects/{id}/script` | `scriptProject()` | → `ProjectPlan` |
 | `POST /api/projects/{id}/render` | `renderProject()` | Existing-media FFmpeg render; 202 → `GenerationJob`, 409 when inputs are missing |
+| `POST /api/projects/{id}/render/stages/{stage}` | `renderStage()` | Re-run one deterministic stage (`timeline`, `render_preview`, `quality_control`, `render_final`, `thumbnails`; `editorial_visual` for editorial); 202 → `GenerationJob`, 404 unknown stage/project, 400 inapplicable `editorial_visual`, 409 when a render/pipeline/stage job is in flight |
 | `PATCH /api/scenes/{id}` | `editScene()` | partial `SceneEdit` |
 | `POST /api/scenes/{id}/generate` | `generateScene()` | 201 → `Asset` |
 | `POST /api/scenes/{id}/regenerate` | `regenerateScene()` | 201 → `Asset` |
@@ -40,19 +41,12 @@ matching response shapes (checked against `backend/api/main.py`):
 - Local LLM model selection is available through `PUT /api/llm/models` and can be persisted to project metadata.
 - Implicit shots are materialized on first mutation: `PATCH`/`DELETE /api/shots/<scene>-implicit`, all three overlay routes, and `generate`/`regenerate` now materialize the legacy projection server-side (`_resolve_shot` in `pipeline/service.py`), so the Scene Editor no longer needs the create-and-archive placeholder workaround.
 - `shot_summary` carries a `stale` count and every shot payload carries a per-shot `stale` flag plus a `staleness` provenance marker (`{source_shot_id, reason, marked_at}`), so the Storyboard, Timeline, and Scene Editor surface real stale counts and an "approved but stale" explanation (approval keeps the marker by design; regeneration or media re-import clears it).
+- Individual deterministic stages can now be re-run on their own: `POST /api/projects/{id}/render/stages/{stage}` queues a single `render_stage` job (backend `ffmpeg`) that runs only the matching `_ensure_*` runner — never LLM, TTS, or visual generation. Allowed stages are `timeline`, `render_preview`, `quality_control`, `render_final`, and `thumbnails`, plus `editorial_visual` for Editorial Mode projects (400 otherwise); an unknown stage is a 404 and an in-flight render/pipeline/stage job is a 409. The job is retryable and cancelable like other FFmpeg jobs, and the re-run's `stage_state` record is rewritten on force. The Export screen offers a per-stage "Re-run" button with a scope-scoped confirmation, wired to the shared live job feed.
 
 ## Remaining gap
 
-### No individual deterministic-stage control (minor)
-
-- **Affected screen:** Export (re-run one deterministic output stage).
-- **Verified:** `POST /api/projects/{id}/render` queues only existing-media
-  timeline, preview, QC, final-video, and frame-extraction work. It never invokes
-  LLM, TTS, or visual generation. `stage_state` reports per-stage status/outputs,
-  but there is no route to re-run just one of those deterministic stages.
-- **Requested change (optional):** `POST /api/projects/{id}/render/stages/{stage}`
-  returning the queued `GenerationJob`. Until then the Export screen offers
-  render, deterministic re-render, and job cancellation.
+None. The last open item — individual deterministic-stage control — was resolved
+during integration (see above).
 
 ## Multi-shot contracts (Phase 3 frontend review, branch `frontend-shots`)
 

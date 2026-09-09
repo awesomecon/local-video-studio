@@ -131,12 +131,16 @@ def test_export_editorial_workflow_presentation() -> None:
     # Force-render confirmation: rebuild the visual master and downstream outputs.
     assert "The Editorial visual master and the downstream render outputs" in source
     assert "The Edit Plan, registered assets, narration, music, and captions are not regenerated." in source
-    # The editorial_visual chip renders before the timeline chip.
-    assert 'labeledChip("Editorial canvas", stages.editorial_visual)' in source
+    # The editorial_visual cell (chip + per-stage Re-run button) renders
+    # before the timeline cell; the editorial chip keeps its caller-supplied
+    # label and the other cells use the shared stageChip.
+    assert 'stageRerunCell("editorial_visual", stages.editorial_visual' in source
     assert (
-        source.index('labeledChip("Editorial canvas", stages.editorial_visual)')
-        < source.index('stageChip("timeline", stages.timeline)')
+        source.index('stageRerunCell("editorial_visual", stages.editorial_visual')
+        < source.index('stageRerunCell("timeline", stages.timeline')
     )
+    assert 'labeledChip("Editorial canvas", st)' in source
+    assert "stageChip(stage, st)" in source
 
 
 def test_form_screens_do_not_full_rerender() -> None:

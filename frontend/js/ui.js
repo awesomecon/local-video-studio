@@ -155,6 +155,7 @@ export const STAGE_LABELS = {
   thumbnails: "Thumbnails",
   metadata: "Metadata",
   render: "Final render",
+  render_stage: "Stage re-run",
   pipeline: "Full render",
 };
 
