@@ -763,9 +763,24 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 /* --- Thumbnail Studio --------------------------------------------------------------- */
 .thumbnail-plan-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--gap);
   align-items: start;
+}
+.thumbnail-editor [hidden] { display: none !important; }
+.thumbnail-editor .thumbnail-plan-grid > :only-child,
+.thumbnail-editor .thumbnail-plan-grid > :first-child:has(+ [hidden]) {
+  grid-column: 1 / -1;
+}
+.thumbnail-editor textarea { resize: vertical; }
+.thumbnail-editor summary { cursor: pointer; }
+.thumbnail-save-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  border-top: 1px solid var(--line);
+  padding-top: var(--gap);
 }
 .thumbnail-candidate-grid {
   display: grid;

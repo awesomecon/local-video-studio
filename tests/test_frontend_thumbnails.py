@@ -41,12 +41,22 @@ def test_ideogram_model_keeps_exact_copy_and_save_controls_visible() -> None:
     # Ideogram owns the lettering, so only Pillow-specific styling disappears.
     # The shared exact-copy fields and plan save action must remain mounted and
     # visible or the selected model can never be persisted before generation.
-    assert 'avoidPromptHost.style.display = ideogram ? "none" : ""' in page
+    assert 'avoidPromptHost.style.display = (ideogram || qwenNativeText) ? "none" : ""' in page
     assert "typPanelHost.style.display" not in page
     assert "typographyStyleHost.style.display" not in page
     assert 'panel("Artwork direction"' in page
-    assert page.index('field({ label: "Exact title"') < page.index("typographyStyleHost,")
-    assert page.index("typographyStyleHost,") < page.index('el("div", { class: "row mt" }, save, status)')
+    assert page.index('field({ label: "Headline on image"') < page.index("typographyStyleHost,")
+    assert page.index("typographyStyleHost,") < page.index('el("div", { class: "thumbnail-save-bar" }, save, status)')
+
+
+def test_qwen_image_2512_is_available_in_thumbnail_studio() -> None:
+    page = read("frontend/js/pages/thumbnails.js")
+    assert '{ value: "qwen_image", label: "Qwen-Image-2512' in page
+    assert '{ value: "qwen_image_native_text", label: "Qwen-Image-2512 · native text rendering"' in page
+    assert 'imageModel.value === "qwen_image"' in page
+    assert 'imageModel.value === "qwen_image_native_text"' in page
+    assert "it may misspell, alter, or omit your wording" in page
+    assert "visual guidance rather than pixel-exact controls" in page
 
 
 def test_export_surfaces_selected_thumbnail_download() -> None:
