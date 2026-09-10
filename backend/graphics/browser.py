@@ -3,35 +3,13 @@
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
-
-REAL_SNAP_CHROMIUM = Path("/snap/chromium/current/usr/lib/chromium-browser/chrome")
+from backend.rendering.binaries import discover_chromium as _discover_chromium
 
 
 def discover_chromium() -> Path | None:
-    """Prefer the real snap binary over the failing snap wrapper.
-
-    The ``chromium`` wrapper on this machine cannot create its DBus transient
-    scope from service contexts; the packaged Chrome binary it wraps runs
-    fine with a throw-away profile and a ``HOME`` override (same approach as
-    scripts/ui_shots.py).
-    """
-    override = os.environ.get("LVS_CHROME")
-    if override:
-        candidate = Path(override)
-        if candidate.is_file():
-            return candidate
-    if REAL_SNAP_CHROMIUM.is_file():
-        return REAL_SNAP_CHROMIUM
-    for candidate in ("chromium", "chromium-browser"):
-        found = shutil.which(candidate)
-        if found:
-            return Path(found)
-    for candidate in (Path("/snap/bin/chromium"), Path("/usr/bin/chromium-browser")):
-        if candidate.is_file():
-            return candidate
-    return None
+    """Use the same browser discovery policy as tests and UI inspection."""
+    return _discover_chromium()
 
 
 def chromium_argv(

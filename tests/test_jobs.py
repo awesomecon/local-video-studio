@@ -144,6 +144,8 @@ def test_cancel_media_processes_is_scoped_to_the_job() -> None:
     """Canceling job A must not kill fake process PIDs registered under job B."""
     proc_a = Mock()
     proc_a.pid = 999_001
+    proc_a.poll.return_value = None
+    proc_a.returncode = None
     proc_b = Mock()
     proc_b.pid = 999_002
     pid_a = _register_process(proc_a, "job-a")
@@ -154,7 +156,9 @@ def test_cancel_media_processes_is_scoped_to_the_job() -> None:
     try:
         killed = cancel_media_processes_for_job("job-a")
         assert killed == [pid_a]
-        proc_a.kill.assert_called_once()
+        proc_a.terminate.assert_called_once()
+        proc_b.terminate.assert_not_called()
+        orphan.terminate.assert_not_called()
         proc_b.kill.assert_not_called()
         orphan.kill.assert_not_called()
     finally:

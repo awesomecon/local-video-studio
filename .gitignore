@@ -8,6 +8,8 @@ secrets/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+ci-reports/
+ci-raw-pytest.xml
 .mypy_cache/
 .coverage
 htmlcov/

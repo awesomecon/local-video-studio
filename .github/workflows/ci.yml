@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,11 +15,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    name: Core / ${{ matrix.os }} / x64 / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        include:
+          - {os: ubuntu-24.04, python-version: '3.11'}
+          - {os: ubuntu-24.04, python-version: '3.12'}
+          - {os: windows-2025, python-version: '3.12'}
+          - {os: macos-15-intel, python-version: '3.12'}
+    env:
+      LVS_REQUIRE_CORE_TOOLS: '1'
+      LVS_CI_RUNNER: ${{ matrix.os }}
 
     steps:
       - name: Check out repository
@@ -28,37 +38,60 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          architecture: x64
           cache: pip
 
       - name: Install FFmpeg
+        if: runner.os == 'Linux'
+        shell: bash
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
 
-      - name: Install application and test dependencies
-        run: python -m pip install -e '.[dev]'
-
-      - name: Select and report CI browser
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
         shell: bash
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          lvs_chrome=$(command -v google-chrome)
-          test -x "$lvs_chrome"
-          echo "LVS_CHROME=$lvs_chrome" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/test-reports"
-          {
-            echo "Browser executable: $lvs_chrome"
-            "$lvs_chrome" --version
-          } | tee "$RUNNER_TEMP/test-reports/browser.txt"
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install core and test dependencies (CI only)
+        run: python -m pip install -e ".[dev]" playwright
+
+      - name: Install Chromium (Linux, including native libraries)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install Chromium (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: python -m playwright install chromium
+
+      - name: Require prerequisites and record versions
+        run: python scripts/ci_core_smoke.py --prerequisites
+
+      - name: Native core smoke
+        run: python scripts/ci_core_smoke.py
 
       - name: Run Python tests
-        run: python -m pytest --junitxml="$RUNNER_TEMP/test-reports/pytest.xml"
+        if: ${{ !cancelled() }}
+        run: python -m pytest --junitxml=ci-raw-pytest.xml
+
+      - name: Run frontend static checks
+        if: ${{ !cancelled() }}
+        run: python frontend/tests/static_checks.py
+
+      - name: Sanitize test report
+        if: ${{ always() }}
+        run: python scripts/ci_test_report.py
 
       - name: Upload test report
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: test-report-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/test-reports/
+          name: core-${{ matrix.os }}-x64-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
+          path: ci-reports/
           retention-days: 14
-          if-no-files-found: warn
-
-      - name: Run frontend static checks
-        run: python3 frontend/tests/static_checks.py
+          if-no-files-found: error

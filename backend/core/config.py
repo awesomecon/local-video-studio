@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
+from .resources import resource_path
+
+DEFAULT_CONFIG_PATH = resource_path("config", "default.yaml")
 LOCAL_CONFIG_PATH = DEFAULT_CONFIG_PATH.with_name("local.yaml")
 ENV_PREFIX = "LOCAL_VIDEO_STUDIO__"
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

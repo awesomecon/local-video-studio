@@ -22,9 +22,10 @@ from .comfyui import ComfyUIBackend
 from .errors import BackendError, BackendErrorCode
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process
+from backend.core.resources import resource_path
 
 
-_TTS_WORKFLOWS_DIR = Path(__file__).resolve().parents[2] / "workflows" / "comfyui" / "tts"
+_TTS_WORKFLOWS_DIR = resource_path("workflows", "comfyui", "tts")
 _MAX_OUTPUT_BYTES = 200 * 1024 * 1024
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_-]+")
 

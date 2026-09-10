@@ -27,6 +27,8 @@ dependencies = [
 [project.optional-dependencies]
 captions = ["faster-whisper>=1.1"]
 dev = [
+  "setuptools>=68",
+  "wheel>=0.45",
   "numpy>=1.26",
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -40,6 +42,7 @@ lvs-ideogram-prompt = "backend.models.ideogram_prompt_cli:main"
 
 [tool.setuptools.package-data]
 "backend.models" = ["prompts/*.txt", "prompts/*.md"]
+"backend.editorial" = ["fonts/*.ttf", "fonts/*.txt"]
 
 [tool.setuptools.packages.find]
 include = ["backend*"]

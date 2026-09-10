@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
+from backend.core.resources import resource_path
 
 from .ace_step_comfyui import ACEStepComfyUIBackend
 from .adapters import (
@@ -129,7 +130,7 @@ class BackendRegistry:
         ):
             tts = backends.get(name, {})
             registry.register(TTSServiceBackend(name, tts.get("endpoint")))
-        tts_workflows_dir = Path(__file__).resolve().parents[2] / "workflows" / "comfyui" / "tts"
+        tts_workflows_dir = resource_path("workflows", "comfyui", "tts")
         registry.register(FishS2ProBackend(
             endpoint=comfy_endpoint,
             workflows_dir=tts_workflows_dir,
@@ -155,7 +156,7 @@ class BackendRegistry:
         ), name="index_tts_2_5")
         ace = backends.get("ace_step", {})
         comfy_endpoint = str(comfy.get("endpoint", "http://127.0.0.1:8188"))
-        workflows_dir = Path(__file__).resolve().parents[2] / "workflows" / "comfyui"
+        workflows_dir = resource_path("workflows", "comfyui")
         registry.register(ACEStepComfyUIBackend(
             endpoint=comfy_endpoint,
             model_name=ace.get("model", "xl_turbo"),

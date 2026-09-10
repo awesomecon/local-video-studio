@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
@@ -266,10 +265,8 @@ class EditorialAsset(DomainModel):
     def portable_source(cls, value: str | None) -> str | None:
         if value is None or value.startswith(("http://", "https://")):
             return value
-        path = PurePosixPath(value)
-        if path.is_absolute() or ".." in path.parts:
-            raise ValueError("editorial asset source must be project-relative or an explicit URL")
-        return value
+        from backend.schemas.paths import portable_relative_path
+        return portable_relative_path(value)
 
     @model_validator(mode="after")
     def protect_evidence(self) -> "EditorialAsset":

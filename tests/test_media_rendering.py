@@ -46,7 +46,11 @@ def test_usable_executable_preserves_dispatch_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shim = tmp_path / "ffmpeg"
-    shim.symlink_to("/bin/true")
+    shim.touch()
+    shim.chmod(0o755)
+    # Simulate resolution without requiring Windows symlink privileges.
+    target = tmp_path / "dispatcher"
+    monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: target)
     monkeypatch.setattr(
         binaries_module.subprocess,
         "run",
@@ -56,7 +60,8 @@ def test_usable_executable_preserves_dispatch_symlink(
     assert binaries_module._usable_executable(shim) != shim.resolve()
 
 
-def test_discovery_prefers_bundled_ffmpeg_over_snap_shim(
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux Snap dispatch policy")
+def test_linux_discovery_prefers_bundled_ffmpeg_over_snap_shim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snap = Path("/snap/bin/ffmpeg")
@@ -96,7 +101,7 @@ def test_subtitle_writers(tmp_path: Path) -> None:
     assert "00:00:01,250 --> 00:00:02,500" in srt.read_text(encoding="utf-8")
     ass_text = ass.read_text(encoding="utf-8")
     assert "PlayResX: 640" in ass_text
-    assert "Style: Default,DejaVu Sans,19," in ass_text
+    assert "Style: Default,Noto Sans,19," in ass_text
     assert ass_text.count("Dialogue: 0,") == 9  # five spoken words plus four neutral gaps
     assert ass_text.count(r"{\c&H0000D7FF&\b1}") == 5
     assert r"\Nwith braces \{safe\}" in ass_text

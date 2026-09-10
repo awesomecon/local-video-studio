@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import threading
 import time
@@ -77,6 +78,19 @@ class IdeogramWorkerSupervisor:
                     "configured Ideogram 4 ComfyUI; it was not stopped.",
                 )
 
+            if platform.system() == "Windows":
+                raise BackendError(
+                    BackendErrorCode.BACKEND_UNAVAILABLE,
+                    "Managed Ideogram startup uses a Bash script and is unavailable on native Windows. "
+                    "Configure an already-running compatible service instead; core mock mode remains available.",
+                )
+            if not self.start_script.is_file() or not os.access(self.start_script, os.X_OK):
+                raise BackendError(
+                    BackendErrorCode.BACKEND_UNAVAILABLE,
+                    "Managed Ideogram startup requires its source-checkout script. "
+                    "Configure an already-running compatible service instead.",
+                )
+
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = self.log_path.open("ab")
             environment = os.environ.copy()
@@ -128,11 +142,6 @@ class IdeogramWorkerSupervisor:
             raise BackendError(
                 BackendErrorCode.BACKEND_UNAVAILABLE,
                 f"Managed Ideogram startup cannot claim externally owned port {parsed.port}.",
-            )
-        if not self.start_script.is_file() or not os.access(self.start_script, os.X_OK):
-            raise BackendError(
-                BackendErrorCode.BACKEND_UNAVAILABLE,
-                f"Ideogram startup script is unavailable: {self.start_script}",
             )
         return parsed
 

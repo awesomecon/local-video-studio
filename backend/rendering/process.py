@@ -19,6 +19,7 @@ import psutil
 _CancellationLineage = tuple[tuple[str, threading.Event], ...]
 _TERMINATE_SECONDS = 0.5
 _KILL_SECONDS = 2.0
+_SWEEP_INTERVAL_SECONDS = 0.05
 
 
 @dataclass
@@ -171,6 +172,54 @@ def get_active_media_pids() -> list[int]:
         return list(_active_processes)
 
 
+def _posix_live_group_pids(pgid: int) -> list[int]:
+    """Return PIDs that still belong to ``pgid`` and can still be signaled.
+
+    The kernel exposes no group membership query, so the only way to notice a
+    member forked after the previous sweep is to read each task's group field.
+    Zombies are excluded: they cannot run and cannot receive another signal.
+    """
+    members: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return members
+    own_pid = os.getpid()
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid <= 1 or pid == own_pid:
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as handle:
+                # "<pid> (<comm>) <state> <ppid> <pgrp> ..." - comm may hold
+                # spaces or parentheses, so split on the final one.
+                fields = handle.read().rsplit(b")", 1)[-1].split()
+        except OSError:
+            continue
+        if len(fields) > 2 and fields[0] != b"Z" and int(fields[2]) == pgid:
+            members.append(pid)
+    return members
+
+
+def _escalate_process_group(pgid: int) -> None:
+    """SIGKILL a reserved group until no live member is left in the window.
+
+    One sweep is not enough: a member forked after it joins this same group and
+    would otherwise keep running unsupervised. The group identity stays reserved
+    because the caller never reaps the leader while escalation runs, so reusing
+    the numeric group is impossible and repeated sweeps stay targeted.
+    """
+    deadline = time.monotonic() + _KILL_SECONDS
+    while True:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+        if time.monotonic() >= deadline or not _posix_live_group_pids(pgid):
+            return
+        time.sleep(_SWEEP_INTERVAL_SECONDS)
+
+
 def _stop_owned_process(state: _ProcessState) -> None:
     """Bounded terminate/kill/reap of this process and observed descendants.
 
@@ -208,9 +257,10 @@ def _stop_owned_process(state: _ProcessState) -> None:
             if group_owned:
                 # The runner cannot reap while this lock is held. Even a zombie
                 # group leader therefore still reserves the group's identity.
+                # Sweep SIGKILL until no live member remains: a descendant forked
+                # after the first sweep still joins this reserved group.
                 time.sleep(_TERMINATE_SECONDS)
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(proc.pid, signal.SIGKILL)
+                _escalate_process_group(proc.pid)
             else:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_TERMINATE_SECONDS)
@@ -332,7 +382,9 @@ def _start_reaper(state: _ProcessState) -> None:
     state.reaper_started = True
 
     def reap() -> None:
-        with state.lifecycle_lock:
+        # Wait without holding lifecycle_lock so a late cancel can still record
+        # intent promptly; concurrent Popen.wait calls on one child are safe.
+        with contextlib.suppress(Exception):
             state.proc.wait()
         with _active_lock:
             if _process_states.get(state.proc.pid) is state:
@@ -355,18 +407,25 @@ def _check_result(
 
 
 def _wait_for_process(state: _ProcessState, timeout: float | None = None) -> None:
+    # Poll under the lifecycle lock but never block while holding it. The worker
+    # previously held this lock across proc.wait(timeout=0.1), so a concurrent
+    # cancel in _request_stop lost the GIL-mediated re-acquire race for seconds.
+    # Checking reason and poll atomically still prevents reaping after cancel
+    # intent, while the brief sleep outside keeps cancellation prompt.
     deadline = None if timeout is None else time.monotonic() + timeout
-    while state.reason is None:
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        try:
-            with state.lifecycle_lock:
-                if state.reason is not None:
-                    return
-                state.proc.wait(timeout=0.1 if remaining is None else min(0.1, remaining))
-            return
-        except subprocess.TimeoutExpired:
-            if deadline is not None and time.monotonic() >= deadline:
-                _request_stop(state, "timeout")
+    while True:
+        with state.lifecycle_lock:
+            if state.reason is not None:
+                return
+            if state.proc.poll() is not None:
+                return
+        if deadline is not None and time.monotonic() >= deadline:
+            _request_stop(state, "timeout")
+            continue
+        if deadline is None:
+            time.sleep(0.02)
+        else:
+            time.sleep(max(0.0, min(0.02, deadline - time.monotonic())))
 
 
 class OwnedMediaProcess:

@@ -39,6 +39,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.rendering.binaries import discover_chromium
+
 try:
     import websocket  # websocket-client
 except ImportError:  # pragma: no cover - environment guard
@@ -70,16 +73,9 @@ ROUTES = [
 
 def find_chrome() -> str:
     """Locate a usable headless-capable Chrome/Chromium binary."""
-    candidates = [
-        os.environ.get("LVS_CHROME"),
-        "/snap/chromium/current/usr/lib/chromium-browser/chrome",
-        shutil.which("google-chrome"),
-        shutil.which("chromium"),
-        shutil.which("chromium-browser"),
-    ]
-    for path in candidates:
-        if path and Path(path).exists():
-            return path
+    executable = discover_chromium()
+    if executable is not None:
+        return str(executable)
     print("error: no chrome binary found (set LVS_CHROME)", file=sys.stderr)
     sys.exit(2)
 

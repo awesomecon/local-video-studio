@@ -959,8 +959,13 @@ class EditorialRenderer:
             ], self._capture_frames(plan, document, work / "chrome-profile"),
                 timeout=max(120.0, plan.duration * 20))
             publish = output.with_name(f".{output.name}.editorial.tmp")
-            shutil.copyfile(temporary, publish)
-            os.replace(publish, output)
+            from backend.rendering.process import media_output_publication
+            try:
+                shutil.copyfile(temporary, publish)
+                with media_output_publication():
+                    os.replace(publish, output)
+            finally:
+                publish.unlink(missing_ok=True)
         return output
 
     @staticmethod
@@ -988,75 +993,74 @@ class EditorialRenderer:
         ]
         if os.environ.get("LVS_CHROMIUM_NO_SANDBOX", "").strip().lower() in {"1", "true", "yes"}:
             args.insert(2, "--no-sandbox")
-        process = subprocess.Popen(
+        from backend.rendering.process import owned_media_process, raise_if_media_job_canceled
+        with owned_media_process(
             args, env=dict(os.environ, HOME=str(profile)), stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-        )
-        client: _CDP | None = None
-        try:
-            port_file = profile / "DevToolsActivePort"
-            for _ in range(100):
-                if port_file.is_file():
-                    break
-                if process.poll() is not None:
-                    raise RuntimeError("Chromium exited before exposing Editorial renderer control")
-                time.sleep(0.1)
-            if not port_file.is_file():
-                raise RuntimeError("Chromium did not expose Editorial renderer control")
-            port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
-            page_url = None
-            for _ in range(50):
-                try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2) as response:
-                        targets = json.load(response)
-                    page_url = next(item["webSocketDebuggerUrl"] for item in targets if item["type"] == "page")
-                    break
-                except Exception:
-                    time.sleep(0.1)
-            if not page_url:
-                raise RuntimeError("Chromium did not create an Editorial render page")
-            client = _CDP(page_url)
-            client.command("Page.enable")
-            client.command("Runtime.enable")
-            client.command("Emulation.setDeviceMetricsOverride", {
-                "width": plan.width, "height": plan.height,
-                "deviceScaleFactor": 1, "mobile": False,
-            })
-            client.command("Page.navigate", {"url": document.resolve().as_uri()})
-            for _ in range(100):
-                state = client.command("Runtime.evaluate", {
-                    "expression": (
-                        "({ready:window.__editorialReady===true,"
-                        "error:window.__editorialError||null})"
-                    ),
-                    "returnByValue": True,
-                })
-                value = state.get("result", {}).get("value", {})
-                if isinstance(value, dict) and value.get("error"):
-                    raise RuntimeError(f"Editorial composition layout failed: {value['error']}")
-                if isinstance(value, dict) and value.get("ready") is True:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError("Editorial composition did not become ready")
-            frame_count = round(plan.duration * plan.fps)
-            for frame in range(frame_count):
-                timestamp = frame / plan.fps
-                client.command("Runtime.evaluate", {
-                    "expression": f"window.renderAt({timestamp:.12f})", "returnByValue": True,
-                })
-                screenshot = client.command("Page.captureScreenshot", {
-                    "format": "jpeg", "quality": 95,
-                    "fromSurface": True, "captureBeyondViewport": False,
-                    "optimizeForSpeed": True,
-                })
-                yield base64.b64decode(screenshot["data"])
-        finally:
-            if client is not None:
-                client.close()
-            process.terminate()
+        ) as process:
+            client: _CDP | None = None
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                port_file = profile / "DevToolsActivePort"
+                for _ in range(100):
+                    raise_if_media_job_canceled()
+                    if port_file.is_file():
+                        break
+                    if process.poll() is not None:
+                        raise RuntimeError("Chromium exited before exposing Editorial renderer control")
+                    time.sleep(0.1)
+                if not port_file.is_file():
+                    raise RuntimeError("Chromium did not expose Editorial renderer control")
+                port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+                page_url = None
+                for _ in range(50):
+                    raise_if_media_job_canceled()
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2) as response:
+                            targets = json.load(response)
+                        page_url = next(item["webSocketDebuggerUrl"] for item in targets if item["type"] == "page")
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+                if not page_url:
+                    raise RuntimeError("Chromium did not create an Editorial render page")
+                client = _CDP(page_url)
+                client.command("Page.enable")
+                client.command("Runtime.enable")
+                client.command("Emulation.setDeviceMetricsOverride", {
+                    "width": plan.width, "height": plan.height,
+                    "deviceScaleFactor": 1, "mobile": False,
+                })
+                client.command("Page.navigate", {"url": document.resolve().as_uri()})
+                for _ in range(100):
+                    raise_if_media_job_canceled()
+                    state = client.command("Runtime.evaluate", {
+                        "expression": (
+                            "({ready:window.__editorialReady===true,"
+                            "error:window.__editorialError||null})"
+                        ),
+                        "returnByValue": True,
+                    })
+                    value = state.get("result", {}).get("value", {})
+                    if isinstance(value, dict) and value.get("error"):
+                        raise RuntimeError(f"Editorial composition layout failed: {value['error']}")
+                    if isinstance(value, dict) and value.get("ready") is True:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError("Editorial composition did not become ready")
+                frame_count = round(plan.duration * plan.fps)
+                for frame in range(frame_count):
+                    raise_if_media_job_canceled()
+                    timestamp = frame / plan.fps
+                    client.command("Runtime.evaluate", {
+                        "expression": f"window.renderAt({timestamp:.12f})", "returnByValue": True,
+                    })
+                    screenshot = client.command("Page.captureScreenshot", {
+                        "format": "jpeg", "quality": 95,
+                        "fromSurface": True, "captureBeyondViewport": False,
+                        "optimizeForSpeed": True,
+                    })
+                    yield base64.b64decode(screenshot["data"])
+            finally:
+                if client is not None:
+                    client.close()

@@ -1,0 +1,80 @@
+# Core platform qualification
+
+The core studio needs Python and FFmpeg, not an AI runtime. Installing a model,
+running its managed worker, and connecting to an existing HTTP service are
+separate capabilities. A successful Linux run or a test with simulated Windows
+paths does not establish Windows support.
+
+## Implementation stages
+
+1. Native-shell editable-install instructions: `docs/installation.md`.
+2. Native CI and isolated browser/server smoke: `docs/native-core-ci.md`.
+3. Canonical relative asset paths, conservative legacy reads, and portable new
+   project directory names. Existing project IDs and directory names are retained.
+4. Explicit job cancellation, bounded owned-process cleanup, and staged render
+   publication. Failed/canceled work can be retried; restart does not automatically
+   resume jobs. Previous completed renders remain until replacement succeeds.
+5. Shared executable discovery, selected FFmpeg encoder/subtitle checks, bundled
+   Noto fonts, and real rendering tests with punctuation and Unicode in paths.
+6. Core readiness and optional backend restrictions reported separately.
+7. Wheel runtime resources and an acceptance test outside the source checkout.
+
+## Distribution contract
+
+The wheel includes the default configuration, browser UI, workflow templates,
+model prompt templates, and licensed Noto fonts. Builds use an explicit resource
+allowlist; private local configuration and development files are excluded.
+Mutable projects, databases and caches use configured locations outside the
+installed package. Source-checkout local configuration remains supported.
+There is no automatic migration to new OS-specific storage defaults.
+
+`tests/test_distribution_resources.py` builds and unpacks a wheel without
+installing dependencies. An isolated subprocess imports that distribution away
+from the checkout, serves its UI through an ASGI test client, and completes a mock
+pipeline render. It uses the existing interpreter dependencies, so this is not
+proof of a clean-machine installer or dependency-resolution result. CI's clean
+core environment supplies that complementary check. No package is published by
+these tests.
+
+Managed AI worker scripts are optional source-checkout components. A wheel does
+not contain their model environments. A compatible external HTTP worker can be
+used without a local launcher, subject to the existing endpoint/privacy settings.
+
+## Required native evidence before release
+
+Review actual results for Ubuntu 24.04 x64 (Python 3.11/3.12), Windows 2025 x64
+(Python 3.12), and macOS 15 Intel (Python 3.12). The configured CI matrix alone is
+not evidence that those jobs passed. Apple Silicon and Windows ARM remain
+separate qualification targets.
+
+For each target, retain runner/tool versions and test outcomes, then check:
+
+- Editable installation and wheel acceptance, without AI packages or model files.
+- Browser startup, project creation/reopen, uploads/downloads and media playback.
+- Mock generation, editing an existing scene, and rendering the updated timeline.
+- Paths with spaces, Unicode, apostrophes and long nested parent directories.
+- Copy a project from another OS, reopen it and render without rewriting IDs.
+- Cancel an active render; verify its previous completed output survives, its
+  temporary output is removed, unrelated processes survive, and retry works.
+- Shut down with active work, reopen, and explicitly retry interrupted jobs.
+- Optional Chromium features, subtitles and bundled fonts in actual output.
+
+Browser microphone/recording behavior and media-file locks during playback need
+interactive native checks. Windows process-tree cleanup also needs native stress
+testing; deliberately detached descendants are outside the current containment
+guarantee. Python frame producers must cooperate with cancellation between calls.
+Passing the core checks makes no claim about individual AI models, GPU drivers,
+VRAM sufficiency, Metal, ROCm, or remote worker hardware.
+
+## Local verification status (Linux only)
+
+On a local Linux workstation run of this branch: full Python suite
+1166 passed; `tests/test_media_process_lifecycle.py` 34 passed (includes the
+POSIX late-group-member escalation case); editorial/render-stage/serial-worker
+retry cases 4 passed; `frontend/tests/static_checks.py` passed;
+`frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were not
+captured in this pass (no application backend was running; the capture helper
+never starts servers). These results are Linux-only evidence. Native Windows
+(`windows-2025`) and macOS (`macos-15-intel`) runs, interactive
+microphone/recording and media-lock checks, and review of all required CI job
+results remain pending before any platform claim.

@@ -23,11 +23,11 @@ def test_project_and_plan_round_trip() -> None:
     assert restored.scenes[0].project_id == project.id
 
 
-def test_asset_path_must_be_portable() -> None:
+def test_asset_path_must_be_portable(tmp_path: Path) -> None:
     project = make_project()
     with pytest.raises(ValidationError, match="project-relative"):
         Asset(project_id=project.id, type=AssetType.IMAGE,
-              filepath=Path("/tmp/leak.png"), backend="mock", model="mock", seed=1)
+              filepath=tmp_path / "leak.png", backend="mock", model="mock", seed=1)
 
 
 def test_failed_attempt_requires_error() -> None:

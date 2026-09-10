@@ -132,8 +132,9 @@ def test_serial_worker_can_retry_a_canceled_pending_job(tmp_path):
         ),
     )
     assert worker.cancel("retryable")
-    assert backend._canceled == set()
+    assert backend._canceled == {"retryable"}
     worker.retry("retryable")
+    assert backend._canceled == set()
     worker.start()
     deadline = time.monotonic() + 5
     while worker.get("retryable").status not in {JobStatus.COMPLETED, JobStatus.FAILED}:

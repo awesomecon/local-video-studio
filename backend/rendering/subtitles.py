@@ -137,7 +137,7 @@ def write_ass(
     horizontal_margin = max(24, round(width * 0.07))
     vertical_margin = max(20, round(height * 0.065))
     default_style = (
-        f"Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H000000FF,&H00101010,&H90000000,"
+        f"Style: Default,Noto Sans,{font_size},&H00FFFFFF,&H000000FF,&H00101010,&H90000000,"
         f"-1,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
         f"{horizontal_margin},{horizontal_margin},{vertical_margin},1"
     )

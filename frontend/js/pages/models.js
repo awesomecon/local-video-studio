@@ -149,6 +149,7 @@ function recoveryPanel(recovery) {
 function buildAll(sys, list, recovery) {
   const env = sys.environment;
   const parts = [
+    capabilityPanel(env.capabilities),
     classificationPanel(env),
     recoveryPanel(recovery),
     runtimePanel(env),
@@ -334,6 +335,36 @@ function comfyMemoryPanel(sys, list) {
 }
 
 /* --- environment classification ------------------------------------------- */
+
+/** Core requirements are independent of optional local model runtimes. */
+export function capabilityPanel(report) {
+  if (!report) return null;
+  const labels = {
+    python: "Python", ffmpeg: "FFmpeg", media_inspection: "Detailed media inspection",
+    browser_rendering: "Editorial and graphic rendering", pytorch: "PyTorch",
+    cuda: "CUDA through PyTorch", nvidia_gpu_inventory: "NVIDIA inventory",
+    managed_ideogram_launch: "Managed Ideogram launcher",
+    managed_tts_launch: "Managed TTS worker source", managed_higgs_launch: "Managed Higgs launcher",
+    external_http_services: "External model services",
+  };
+  const rows = (items) => Object.entries(items || {}).map(([name, item]) =>
+    el("div", { class: "stack" },
+      el("div", { class: "row" }, el("strong", {}, labels[name] || name),
+        badge(item.status === "available" ? "good" : item.status === "probe_failed" ? "warning" : "neutral",
+          item.status.replaceAll("_", " "), false)),
+      el("p", { class: "small muted" }, item.detail)));
+  return el("section", { class: "panel", "aria-label": "Core readiness" },
+    el("div", { class: "row" }, el("h2", { class: "panel-title" }, "Core studio"),
+      badge(report.core.ready ? "good" : "critical", report.core.ready ? "Ready" : "Needs attention")),
+    el("div", { class: "panel-body stack" },
+      el("p", {}, report.core.detail),
+      ...rows(report.core.requirements),
+      el("h3", {}, "Additional rendering features"), ...rows(report.features),
+      el("details", {}, el("summary", {}, "Optional AI runtimes and launchers"),
+        el("p", { class: "small muted" }, "These do not affect core mock mode. A reachable service does not establish local model or GPU support."),
+        ...rows(report.optional)),
+      el("p", { class: "small muted" }, "Runtime discovery is not native platform qualification.")));
+}
 
 /**
  * @param {import("../api.js").EnvironmentReport} env

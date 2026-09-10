@@ -256,10 +256,12 @@ def build_video_command(
 
 
 def _subtitle_filter_path(path: Path) -> str:
-    value = str(path.resolve()).replace("\\", r"\\")
-    for character in (":", "'", "[", "]", ","):
-        value = value.replace(character, f"\\{character}")
-    return value
+    # Two parsers consume this value: the filter option parser, then the
+    # filtergraph parser. There is no shell layer (argv is passed directly).
+    # https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping
+    value = path.resolve().as_posix()
+    value = "".join("\\" + char if char in "\\':" else char for char in value)
+    return "".join("\\" + char if char in "\\'[],; " else char for char in value)
 
 
 def build_finalize_command(
@@ -303,7 +305,8 @@ def build_finalize_command(
     video_map = "0:v:0"
     if subtitle_path and options.burn_subtitles:
         escaped = _subtitle_filter_path(subtitle_path)
-        filters.append(f"[0:v]subtitles=filename='{escaped}'[subtitled]")
+        fonts = _subtitle_filter_path(Path(__file__).resolve().parents[1] / "editorial/fonts")
+        filters.append(f"[0:v]subtitles=filename={escaped}:fontsdir={fonts}[subtitled]")
         video_map = "[subtitled]"
 
     prepared_audio: list[tuple[str, str]] = []

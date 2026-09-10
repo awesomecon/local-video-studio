@@ -409,7 +409,7 @@ def test_managed_worker_supervisor_discovers_omnivoice(tmp_path: Path) -> None:
         "LOCAL_VIDEO_STUDIO__BACKENDS__OMNIVOICE__MODEL_PATH": str(model_path),
     })
     supervisor = TTSWorkerSupervisor.from_config(
-        config, output_root=Path("/tmp/lvs-out"),
+        config, output_root=tmp_path / "lvs-out",
     )
     assert "omnivoice" in supervisor.specs
     spec = supervisor.specs["omnivoice"]
@@ -418,24 +418,24 @@ def test_managed_worker_supervisor_discovers_omnivoice(tmp_path: Path) -> None:
     assert spec.model_path.is_dir()
 
 
-def test_supervisor_rejects_port_conflicts_between_managed_providers() -> None:
+def test_supervisor_rejects_port_conflicts_between_managed_providers(tmp_path: Path) -> None:
     from backend.workers.tts_processes import TTSWorkerSpec, TTSWorkerSupervisor
 
     specs = {
         "qwen_tts": TTSWorkerSpec(
             provider="qwen_tts", endpoint="http://127.0.0.1:8191",
-            python_path=Path("/bin/python"), model_path=Path("/tmp"), tokenizer_path=None,
+            python_path=tmp_path / "python", model_path=tmp_path, tokenizer_path=None,
             startup_timeout_seconds=15,
         ),
         "omnivoice": TTSWorkerSpec(
             provider="omnivoice", endpoint="http://127.0.0.1:8191",
-            python_path=Path("/bin/python"), model_path=Path("/tmp"), tokenizer_path=None,
+            python_path=tmp_path / "python", model_path=tmp_path, tokenizer_path=None,
             startup_timeout_seconds=15,
         ),
     }
     with pytest.raises(ValueError, match="port 8191"):
-        TTSWorkerSupervisor(specs, output_root=Path("/tmp/lvs-out"),
-                            cache_root=Path("/tmp/lvs-cache"), log_root=Path("/tmp/lvs-logs"))
+        TTSWorkerSupervisor(specs, output_root=tmp_path / "lvs-out",
+                            cache_root=tmp_path / "lvs-cache", log_root=tmp_path / "lvs-logs")
 
 
 # ---------------------------------------------------------------------------

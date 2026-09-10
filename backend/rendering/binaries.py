@@ -6,6 +6,8 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
+from contextlib import ExitStack
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,13 +44,16 @@ def _usable_executable(
     if current_platform != "Windows" and not os.access(path, os.X_OK):
         return None
     try:
-        result = subprocess.run(
-            [str(path), *version_args],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
-        )
+        with ExitStack() as stack:
+            command = [str(path), *version_args]
+            if version_args == ("--version",):
+                profile = stack.enter_context(tempfile.TemporaryDirectory(prefix="lvs-browser-probe-"))
+                command.extend(("--headless=new", "--no-first-run", "--disable-background-networking",
+                                f"--user-data-dir={profile}"))
+            result = subprocess.run(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=5,
+            )
     except (OSError, subprocess.TimeoutExpired):
         return None
     # Keep the path exactly as found: dispatchers such as /snap/bin/ffmpeg
@@ -260,6 +265,13 @@ def discover_chromium(
         platform_name=current_platform,
     )
     if from_path is not None:
+        if current_platform == "Linux" and _is_snap_shim(from_path):
+            real_snap = _usable_executable(
+                "/snap/chromium/current/usr/lib/chromium-browser/chrome",
+                version_args=("--version",), platform_name=current_platform,
+            )
+            if real_snap is not None:
+                return real_snap
         return from_path
     return _first_usable(
         _platform_install_paths("chromium", platform_name=current_platform),

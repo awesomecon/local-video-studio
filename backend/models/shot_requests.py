@@ -28,13 +28,14 @@ from backend.core.h3_policy import (
     resolve_quality,
     validate_duration,
 )
+from backend.core.resources import resource_path
 from backend.models.base import GenerationRequest
 from backend.models.h3_shot_continuity import H3_NATIVE_AUDIO_MIX_POLICY
 from backend.models.lane_resolver import LaneResolutionError, LaneErrorCode
 from backend.schemas.models import Asset, Project, VisualType
 from backend.schemas.shots import ReferenceRole, Shot
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = resource_path()
 
 KREA2_WORKFLOW_PATH = REPO_ROOT / "workflows" / "comfyui" / "krea2-turbo.workflow.json"
 QWEN_IMAGE_2512_WORKFLOW_PATH = REPO_ROOT / "workflows" / "comfyui" / "qwen-image-2512.workflow.json"

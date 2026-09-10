@@ -1,0 +1,7 @@
+include config/default.yaml
+include frontend/index.html frontend/config.json
+recursive-include frontend/js *.js
+recursive-include frontend/css *.css
+recursive-include frontend/assets *.svg
+recursive-include workflows *.json
+recursive-include backend/editorial/fonts *.ttf *.txt

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
+from backend.core.resources import resource_path
 
 from .comfyui import ComfyUIBackend
 from .errors import BackendError, BackendErrorCode
@@ -114,7 +115,7 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
             workflow = json.loads(self._workflow_path.read_text(encoding="utf-8"))
             metadata_path = self._workflow_path.with_suffix(".metadata.json")
         else:
-            workflows_dir = self._workflows_dir or Path(__file__).resolve().parents[2] / "workflows" / "comfyui"
+            workflows_dir = self._workflows_dir or resource_path("workflows", "comfyui")
             workflow_name = _ACE_WORKFLOW_NAMES.get(preset, _ACE_WORKFLOW_NAMES[self.DEFAULT_MODEL])
             workflow_path = workflows_dir / workflow_name
             if not workflow_path.is_file():
@@ -319,7 +320,7 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
         workflow_name = _ACE_WORKFLOW_NAMES.get(preset)
         if not workflow_name:
             raise BackendError(BackendErrorCode.BACKEND_UNAVAILABLE, f"Unknown ACE preset: {preset}")
-        workflows_dir = self._workflows_dir or Path(__file__).resolve().parents[2] / "workflows" / "comfyui"
+        workflows_dir = self._workflows_dir or resource_path("workflows", "comfyui")
         workflow_path = workflows_dir / workflow_name
         if not workflow_path.is_file():
             return {}, {}
