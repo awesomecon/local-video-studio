@@ -69,8 +69,9 @@ export LOCAL_VIDEO_STUDIO_MOCK_MODE=1
 ```
 
 The CLI mock render always runs in mock mode (no local LLM, no model downloads). It prints the
-portable project directory and `renders/final.mp4`. Rerunning completed stages reuses their saved
-outputs.
+portable project directory and `renders/final.mp4`. Each invocation creates a new project;
+rerunning a stage of an existing project (from the web UI) keeps completed stages and rebuilds
+only what is missing.
 
 To use the local web interface:
 

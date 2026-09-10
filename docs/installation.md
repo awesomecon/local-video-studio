@@ -102,9 +102,11 @@ repository importable as `backend.*` and adds two console scripts — `lvs-mock-
 `local-video-studio` — in `.venv\Scripts\` (Windows) or `.venv/bin` (macOS/Linux); the commands on
 this page do not depend on them.
 
-On a Bash host you may instead use the existing inspection-first wrapper: `scripts/bootstrap.sh`
-reports the environment first, and `scripts/bootstrap.sh --install-lightweight` performs this same
-lightweight install. It is a convenience wrapper, not a requirement.
+On a Bash host, `scripts/bootstrap.sh` reports the environment first, and
+`scripts/bootstrap.sh --install-lightweight` performs the same lightweight install. Note that it
+invokes bare `python`, so it acts on whichever environment your shell has selected — activate
+`.venv` first (or otherwise select it) if you want it to target the virtual environment. The direct
+venv-Python commands above remain the primary path.
 
 ## 3. Verify the installation
 
@@ -127,6 +129,17 @@ lightweight install. It is a convenience wrapper, not a requirement.
   in restricted sandboxes where `nvidia-smi` probes are unavailable.
 - `check_ports.py` reports the state of the configured ports without claiming or terminating
   anything; port 1234 remains reserved for your externally managed local LLM.
+
+Many report warnings concern **optional AI dependencies or external services, not core
+mock-mode prerequisites**: "PyTorch is unavailable" (expected in a fresh core environment — the
+report itself notes mock mode remains usable with FFmpeg), CUDA/`nvidia-smi`/free-VRAM notes,
+torch-family version conflicts, and the optional backend compatibility lines.
+`check_ports.py --verify-external` likewise reports the external local LLM (port 1234) and ComfyUI
+(port 8188) identities, which only matter once you connect those services. The core prerequisites
+are Python 3.11/3.12, FFmpeg, and Git; ffprobe is recommended (without it the report notes
+"ffprobe is not on PATH; media QC will be limited" and the app falls back to FFmpeg-only
+probing). The 50 GiB free-space policy matters for the model/cache targets before downloading
+weights.
 
 ## 4. Configure mock mode
 
@@ -185,8 +198,11 @@ Expected output — the command prints JSON with the project directory and final
 The project directory (under the configured project root, default `~/ai/projects`, or your
 `--output-root`) is portable and human-readable: `plan.json`, `script/`, `narration/master.wav`,
 `music/`, `scenes/` (one directory per scene with prompt and visual), `renders/preview.mp4`,
-`renders/qc.json`, `renders/final.mp4`, `subtitles/`, and `thumbnails/`. Rerunning completed
-stages reuses their saved outputs.
+`renders/qc.json`, `renders/final.mp4`, `subtitles/`, and `thumbnails/`. Each CLI invocation
+creates a **new project**; when the slug directory already exists, the new one receives a `-2`
+(then `-3`, ...) suffix. Rerunning a *stage* of an existing project is a different operation: do it
+from the web UI or API (for example **Re-render final video** or a job retry), where
+already-completed stages are kept and only missing outputs are rebuilt.
 
 ## 6. Start the browser UI
 
@@ -223,8 +239,11 @@ and JavaScript served by FastAPI; there is no Node.js or npm build step. `GET /h
 Expected: the Export screen shows the completed final output with a project-scoped local URL, and
 the project directory under the configured project root contains `renders/final.mp4`.
 
-**Stop the application**: press `Ctrl+C` in the terminal. Uvicorn shuts down gracefully; jobs and
-stage state persist, and a restart resumes from the first incomplete stage.
+**Stop the application**: press `Ctrl+C` in the terminal; uvicorn shuts down gracefully. Project
+files and completed stage outputs persist. Running jobs do not survive a restart: at startup they
+are marked failed with "backend restarted before this job finished; retry to resume from completed
+stages". Retry them explicitly from the Job Monitor (**Retry**); the retry re-runs the top-level
+stage, keeps already-completed stages, and rebuilds only what is missing.
 
 ## Browsing the UI vs. headless Chromium
 
@@ -251,7 +270,9 @@ a Chromium/Chrome build for your OS if you plan to use Editorial Mode or Graphic
    documented single-value aliases such as `LOCAL_VIDEO_STUDIO_MODEL_ROOT`,
    `LOCAL_VIDEO_STUDIO_PROJECT_ROOT`, and `LOCAL_VIDEO_STUDIO_CACHE_ROOT`;
    `LOCAL_VIDEO_STUDIO_MOCK_MODE` for mock mode.
-4. Per-invocation CLI flags (`--config`, `--output-root`, `--database`).
+4. Per-invocation CLI flags where supported: `--config` on the diagnostic scripts
+   (`scripts/check_environment.py`, `scripts/check_ports.py`) and `--output-root` / `--database`
+   on the mock-render CLI (`backend.pipeline.cli` has no `--config`).
 
 Secrets are read only from named environment variables (for example `LOCAL_LLM_API_KEY`); never
 store them in YAML. Keep at least 50 GiB free on model and cache targets.
