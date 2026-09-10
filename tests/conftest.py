@@ -11,8 +11,19 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     from backend.rendering.binaries import discover_binaries
 
     binaries = discover_binaries()
-    if not binaries.ffmpeg or not binaries.ffprobe or not discover_chromium():
-        raise pytest.UsageError("CI requires usable FFmpeg, ffprobe and Chromium")
+    missing = [
+        name for name, present in (
+            ("FFmpeg", binaries.ffmpeg),
+            ("ffprobe", binaries.ffprobe),
+            ("Chromium", discover_chromium()),
+        )
+        if not present
+    ]
+    if missing:
+        raise pytest.UsageError(
+            "CI requires usable FFmpeg, ffprobe and Chromium; missing: "
+            + ", ".join(missing)
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)

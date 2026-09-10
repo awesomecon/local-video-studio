@@ -28,11 +28,19 @@ class FFmpegBinaries:
         return self.ffmpeg is not None
 
 
+#: First execution of a freshly installed desktop browser on CI can stall
+#: well beyond a normal probe: on-access scanning of a ~150MB unsigned binary
+#: on Windows runners regularly costs tens of seconds, while Playwright's own
+#: launch (which the smoke step uses) allows a far longer handshake.
+_BROWSER_PROBE_TIMEOUT_SECONDS = 30.0
+
+
 def _usable_executable(
     value: str | os.PathLike[str] | None,
     *,
     version_args: Sequence[str] = ("-version",),
     platform_name: str | None = None,
+    timeout: float = 5.0,
 ) -> Path | None:
     """Return an absolute executable path when its version probe succeeds."""
     if not value:
@@ -52,7 +60,7 @@ def _usable_executable(
                                 f"--user-data-dir={profile}"))
             result = subprocess.run(
                 command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=False, timeout=5,
+                check=False, timeout=timeout,
             )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -67,15 +75,17 @@ def _first_usable(
     *,
     version_args: Sequence[str],
     platform_name: str,
+    timeout: float = 5.0,
 ) -> Path | None:
     for candidate in candidates:
         if version_args == ("-version",):
-            executable = _usable_executable(candidate)
+            executable = _usable_executable(candidate, timeout=timeout)
         else:
             executable = _usable_executable(
                 candidate,
                 version_args=version_args,
                 platform_name=platform_name,
+                timeout=timeout,
             )
         if executable is not None:
             return executable
@@ -87,11 +97,13 @@ def _from_path(
     *,
     version_args: Sequence[str],
     platform_name: str,
+    timeout: float = 5.0,
 ) -> Path | None:
     return _first_usable(
         (shutil.which(name) for name in names),
         version_args=version_args,
         platform_name=platform_name,
+        timeout=timeout,
     )
 
 
@@ -244,6 +256,7 @@ def discover_chromium(
         override,
         version_args=("--version",),
         platform_name=current_platform,
+        timeout=_BROWSER_PROBE_TIMEOUT_SECONDS,
     )
     if explicit is not None:
         return explicit
@@ -263,12 +276,14 @@ def discover_chromium(
         path_names,
         version_args=("--version",),
         platform_name=current_platform,
+        timeout=_BROWSER_PROBE_TIMEOUT_SECONDS,
     )
     if from_path is not None:
         if current_platform == "Linux" and _is_snap_shim(from_path):
             real_snap = _usable_executable(
                 "/snap/chromium/current/usr/lib/chromium-browser/chrome",
                 version_args=("--version",), platform_name=current_platform,
+                timeout=_BROWSER_PROBE_TIMEOUT_SECONDS,
             )
             if real_snap is not None:
                 return real_snap
@@ -277,6 +292,7 @@ def discover_chromium(
         _platform_install_paths("chromium", platform_name=current_platform),
         version_args=("--version",),
         platform_name=current_platform,
+        timeout=_BROWSER_PROBE_TIMEOUT_SECONDS,
     )
 
 

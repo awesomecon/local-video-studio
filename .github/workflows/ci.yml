@@ -46,10 +46,24 @@ jobs:
         shell: bash
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
 
-      - name: Install FFmpeg (macOS)
+      - name: Install FFmpeg (macOS, full static build with libass)
         if: runner.os == 'macOS'
         shell: bash
-        run: brew install ffmpeg
+        run: |
+          # Homebrew's default ffmpeg bottle omits libass, which the
+          # burn-subtitles path requires (its libass builds live in keg-only
+          # ffmpeg-full). Use pinned Intel static builds compiled with
+          # --enable-libass, placed ahead of anything else on PATH.
+          mkdir -p "$RUNNER_TEMP/ffmpeg-full"
+          cd "$RUNNER_TEMP/ffmpeg-full"
+          curl -fsSL -o ffmpeg.zip https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip
+          curl -fsSL -o ffprobe.zip https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip
+          unzip -o -q ffmpeg.zip && unzip -o -q ffprobe.zip
+          xattr -dr com.apple.quarantine ffmpeg ffprobe
+          chmod +x ffmpeg ffprobe
+          ./ffmpeg -hide_banner -filters | grep -q " subtitles " \
+            || { echo "static ffmpeg lacks the libass subtitles filter"; exit 1; }
+          echo "$RUNNER_TEMP/ffmpeg-full" >> "$GITHUB_PATH"
 
       - name: Install FFmpeg (Windows)
         if: runner.os == 'Windows'
@@ -59,7 +73,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install core and test dependencies (CI only)
-        run: python -m pip install -e ".[dev]" playwright
+        # Playwright is CI/UI-inspection tooling, not a package dependency: pin
+        # it here so the bundled Chromium can only change on a deliberate bump.
+        run: python -m pip install -e ".[dev]" "playwright==1.62.0"
 
       - name: Install Chromium (Linux, including native libraries)
         if: runner.os == 'Linux'

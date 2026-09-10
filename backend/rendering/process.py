@@ -120,8 +120,45 @@ def _attribution(job_id: str | None) -> tuple[str | None, threading.Event | None
 
 def raise_if_media_job_canceled(job_id: str | None = None) -> None:
     """Check cancellation between subprocesses or before publishing an artifact."""
-    if any(token.is_set() for _, token in _cancellation_lineage(job_id)):
+    if _lineage_canceled(_cancellation_lineage(job_id)):
         raise CanceledError([], -1, "explicitly canceled")
+
+
+def _lineage_canceled(lineage: _CancellationLineage) -> bool:
+    """Report whether any owner canceled, via lineage or live token.
+
+    Lineage tuples keep their token objects so an explicit retry never revives
+    an in-flight runner; the live registry is consulted as well so a token
+    recreated after idle pruning cannot hide a cancel recorded meanwhile.
+    """
+    with _active_lock:
+        for owner, token in lineage:
+            if token.is_set():
+                return True
+            live = _job_cancellations.get(owner)
+            if live is not None and live.is_set():
+                return True
+    return False
+
+
+def _prune_idle_tokens() -> None:
+    """Drop unset tokens no live process can observe anymore.
+
+    Set tokens (recorded cancel intent) are retained until an explicit retry
+    resets them: a cancel raised between two subprocesses must survive the gap
+    even when nothing is currently registered. Callers must hold _active_lock.
+    """
+    referenced: set[str] = set()
+    for state in _process_states.values():
+        if state.job_id is not None:
+            referenced.add(state.job_id)
+        for owner, _ in state.lineage:
+            referenced.add(owner)
+    for job_id in [
+        known for known, token in _job_cancellations.items() if not token.is_set()
+    ]:
+        if job_id not in referenced:
+            _job_cancellations.pop(job_id, None)
 
 
 @contextlib.contextmanager
@@ -165,6 +202,7 @@ def _unregister_process(pid: int) -> None:
         _active_processes.pop(pid, None)
         _process_jobs.pop(pid, None)
         _process_states.pop(pid, None)
+        _prune_idle_tokens()
 
 
 def get_active_media_pids() -> list[int]:
@@ -344,7 +382,7 @@ def _spawn(argv: list[str], job_id: str | None, **kwargs: object) -> _ProcessSta
     with _active_lock:
         attribution, token = _attribution(job_id)
         lineage = _cancellation_lineage(job_id)
-        if any(ancestor_token.is_set() for _, ancestor_token in lineage):
+        if _lineage_canceled(lineage):
             raise CanceledError(argv, -1, "explicitly canceled before process start")
         options: dict[str, object] = {}
         if os.name == "posix":

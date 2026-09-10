@@ -403,6 +403,10 @@ def test_changed_root_identity_is_never_signaled(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX late process-group member")
+@pytest.mark.skipif(
+    not Path("/proc").is_dir(),
+    reason="late-member re-sweep reads group membership from /proc",
+)
 def test_group_escalation_stops_child_born_during_parent_termination(tmp_path: Path) -> None:
     parent_ready = tmp_path / "parent-ready"
     descendant_ready = tmp_path / "descendant.pid"

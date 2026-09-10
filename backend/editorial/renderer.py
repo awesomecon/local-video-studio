@@ -994,10 +994,21 @@ class EditorialRenderer:
         if os.environ.get("LVS_CHROMIUM_NO_SANDBOX", "").strip().lower() in {"1", "true", "yes"}:
             args.insert(2, "--no-sandbox")
         from backend.rendering.process import owned_media_process, raise_if_media_job_canceled
-        with owned_media_process(
-            args, env=dict(os.environ, HOME=str(profile)), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ) as process:
+        # Chromium's stderr is the only witness when it exits before exposing
+        # DevTools: keep it in a temp file and attach its tail to early-exit
+        # errors instead of discarding it, so CI failures are diagnosable.
+        with tempfile.TemporaryFile(prefix="lvs-chromium-stderr-") as diagnostics, \
+                owned_media_process(
+                    args, env=dict(os.environ, HOME=str(profile)), stdout=subprocess.DEVNULL,
+                    stderr=diagnostics,
+                ) as process:
+            def _diagnostic_tail() -> str:
+                try:
+                    diagnostics.seek(0)
+                    tail = diagnostics.read().decode("utf-8", errors="replace").strip()
+                except OSError:
+                    return "unavailable"
+                return tail[-2000:] or "empty"
             client: _CDP | None = None
             try:
                 port_file = profile / "DevToolsActivePort"
@@ -1006,7 +1017,11 @@ class EditorialRenderer:
                     if port_file.is_file():
                         break
                     if process.poll() is not None:
-                        raise RuntimeError("Chromium exited before exposing Editorial renderer control")
+                        raise RuntimeError(
+                            "Chromium exited before exposing Editorial renderer control; "
+                            f"executable={self.chromium} argv={args!r} "
+                            f"browser stderr tail: {_diagnostic_tail()}"
+                        )
                     time.sleep(0.1)
                 if not port_file.is_file():
                     raise RuntimeError("Chromium did not expose Editorial renderer control")

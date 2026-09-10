@@ -34,16 +34,21 @@ instructions below. See [qualification](cross-platform-qualification.md).
 - **Windows**: install an official Windows build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
   (the builds linked from [ffmpeg.org](https://www.ffmpeg.org/download.html)), or
   `winget install Gyan.FFmpeg`. Add the build's `bin` directory to `PATH`.
-- **macOS**: `brew install ffmpeg` (Homebrew), or the official macOS static builds linked from
-  [ffmpeg.org](https://www.ffmpeg.org/download.html) (evermeet.cx).
+- **macOS**: Homebrew's default `ffmpeg` bottle is built **without libass**, so
+  caption burn-in fails with a missing `subtitles` filter. Install a full
+  static build instead — the Intel builds at [evermeet.cx](https://evermeet.cx/ffmpeg/)
+  are compiled with `--enable-libass` (the keg-only `ffmpeg-full` formula is the
+  Homebrew alternative). Apple Silicon is a separate, unqualified target.
 - **Debian/Ubuntu Linux**: `sudo apt-get update && sudo apt-get install --yes ffmpeg` (installs
   both `ffmpeg` and `ffprobe`).
 
-Verify on any platform:
+Verify on any platform (the second command must list a `subtitles` filter;
+without it, caption burn-in is rejected before rendering starts):
 
 ```text
 ffmpeg -version
 ffprobe -version
+ffmpeg -hide_banner -filters | grep " subtitles "
 ```
 
 The application never installs FFmpeg itself. It locates `ffmpeg` on `PATH`; if the Python package

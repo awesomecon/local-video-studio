@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from typing import Any, ContextManager
 
@@ -49,7 +50,6 @@ _STARTED_STATES = {
 
 class PersistentJobQueue:
     def __init__(self, database: StudioDatabase, *, control_lock: ContextManager[Any] | None = None) -> None:
-        import threading
         self.database = database
         self._control_lock = control_lock or threading.RLock()
         self._accepting = True
