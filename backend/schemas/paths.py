@@ -93,8 +93,11 @@ def safe_portable_filename(name: str | PurePath, *, max_length: int = _MAX_FILEN
     collide) and refuses reserved device names with any extension (``"con.png"``
     cannot be created, and neither can ``"con .png"`` because the stem is
     evaluated after stripping). Characters Windows forbids outright
-    (``<>|?*"``) are replaced. Existing stored names are never rewritten by
-    this helper; apply it only when generating new files or directories.
+    (``<>|?*"``) are replaced. The length budget is enforced in characters and
+    UTF-8 bytes; the reserve prefix may add one character, which is trimmed
+    back without recreating a reserved stem (the leading underscore survives).
+    Existing stored names are never rewritten by this helper; apply it only
+    when generating new files or directories.
     """
     raw = name.as_posix() if isinstance(name, PurePath) else name
     if not isinstance(raw, str):
@@ -122,6 +125,8 @@ def safe_portable_filename(name: str | PurePath, *, max_length: int = _MAX_FILEN
     while len(cleaned.encode("utf-8")) > max_length:
         cleaned = cleaned[:-1]
     cleaned = _reserve(cleaned.rstrip(". "))
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip(". ")
     if not cleaned:
         raise ValueError(f"filename has no usable characters, got {_preview(raw)!r}")
     return cleaned

@@ -3843,9 +3843,15 @@ class PipelineService:
         archived: list[str] = []
         root = self.store.project_path(project)
         shots_directory = self._scene_media_dir(project, scene)
-        assets_by_path: dict[Path, list[Asset]] = {}
+        assets_by_path: dict[str, list[Asset]] = {}
         for asset in self.database.list_assets(project.id, scene.id, shot_id=shot.id):
-            assets_by_path.setdefault(Path(asset.filepath), []).append(asset)
+            try:
+                key = portable_relative_path(asset.filepath)
+            except ValueError:
+                # Unportable legacy spellings still fail loudly at resolve
+                # time below; group them raw so the error is not masked.
+                key = asset.filepath
+            assets_by_path.setdefault(key, []).append(asset)
         for relative_path, assets in assets_by_path.items():
             path = resolve_asset_path(root, relative_path)
             if archive_media and path.is_file():
@@ -9179,11 +9185,16 @@ class PipelineService:
         if record.get("status") != "completed":
             return False
         root = self.store.project_path(project)
-        return all(
-            resolve_asset_path(root, path).is_file()
-            and resolve_asset_path(root, path).stat().st_size > 0
-            for path in record.get("outputs", [])
-        )
+
+        def _output_ok(path: str) -> bool:
+            try:
+                resolved = resolve_asset_path(root, path)
+                return resolved.is_file() and resolved.stat().st_size > 0
+            except (ValueError, OSError):
+                # Unresolvable or vanishing outputs read as incomplete, never crash.
+                return False
+
+        return all(_output_ok(path) for path in record.get("outputs", []))
 
     def _stage_paths(self, project: Project, stage: str) -> list[Path]:
         root = self.store.project_path(project)

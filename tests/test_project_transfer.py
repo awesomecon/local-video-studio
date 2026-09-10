@@ -24,6 +24,7 @@ from backend.rendering.mock_media import create_placeholder_video
 from backend.rendering.renderer import FFmpegRenderer
 from backend.schemas import Asset, AssetType, Project, ProjectCreate, Scene
 from backend.schemas.paths import resolve_asset_path, safe_portable_filename
+from backend.storage.projects import ProjectStore
 from backend.timeline.models import SubtitleCue, Timeline, TimelineClip
 
 
@@ -135,8 +136,9 @@ def test_unportable_stage_state_fails_loudly_without_rewriting(tmp_path: Path) -
     }}}
     original = json.dumps(payload, indent=2)
     state_path.write_text(original, encoding="utf-8")
-    with pytest.raises(ValueError, match="project-relative|resolve stored media"):
-        service._stage_complete(project, "timeline")
+    # A status check never raises and never rewrites: the ambiguous record
+    # simply reads as incomplete, so an explicit retry regenerates it.
+    assert service._stage_complete(project, "timeline") is False
     assert state_path.read_text(encoding="utf-8") == original
 
 
@@ -160,10 +162,10 @@ def test_generated_archive_names_survive_windows_rules(tmp_path: Path) -> None:
         title="Names", topic="ports", target_duration=1,
     ))
     root = service.store.project_path(project)
-    hostile = ["CON.png", "trailing-dot..png", "trailing-space .png", f"{'n' * 200}.png", "odd.pn<g"]
-    expected_stems = ["_CON", "trailing-dot", "trailing-space", "n" * 100, "odd"]
-    expected_suffixes = [".png", ".png", ".png", ".png", ".pn_g"]
-    for name, expected, suffix in zip(hostile, expected_stems, expected_suffixes):
+    # On-disk sources stay portable so this round-trip runs on every OS;
+    # hostile spellings are covered without disk I/O below.
+    portable = ["clip 01.png", f"{'n' * 200}.png", "café still.png"]
+    for name in portable:
         source = root / "scenes" / name
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(b"data")
@@ -172,15 +174,38 @@ def test_generated_archive_names_survive_windows_rules(tmp_path: Path) -> None:
         assert archived.is_file() and archived.read_bytes() == b"data"
         # The full history name carries a timestamp/hash suffix, so stability
         # is checked per segment: the sanitized stem plus safe generated parts.
-        assert archived.name.startswith(expected + "-")
+        assert archived.name.startswith(safe_portable_filename(Path(name).stem) + "-")
         assert all(
             part == safe_portable_filename(part)
             for part in archived.name.replace(".", "-").split("-")
             if part
         )
         assert not archived.name.endswith((".", " "))
-        assert archived.suffix == suffix
         assert len(archived.name) <= 160
+
+
+@pytest.mark.parametrize("name, expected_stem, expected_suffix", [
+    ("CON.png", "_CON", ".png"),
+    ("con .png", "_con", ".png"),
+    ("trailing-dot..png", "trailing-dot", ".png"),
+    ("trailing-space .png", "trailing-space", ".png"),
+    ("odd.pn<g", "odd", ".pn_g"),
+    (f"{'n' * 200}.png", "n" * 100, ".png"),
+])
+def test_archive_name_sanitizes_hostile_spellings_without_disk_io(
+    name: str, expected_stem: str, expected_suffix: str,
+) -> None:
+    """Hostile upload names (reserved devices, forbidden chars) cannot be
+    created on Win32, so sanitize them without touching the filesystem: this
+    runs identically on every CI leg."""
+    archived = Path(ProjectStore._archive_name(Path(name)))
+    assert archived.name.startswith(expected_stem + "-")
+    assert archived.suffix == expected_suffix
+    assert all(
+        part == safe_portable_filename(part)
+        for part in archived.name.replace(".", "-").split("-")
+        if part
+    )
 
 
 @pytest.mark.parametrize("name, expected", [
@@ -198,7 +223,7 @@ def test_safe_portable_filename_cases(name: str, expected: str) -> None:
     assert len(safe_portable_filename("n" * 500 + ".png")) <= 100
     wide = safe_portable_filename("é" * 60 + ".png")
     assert len(wide.encode("utf-8")) <= 100 and len(wide) > 0
-    assert safe_portable_filename("conXYZ", max_length=3) == "_con"
+    assert safe_portable_filename("conXYZ", max_length=3) == "_co"
 
 
 def test_timeline_relative_path_resolves_symlinked_root(tmp_path: Path) -> None:

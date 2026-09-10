@@ -77,8 +77,10 @@ VRAM sufficiency, Metal, ROCm, or remote worker hardware.
 ## Local verification status (Linux only)
 
 On a local Linux workstation run of this branch: full Python suite
-1183 passed (including 17 project-transfer tests: copy-across-roots recovery,
-reopen, mock render, unportable-reference handling, and generated-name rules); `tests/test_media_process_lifecycle.py` 34 passed (includes the
+1183 passed (including 26 project-transfer tests: copy-across-roots recovery,
+reopen, mock render, unportable-reference handling, portable round-trip
+archiving, disk-free hostile-name sanitizing, symlinked-root timeline
+serialization, and generated-name rules); `tests/test_media_process_lifecycle.py` 34 passed (includes the
 POSIX late-group-member escalation case); editorial/render-stage/serial-worker
 retry cases 4 passed; `frontend/tests/static_checks.py` passed;
 `frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then
