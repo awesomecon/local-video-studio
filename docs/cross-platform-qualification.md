@@ -18,6 +18,14 @@ paths does not establish Windows support.
    Noto fonts, and real rendering tests with punctuation and Unicode in paths.
 6. Core readiness and optional backend restrictions reported separately.
 7. Wheel runtime resources and an acceptance test outside the source checkout.
+8. Portable project transfer: canonical forward-slash paths at every
+   persistence boundary (`backend/schemas/paths.py`), a single resolving
+   helper for all stored media references, conservative legacy reads with
+   actionable errors instead of rebasing guesses, Windows-safe generated
+   names, and a native copy-across-roots recovery/render test
+   (`tests/test_project_transfer.py`) that the CI matrix executes on each OS.
+   Existing project IDs, directory names, and file bytes are never rewritten
+   by moves or recovery.
 
 ## Distribution contract
 
@@ -69,7 +77,10 @@ VRAM sufficiency, Metal, ROCm, or remote worker hardware.
 ## Local verification status (Linux only)
 
 On a local Linux workstation run of this branch: full Python suite
-1166 passed; `tests/test_media_process_lifecycle.py` 34 passed (includes the
+1183 passed (including 26 project-transfer tests: copy-across-roots recovery,
+reopen, mock render, unportable-reference handling, portable round-trip
+archiving, disk-free hostile-name sanitizing, symlinked-root timeline
+serialization, and generated-name rules); `tests/test_media_process_lifecycle.py` 34 passed (includes the
 POSIX late-group-member escalation case); editorial/render-stage/serial-worker
 retry cases 4 passed; `frontend/tests/static_checks.py` passed;
 `frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then

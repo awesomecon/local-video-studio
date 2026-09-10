@@ -36,6 +36,7 @@ from backend.schemas import (
     ThumbnailTextLayout,
     utc_now,
 )
+from backend.schemas.paths import resolve_asset_path
 
 if TYPE_CHECKING:
     from backend.pipeline.service import PipelineService
@@ -1280,9 +1281,10 @@ class ThumbnailStudioService:
         asset = self.pipeline.database.get_asset(asset_id)
         if asset is None or asset.project_id != project.id:
             raise ValueError("source thumbnail asset was not found in this project")
-        source = (self.pipeline.store.project_path(project) / asset.filepath).resolve()
-        root = self.pipeline.store.project_path(project).resolve()
-        if root not in source.parents or not source.is_file():
+        source = resolve_asset_path(
+            self.pipeline.store.project_path(project), asset.filepath,
+        )
+        if not source.is_file():
             raise ValueError("source thumbnail file is unavailable")
         with Image.open(source) as image:
             ImageOps.fit(image.convert("RGB"), (1280, 720), Image.Resampling.LANCZOS).save(

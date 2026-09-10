@@ -71,6 +71,7 @@ from backend.core.h3_policy import (
 from backend.schemas.h3_continuity import (
     validate_continuity_graph, h3_continuity_status,
 )
+from backend.schemas.paths import portable_relative_path, resolve_asset_path
 from backend.rendering.frames import extract_last_frame, compute_sha256
 from backend.rendering.manifests import (
     SCENE_ASSEMBLY_WORKFLOW,
@@ -1631,7 +1632,7 @@ class PipelineService:
             if not active_file:
                 return None
             meta = json.loads(
-                (root / active_file).with_suffix(".json").read_text(encoding="utf-8"),
+                resolve_asset_path(root, active_file).with_suffix(".json").read_text(encoding="utf-8"),
             )
             settings = meta.get("settings", {})
             timing_mode = settings.get("timing_mode")
@@ -2988,7 +2989,7 @@ class PipelineService:
                 VisualType.H3_AUDIOVISUAL,
             }:
                 for asset in existing:
-                    path = self.store.project_path(project) / asset.filepath
+                    path = resolve_asset_path(self.store.project_path(project), asset.filepath)
                     if path.is_file():
                         self.store.archive_variant(project.slug, asset.filepath)
             if job is None:
@@ -3093,7 +3094,7 @@ class PipelineService:
         has_visual: set[str] = set()
         for asset in self.database.list_assets(project.id):
             scene = scenes_by_id.get(asset.scene_id or "")
-            path = root / asset.filepath
+            path = resolve_asset_path(root, asset.filepath)
             if (
                 scene is not None
                 and self._is_current_visual_asset(scene, asset)
@@ -3597,7 +3598,7 @@ class PipelineService:
             stable_dir = shots_root / shot.id
             stable_dir.mkdir(parents=True, exist_ok=True)
             for asset in legacy_assets:
-                source = root / asset.filepath
+                source = resolve_asset_path(root, asset.filepath)
                 if not source.is_file():
                     continue
                 destination = stable_dir / Path(*Path(asset.filepath).parts[4:])
@@ -3842,11 +3843,17 @@ class PipelineService:
         archived: list[str] = []
         root = self.store.project_path(project)
         shots_directory = self._scene_media_dir(project, scene)
-        assets_by_path: dict[Path, list[Asset]] = {}
+        assets_by_path: dict[str, list[Asset]] = {}
         for asset in self.database.list_assets(project.id, scene.id, shot_id=shot.id):
-            assets_by_path.setdefault(Path(asset.filepath), []).append(asset)
+            try:
+                key = portable_relative_path(asset.filepath)
+            except ValueError:
+                # Unportable legacy spellings still fail loudly at resolve
+                # time below; group them raw so the error is not masked.
+                key = asset.filepath
+            assets_by_path.setdefault(key, []).append(asset)
         for relative_path, assets in assets_by_path.items():
-            path = root / relative_path
+            path = resolve_asset_path(root, relative_path)
             if archive_media and path.is_file():
                 destination = self.store.archive_variant(
                     project.slug, relative_path,
@@ -4088,7 +4095,7 @@ class PipelineService:
                     self.jobs.complete(job.id)
                 return current
             if force and current is not None:
-                previous = self.store.project_path(project) / current.filepath
+                previous = resolve_asset_path(self.store.project_path(project), current.filepath)
                 if previous.is_file():
                     destination = self.store.archive_variant(
                         project.slug, current.filepath,
@@ -4623,7 +4630,7 @@ class PipelineService:
                 resolved[cue.id] = self._render_exact_text_overlay(project, shot, cue)
                 continue
             asset = assets_by_id.get(cue.asset_id or "")
-            path = root / asset.filepath if asset is not None else None
+            path = resolve_asset_path(root, asset.filepath) if asset is not None else None
             if path is None or not path.is_file() or path.stat().st_size == 0:
                 raise PipelineError(
                     f"overlay {cue.id!r} references missing media "
@@ -4850,7 +4857,7 @@ class PipelineService:
                 )
             inputs = NormalizationInputs(
                 shot=shot,
-                source_path=root / source_asset.filepath,
+                source_path=resolve_asset_path(root, source_asset.filepath),
                 overlay_paths=self._overlay_media_paths(project, shot),
                 canvas_width=project.resolution[0],
                 canvas_height=project.resolution[1],
@@ -4988,17 +4995,18 @@ class PipelineService:
                     "scope": label, "shot_id": shot.id, "code": "missing_visual",
                     "detail": "no generated visual asset is attached to this shot",
                 })
-            elif not (root / visual.filepath).is_file() \
-                    or (root / visual.filepath).stat().st_size == 0:
-                issues.append({
-                    "scope": label, "shot_id": shot.id, "code": "corrupt_visual",
-                    "detail": f"visual file {visual.filepath.as_posix()} is missing or empty",
-                })
+            else:
+                visual_path = resolve_asset_path(root, visual.filepath)
+                if not visual_path.is_file() or visual_path.stat().st_size == 0:
+                    issues.append({
+                        "scope": label, "shot_id": shot.id, "code": "corrupt_visual",
+                        "detail": f"visual file {visual.filepath.as_posix()} is missing or empty",
+                    })
             if shot.source_asset_id is not None:
                 source = next(
                     (item for item in assets if item.id == shot.source_asset_id), None,
                 )
-                source_path = root / source.filepath if source is not None else None
+                source_path = resolve_asset_path(root, source.filepath) if source is not None else None
                 if (
                     source_path is None
                     or not source_path.is_file()
@@ -5420,7 +5428,7 @@ class PipelineService:
             if not force:
                 for asset in self.database.list_assets(project.id):
                     asset_scene = scenes_by_id.get(asset.scene_id or "")
-                    path = root / asset.filepath
+                    path = resolve_asset_path(root, asset.filepath)
                     if (
                         asset_scene is not None
                         and self._is_current_visual_asset(asset_scene, asset)
@@ -5453,7 +5461,7 @@ class PipelineService:
                     if current is not None and current.status is JobStatus.CANCELED:
                         continue  # user opted this scene out; the rest continue
                     raise
-            paths = [self.store.project_path(project) / asset.filepath for asset in assets]
+            paths = [resolve_asset_path(self.store.project_path(project), asset.filepath) for asset in assets]
             return assets, paths
 
         return self._execute_stage(project, "visuals", operation, backend=backend, job=stage_job)[0]
@@ -7071,7 +7079,9 @@ class PipelineService:
                     f"Predecessor scene {pred_scene.index + 1} has no current visual asset for continuity."
                 )
             pred_asset = pred_assets[-1]
-            pred_path = self.store.project_path(project) / pred_asset.filepath
+            pred_path = resolve_asset_path(
+                self.store.project_path(project), pred_asset.filepath
+            )
             if not pred_path.is_file() or pred_path.stat().st_size == 0:
                 raise PipelineError(
                     f"Predecessor video file is missing: {pred_path}"
@@ -7941,7 +7951,7 @@ class PipelineService:
                 continue
             if settings.get("fingerprint") != fingerprint:
                 continue
-            path = self.store.project_path(project) / asset.filepath
+            path = resolve_asset_path(self.store.project_path(project), asset.filepath)
             if not path.is_file() or path.stat().st_size == 0:
                 continue
             if compute_sha256(path) != asset.hash:
@@ -8235,13 +8245,38 @@ class PipelineService:
             payload = timeline.to_dict()
             root = self.store.project_path(project)
             for clip in payload["clips"]:
-                clip["path"] = Path(clip["path"]).relative_to(root).as_posix()
+                clip["path"] = self._timeline_relative_path(root, clip["path"], scope="clip")
             for track in payload["audio_tracks"]:
-                track["path"] = Path(track["path"]).relative_to(root).as_posix()
+                track["path"] = self._timeline_relative_path(root, track["path"], scope="audio track")
             self._atomic_json(destination, payload)
             return timeline, [destination]
 
         return self._execute_stage(project, "timeline", operation, backend="ffmpeg")[0]
+
+    @staticmethod
+    def _timeline_relative_path(root: Path, value: str, *, scope: str) -> str:
+        """Serialize one timeline media path in canonical project-relative form.
+
+        Timeline media always lives inside the project directory; anything else
+        (a machine-absolute legacy path, a shared cache file) cannot transfer
+        and must fail loudly here instead of persisting an unportable path.
+        Both sides are resolved before comparison so a symlinked storage root
+        (or symlinked parents such as /tmp on some hosts) does not produce a
+        spurious outside-project error, nor a path the other host cannot read.
+        """
+        try:
+            absolute = Path(value)
+            if not absolute.is_absolute():
+                # Already relative (e.g. a test-built timeline): canonicalize only.
+                return portable_relative_path(value)
+            resolved_root = root.resolve()
+            resolved = absolute.resolve()
+            return portable_relative_path(resolved.relative_to(resolved_root))
+        except ValueError as exc:
+            raise PipelineError(
+                f"timeline {scope} media {str(value)[:120]!r} is not inside the project directory; "
+                "import the file into the project before rendering"
+            ) from exc
 
     def _editorial_renderer_instance(self) -> EditorialRenderer:
         """Create the Chromium renderer only when an Editorial export needs it."""
@@ -8437,8 +8472,11 @@ class PipelineService:
         for asset in composition.assets:
             digest: str | None = None
             if asset.source and not asset.source.startswith(("http://", "https://")):
-                candidate = (root / asset.source).resolve()
-                if root.resolve() in candidate.parents and candidate.is_file():
+                try:
+                    candidate = resolve_asset_path(root, asset.source)
+                except ValueError:
+                    candidate = None
+                if candidate is not None and candidate.is_file():
                     digest = self._incremental_hash(candidate)
             asset_files.append({"id": asset.id, "source": asset.source, "sha256": digest})
         return self._editorial_hash({
@@ -8655,14 +8693,15 @@ class PipelineService:
             for scene in scenes
             if (path := self._compiled_scene_media(project, scene)) is not None
         }
-        visuals = {
-            asset.scene_id: asset for asset in assets
-            if asset.scene_id
-            and asset.scene_id in scenes_by_id
-            and self._is_current_visual_asset(scenes_by_id[asset.scene_id], asset)
-            and (root / asset.filepath).is_file()
-            and (root / asset.filepath).stat().st_size > 0
-        }
+        visuals: dict[str, Asset] = {}
+        for asset in assets:
+            if not asset.scene_id or asset.scene_id not in scenes_by_id:
+                continue
+            if not self._is_current_visual_asset(scenes_by_id[asset.scene_id], asset):
+                continue
+            media_path = resolve_asset_path(root, asset.filepath)
+            if media_path.is_file() and media_path.stat().st_size > 0:
+                visuals[asset.scene_id] = asset
         selected: list[tuple[Scene, Asset | None, Path, str]] = []
         for scene in scenes:
             compiled = compiled_scenes.get(scene.id)
@@ -8674,7 +8713,9 @@ class PipelineService:
             if scene.id in materialized_scenes:
                 # Auto-compile multi-shot scenes before assembling the project render.
                 render_result = self.render_scene(scene.id)
-                compiled_path = root / render_result.get("path", f"scenes/{scene.index + 1:03d}/rendered.mp4")
+                compiled_path = resolve_asset_path(
+                    root, render_result.get("path", f"scenes/{scene.index + 1:03d}/rendered.mp4"),
+                )
                 selected.append((scene, None, compiled_path, "video"))
                 continue
             asset = visuals.get(scene.id)
@@ -8687,7 +8728,7 @@ class PipelineService:
                 "title" if scene.visual_type is VisualType.TITLE_CARD else
                 "diagram" if scene.visual_type is VisualType.DIAGRAM else "image"
             )
-            selected.append((scene, asset, root / asset.filepath, media_kind))
+            selected.append((scene, asset, resolve_asset_path(root, asset.filepath), media_kind))
         planned_durations = [scene.duration for scene, _asset, _path, _kind in selected]
         planned_total = sum(planned_durations)
         if not math.isfinite(planned_total):
@@ -9144,12 +9185,21 @@ class PipelineService:
         if record.get("status") != "completed":
             return False
         root = self.store.project_path(project)
-        return all((root / path).is_file() and (root / path).stat().st_size > 0 for path in record.get("outputs", []))
+
+        def _output_ok(path: str) -> bool:
+            try:
+                resolved = resolve_asset_path(root, path)
+                return resolved.is_file() and resolved.stat().st_size > 0
+            except (ValueError, OSError):
+                # Unresolvable or vanishing outputs read as incomplete, never crash.
+                return False
+
+        return all(_output_ok(path) for path in record.get("outputs", []))
 
     def _stage_paths(self, project: Project, stage: str) -> list[Path]:
         root = self.store.project_path(project)
         record = self._read_stage_state(project).get("stages", {}).get(stage, {})
-        return [root / path for path in record.get("outputs", [])]
+        return [resolve_asset_path(root, path) for path in record.get("outputs", [])]
 
     def _invalidate_stages(self, project: Project, stages: set[str]) -> None:
         # Leaf lock: stage-state.json read-modify-write is safe against

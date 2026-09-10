@@ -17,13 +17,11 @@ from backend.editorial.models import EditPlan, EditPlanProvenance
 from backend.schemas import (
     Project, ProjectPlan, Scene, Shot, ThumbnailPlan, ThumbnailSelection, VideoMode,
 )
-from backend.schemas.paths import resolve_project_path
+from backend.schemas.paths import WINDOWS_RESERVED_NAMES, resolve_project_path, safe_portable_filename
 
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_PROJECT_SLUG_LENGTH = 80
-_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"} | {
-    f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
-}
+_WINDOWS_RESERVED = WINDOWS_RESERVED_NAMES
 
 
 def slugify(value: str) -> str:
@@ -31,7 +29,7 @@ def slugify(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
     slug = slug[:MAX_PROJECT_SLUG_LENGTH].rstrip("-")
-    if slug in _WINDOWS_RESERVED:
+    if slug.upper() in _WINDOWS_RESERVED:
         slug = f"project-{slug}"
     return slug or f"project-{uuid4().hex[:8]}"
 
@@ -321,10 +319,9 @@ class ProjectStore:
     def archive_variant(self, slug: str, relative_path: str | Path) -> Path:
         project_dir = self.project_path(slug).resolve()
         source = self._archive_source(project_dir, relative_path)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        destination = resolve_project_path(project_dir, "variants/archive/" + (
-            f"{source.stem}-{stamp}-{uuid4().hex[:8]}{source.suffix}"
-        ))
+        destination = resolve_project_path(
+            project_dir, f"variants/archive/{self._archive_name(source)}",
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         return Path(shutil.move(str(source), str(destination)))
 
@@ -332,13 +329,32 @@ class ProjectStore:
         """Preserve a variant in history without removing the live publication."""
         project_dir = self.project_path(slug).resolve()
         source = self._archive_source(project_dir, relative_path)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        destination = resolve_project_path(project_dir, "variants/archive/" + (
-            f"{source.stem}-{stamp}-{uuid4().hex[:8]}{source.suffix}"
-        ))
+        destination = resolve_project_path(
+            project_dir, f"variants/archive/{self._archive_name(source)}",
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         return destination
+
+    @staticmethod
+    def _archive_name(source: Path) -> str:
+        """Build a history filename that is creatable on Windows and POSIX.
+
+        The stem derives from user-supplied upload names, so sanitize it:
+        trailing dots/spaces and reserved device names would otherwise produce
+        files the other OS cannot open. The suffix is untrusted for the same
+        reason (only a leading dot plus alphanumerics survive). The
+        timestamp/hash suffix keeps the name unique; only the untrusted stem
+        is transformed.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        stem = safe_portable_filename(source.stem)
+        suffix = "".join(
+            character if character.isalnum() else "_"
+            for character in source.suffix.lstrip(".")
+        )[:16]
+        dot_suffix = f".{suffix}" if suffix else ""
+        return f"{stem}-{stamp}-{uuid4().hex[:8]}{dot_suffix}"
 
     @staticmethod
     def _archive_source(project_dir: Path, relative_path: str | Path) -> Path:
