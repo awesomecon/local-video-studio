@@ -822,7 +822,7 @@ def test_regeneration_archives_previous_variant_and_updates_record(
 
     reloaded = service.database.get_asset(first_asset.id)
     project = service._project(scene.project_id)
-    assert str(reloaded.filepath).startswith("variants/archive/")
+    assert Path(reloaded.filepath).parts[:2] == ("variants", "archive")
     assert (service.store.project_path(project) / reloaded.filepath).is_file()
 
 

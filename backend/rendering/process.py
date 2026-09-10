@@ -554,7 +554,11 @@ def run_media_process(
             stderr = errors.read().decode("utf-8", errors="replace")
             _check_result(argv, state, reason, stderr, timeout)
             output.seek(0)
-            stdout = output.read().decode("utf-8", errors="replace") if capture_stdout else ""
+            stdout = (
+                output.read().decode("utf-8", errors="replace")
+                .replace("\r\n", "\n").replace("\r", "\n")
+                if capture_stdout else ""
+            )
             return subprocess.CompletedProcess(command, 0, stdout, stderr)
     except OSError as exc:
         raise MediaProcessError(argv, -1, str(exc)) from exc

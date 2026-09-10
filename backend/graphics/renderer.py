@@ -142,7 +142,7 @@ class GraphicScreenRenderer:
                     raise RuntimeError("Chromium PNG does not match the project resolution")
             publish = output.with_name(f".{output.name}.graphic-screen.tmp")
             shutil.copyfile(temporary_png, publish)
-            with publish.open("rb") as handle:
+            with publish.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(publish, output)
             return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -185,7 +185,7 @@ class GraphicScreenRenderer:
                 rgba = image.convert("RGBA")
                 publish = output.with_name(f".{output.name}.overlay.tmp")
                 rgba.save(publish, format="PNG")
-            with publish.open("rb") as handle:
+            with publish.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(publish, output)
             return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -298,7 +298,7 @@ class GraphicScreenRenderer:
             with Image.open(temporary) as rendered:
                 if rendered.size != (width, height):
                     raise RuntimeError("Thumbnail composite has unexpected dimensions")
-            with temporary.open("rb") as handle:
+            with temporary.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, output)
         finally:

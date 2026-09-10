@@ -87,7 +87,9 @@ def ffmpeg_identity(binaries: FFmpegBinaries) -> str:
 
 def fsync_file(path: str | Path) -> None:
     """Flush a finished file to stable storage before it is renamed into place."""
-    with Path(path).open("rb") as stream:
+    # Windows requires a writable descriptor for fsync().  The file is already
+    # complete; opening it read/write only supplies the descriptor capability.
+    with Path(path).open("r+b") as stream:
         os.fsync(stream.fileno())
 
 

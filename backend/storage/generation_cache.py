@@ -110,7 +110,7 @@ class GenerationCache:
                     with os.fdopen(descriptor, "wb") as handle:
                         pass
                     shutil.copyfile(Path(source), temporary)
-                    file_descriptor = os.open(temporary, os.O_RDONLY)
+                    file_descriptor = os.open(temporary, os.O_RDWR)
                     try:
                         os.fsync(file_descriptor)
                     finally:

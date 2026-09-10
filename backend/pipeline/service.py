@@ -4482,7 +4482,7 @@ class PipelineService:
             destination.parent.mkdir(parents=True, exist_ok=True)
             staged = destination.with_name(f".{destination.name}.pending")
             shutil.copyfile(source_path, staged)
-            with staged.open("rb") as handle:
+            with staged.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(staged, destination)
             digest = hashlib.sha256(destination.read_bytes()).hexdigest()
@@ -4793,7 +4793,7 @@ class PipelineService:
             draw.text((anchor_x, y), text, font=font, fill=(*rgb, 255), anchor=anchor)
         staged = output.with_name(f".{output.name}.pillow.tmp")
         image.save(staged, format="PNG")
-        with staged.open("rb") as handle:
+        with staged.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(staged, output)
         return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -6137,7 +6137,7 @@ class PipelineService:
             )
         staged = output.with_name(f".{output.name}.tmp")
         base.convert("RGB").save(staged, format="PNG")
-        with staged.open("rb") as handle:
+        with staged.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(staged, output)
         return hashlib.sha256(output.read_bytes()).hexdigest()
