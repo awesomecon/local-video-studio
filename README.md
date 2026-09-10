@@ -6,6 +6,11 @@ deterministic assembly, and stores projects in portable, human-readable director
 needs depend on which optional model backends you enable; the deterministic mock pipeline works
 without any GPU or model downloads.
 
+The core studio (mock pipeline, browser UI, FFmpeg rendering) is documented for installation on
+Windows (PowerShell), macOS, and Linux from a source checkout; the optional model backends are
+developed and tested on Ubuntu. See [installation](docs/installation.md), including its honest
+per-platform verification status.
+
 Real image, video, speech, music, and caption models are optional local backends with separate
 installation and licensing requirements.
 
@@ -21,7 +26,8 @@ and presets that fit. The table below is an honest per-card guide; the per-backe
 ## Requirements
 
 - Python 3.11 or 3.12
-- FFmpeg and ffprobe on `PATH` (or an existing `imageio-ffmpeg` installation)
+- FFmpeg on `PATH` (required) and ffprobe (recommended; an existing `imageio-ffmpeg`
+  installation provides a bundled fallback)
 - Git
 - NVIDIA/CUDA only for optional real-model backends
 
@@ -43,36 +49,39 @@ to your card. Full per-backend numbers and smaller-card alternatives: see
 
 ## Quick start (no model downloads)
 
+The snippet below is for a bash or zsh host (macOS/Linux); [installation](docs/installation.md)
+has the full per-OS instructions, including Windows PowerShell. The virtual environment's Python
+is invoked directly, so the environment is never activated.
+
 ```bash
 git clone https://github.com/awesomecon/local-video-studio.git
 cd local-video-studio
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+python3.12 -m venv .venv            # python3.11 works too
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e .
 
-scripts/bootstrap.sh
 export LOCAL_VIDEO_STUDIO_MOCK_MODE=1
-python -m backend.pipeline.cli \
+.venv/bin/python -m backend.pipeline.cli \
   --topic "How Roman aqueducts worked" \
   --duration 30 \
   --resolution 640x360 \
   --output-root ./projects
 ```
 
-The command prints the portable project directory and `renders/final.mp4`. Rerunning completed
-stages reuses their saved outputs.
+The CLI mock render always runs in mock mode (no local LLM, no model downloads). It prints the
+portable project directory and `renders/final.mp4`. Rerunning completed stages reuses their saved
+outputs.
 
 To use the local web interface:
 
 ```bash
 export LOCAL_VIDEO_STUDIO_MOCK_MODE=1
-python scripts/check_ports.py --verify-external
-python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009
+.venv/bin/python scripts/check_ports.py --verify-external
+.venv/bin/python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009
 ```
 
 Open `http://127.0.0.1:8009/`. The frontend is plain HTML, CSS, and JavaScript served by FastAPI;
-there is no Node.js build step.
+there is no Node.js build step. Press `Ctrl+C` in the terminal to stop the service.
 
 ## Configuration and privacy
 
