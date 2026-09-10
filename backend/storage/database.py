@@ -21,6 +21,7 @@ from typing import Any
 from backend.schemas import (
     Asset, GenerationAttempt, GenerationJob, JobStatus, Project, Scene, Shot,
 )
+from backend.schemas.paths import portable_relative_path
 
 SCHEMA_VERSION = 2
 
@@ -408,6 +409,10 @@ class StudioDatabase:
                 raise
 
     def save_asset(self, asset: Asset) -> Asset:
+        # model_copy(update=...) bypasses Pydantic validators; normalize again
+        # at the persistence boundary so the index and JSON cannot diverge.
+        filepath = portable_relative_path(asset.filepath)
+        asset = asset.model_copy(update={"filepath": Path(filepath)})
         with self.connection() as connection:
             connection.execute(
                 """INSERT INTO assets
@@ -418,7 +423,7 @@ class StudioDatabase:
                    shot_id=excluded.shot_id, asset_type=excluded.asset_type,
                    filepath=excluded.filepath, payload_json=excluded.payload_json""",
                 (asset.id, asset.project_id, asset.scene_id, asset.shot_id,
-                 asset.type.value, str(asset.filepath), asset.created_at.isoformat(),
+                 asset.type.value, filepath, asset.created_at.isoformat(),
                  asset.model_dump_json()),
             )
         return asset
@@ -446,10 +451,14 @@ class StudioDatabase:
 
     def delete_assets_for_path(self, project_id: str, filepath_prefix: str) -> int:
         """Remove asset index rows under a project-relative directory prefix."""
+        prefix = portable_relative_path(filepath_prefix)
+        if filepath_prefix.endswith(("/", "\\")):
+            prefix += "/"
         with self.connection() as connection:
             cursor = connection.execute(
-                "DELETE FROM assets WHERE project_id=? AND filepath LIKE ? ESCAPE '\\'",
-                (project_id, filepath_prefix.replace("\\", "\\\\").replace("%", "\\%")
+                "DELETE FROM assets WHERE project_id=? "
+                "AND replace(filepath, '\\', '/') LIKE ? ESCAPE '\\'",
+                (project_id, prefix.replace("\\", "\\\\").replace("%", "\\%")
                  .replace("_", "\\_") + "%"),
             )
             return int(cursor.rowcount)
@@ -632,6 +641,7 @@ class StudioDatabase:
 
     def record_render_metadata(self, project_id: str, filepath: str,
                                metadata: dict[str, Any], created_at: datetime) -> int:
+        filepath = portable_relative_path(filepath)
         with self.connection() as connection:
             cursor = connection.execute(
                 """INSERT INTO render_metadata
