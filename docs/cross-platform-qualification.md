@@ -72,9 +72,17 @@ On a local Linux workstation run of this branch: full Python suite
 1166 passed; `tests/test_media_process_lifecycle.py` 34 passed (includes the
 POSIX late-group-member escalation case); editorial/render-stage/serial-worker
 retry cases 4 passed; `frontend/tests/static_checks.py` passed;
-`frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were not
-captured in this pass (no application backend was running; the capture helper
-never starts servers). These results are Linux-only evidence. Native Windows
+`frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then
+captured against the user's running backend (`scripts/ui_shots.py`, throw-away
+Chromium profile): every route rendered with no uncaught page exceptions; the
+Models page shows the new "Core studio / Ready" readiness panel with per-tool
+badges. Export/Thumbnails return 500 only for the single indexed project whose
+on-disk directory is absent (SQLite references a slug with no directory; the
+same `load_project` FileNotFoundError path exists on the base commit, so this
+is pre-existing data state, not a branch regression). Remaining per-page
+resource 404s are missing media assets for that same project, and the Models
+503 is an optional AI service probe when its worker is down. These results are
+Linux-only evidence. Native Windows
 (`windows-2025`) and macOS (`macos-15-intel`) runs, interactive
 microphone/recording and media-lock checks, and review of all required CI job
 results remain pending before any platform claim.
