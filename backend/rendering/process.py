@@ -1,38 +1,43 @@
-"""Subprocess execution shared by all rendering components."""
+"""Owned media subprocesses with explicit, job-scoped cancellation."""
 
 from __future__ import annotations
 
 import contextlib
+import os
+import signal
 import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Sequence
 
-# Module-level registry of active media subprocesses for cancellation.
-# Each tracked PID may be attributed to a pipeline job id (job-level scoping)
-# so canceling one job never kills an unrelated job's media processes.
+import psutil
+
+_TERMINATE_SECONDS = 0.5
+_KILL_SECONDS = 2.0
+
+
+@dataclass
+class _ProcessState:
+    proc: subprocess.Popen
+    job_id: str | None
+    token: threading.Event | None = None
+    owns_group: bool = False
+    reason: str | None = None
+    stop_lock: threading.Lock = field(default_factory=threading.Lock)
+    stopped: bool = False
+    reaper_started: bool = False
+
+
 _active_processes: dict[int, subprocess.Popen] = {}
 _process_jobs: dict[int, str] = {}
-_active_lock = threading.Lock()
-
-# Thread-local job attribution: job runners wrap their work in
-# media_process_scope(job_id) so every media subprocess started on that
-# thread (directly or deep inside renderer helpers) is tracked under the job.
+_process_states: dict[int, _ProcessState] = {}
+_job_cancellations: dict[str, threading.Event] = {}
+_active_lock = threading.RLock()
 _current_job = threading.local()
-
-
-@contextlib.contextmanager
-def media_process_scope(job_id: str | None) -> Iterator[None]:
-    """Attribute media processes started on this thread to ``job_id``."""
-    previous = getattr(_current_job, "job_id", None)
-    _current_job.job_id = job_id
-    try:
-        yield
-    finally:
-        _current_job.job_id = previous
 
 
 class MediaProcessError(RuntimeError):
@@ -46,230 +51,378 @@ class MediaProcessError(RuntimeError):
 
 
 class CanceledError(MediaProcessError):
-    """Raised when a media process was explicitly canceled."""
+    """Explicit cancellation, regardless of the operating system's exit code."""
 
 
-def cancel_all_media_processes() -> list[int]:
-    """Kill every tracked media subprocess and return the PIDs that were killed."""
-    killed: list[int] = []
+def _job_token(job_id: str | None) -> threading.Event | None:
+    if job_id is None:
+        return None
     with _active_lock:
-        processes = list(_active_processes.items())
-        for pid, proc in processes:
-            try:
-                proc.kill()
-                killed.append(pid)
-            except Exception:
-                pass
-        # Do not remove from registry yet; removal happens on process exit.
-    return killed
+        return _job_cancellations.setdefault(job_id, threading.Event())
 
 
-def cancel_media_processes_for_job(job_id: str) -> list[int]:
-    """Kill tracked media subprocesses attributed to one job; return killed PIDs.
-
-    Unlike cancel_all_media_processes(), this never touches processes owned by
-    other jobs, so canceling a TTS job cannot kill an in-flight render.
-    """
-    killed: list[int] = []
-    with _active_lock:
-        targets = [
-            (pid, proc) for pid, proc in _active_processes.items()
-            if _process_jobs.get(pid) == job_id
-        ]
-        for pid, proc in targets:
-            try:
-                proc.kill()
-                killed.append(pid)
-            except Exception:
-                pass
-        # Do not remove from registry yet; removal happens on process exit.
-    return killed
-
-
-def cancel_media_process_by_pid(pid: int) -> bool:
-    """Kill a specific tracked process by PID. Returns True if it was found."""
-    with _active_lock:
-        proc = _active_processes.get(pid)
-    if proc is None:
-        return False
+@contextlib.contextmanager
+def media_process_scope(job_id: str | None) -> Iterator[None]:
+    """Attribute work to one attempt; retries cannot uncancel an older scope."""
+    previous = getattr(_current_job, "job_id", None)
+    previous_token = getattr(_current_job, "token", None)
+    _current_job.job_id = job_id
+    _current_job.token = previous_token if previous == job_id else _job_token(job_id)
     try:
-        proc.kill()
-        return True
-    except Exception:
-        return False
+        yield
+    finally:
+        _current_job.job_id = previous
+        _current_job.token = previous_token
 
 
-def _register_process(proc: subprocess.Popen, job_id: str | None) -> int:
+def reset_media_process_cancellation(job_id: str) -> None:
+    """Begin an explicitly retried attempt. Existing runners retain their token.
+
+    Call only when the job queue accepts an explicit retry, never on entry to
+    an ordinary runner: cancellation before the first subprocess must survive.
+    The caller must serialize its queue retry/reset and queue cancel/signal
+    operations with the same control lock, so a fresh cancel cannot be cleared.
+    """
     with _active_lock:
-        pid = proc.pid
-        _active_processes[pid] = proc
+        _job_cancellations.pop(job_id, None)
+
+
+def current_media_job_id() -> str | None:
+    """Return the enclosing pipeline attribution, if this thread has one."""
+    return getattr(_current_job, "job_id", None)
+
+
+def _attribution(job_id: str | None) -> tuple[str | None, threading.Event | None]:
+    scoped_job = getattr(_current_job, "job_id", None)
+    if job_id is None or job_id == scoped_job:
+        return scoped_job, getattr(_current_job, "token", None)
+    return job_id, _job_token(job_id)
+
+
+def raise_if_media_job_canceled(job_id: str | None = None) -> None:
+    """Check cancellation between subprocesses or before publishing an artifact."""
+    _, token = _attribution(job_id)
+    if token is not None and token.is_set():
+        raise CanceledError([], -1, "explicitly canceled")
+
+
+@contextlib.contextmanager
+def media_output_publication(job_id: str | None = None) -> Iterator[None]:
+    """Serialize the final local rename with media cancellation intent.
+
+    Keep this boundary short: stage and validate the artifact beforehand, then
+    perform only the atomic publication inside the context.
+    """
+    with _active_lock:
+        raise_if_media_job_canceled(job_id)
+        yield
+
+
+def _register_process(
+    proc: subprocess.Popen, job_id: str | None, *, owns_group: bool = False,
+    token: threading.Event | None = None,
+) -> int:
+    with _active_lock:
+        _active_processes[proc.pid] = proc
         if job_id is not None:
-            _process_jobs[pid] = job_id
-    return pid
+            _process_jobs[proc.pid] = job_id
+        _process_states[proc.pid] = _ProcessState(
+            proc, job_id, token if token is not None else _job_token(job_id), owns_group,
+        )
+    return proc.pid
 
 
 def _unregister_process(pid: int) -> None:
     with _active_lock:
         _active_processes.pop(pid, None)
         _process_jobs.pop(pid, None)
+        _process_states.pop(pid, None)
 
 
 def get_active_media_pids() -> list[int]:
     with _active_lock:
-        return list(_active_processes.keys())
+        return list(_active_processes)
+
+
+def _stop_owned_process(state: _ProcessState) -> None:
+    """Bounded terminate/kill/reap of this process and observed descendants.
+
+    POSIX children also share a private session, so group termination reaches
+    descendants created during the snapshot. On Windows, psutil holds process
+    identities (including creation times), never names or ports. Descendants
+    which deliberately detach before discovery require native job containment.
+    """
+    with state.stop_lock:
+        if state.stopped:
+            return
+        proc = state.proc
+        descendants: list[psutil.Process] = []
+        if proc.poll() is None:
+            try:
+                descendants = psutil.Process(proc.pid).children(recursive=True)
+            except psutil.Error:
+                pass
+            if state.owns_group and os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            for child in reversed(descendants):
+                with contextlib.suppress(psutil.Error):
+                    child.terminate()
+            with contextlib.suppress(OSError):
+                proc.terminate()
+        try:
+            proc.wait(timeout=_TERMINATE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # The group remains owned while the unreaped group leader exists.
+            if state.owns_group and os.name == "posix":
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                proc.kill()
+        for child in reversed(descendants):
+            with contextlib.suppress(psutil.Error):
+                if child.is_running():
+                    child.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_KILL_SECONDS)
+        if descendants:
+            psutil.wait_procs(descendants, timeout=_KILL_SECONDS)
+        state.stopped = True
+
+
+def _request_stop(state: _ProcessState, reason: str) -> bool:
+    with _active_lock:
+        if _process_states.get(state.proc.pid) is not state or state.reason is not None:
+            return False
+        state.reason = reason
+        return True
+
+
+def _cancel_states(states: list[_ProcessState]) -> list[int]:
+    # Record every intent before waiting for any process to stop.
+    with _active_lock:
+        targets = [state for state in states if _request_stop(state, "canceled")]
+    for state in targets:
+        _stop_owned_process(state)
+    return [state.proc.pid for state in targets]
+
+
+def cancel_all_media_processes() -> list[int]:
+    """Cancel only registered media processes, recording intent before signaling."""
+    with _active_lock:
+        states = list(_process_states.values())
+        for token in _job_cancellations.values():
+            token.set()
+        for state in states:
+            if state.token is not None:
+                state.token.set()
+        return_targets = [state for state in states if _request_stop(state, "canceled")]
+    for state in return_targets:
+        _stop_owned_process(state)
+    return [state.proc.pid for state in return_targets]
+
+
+def cancel_media_processes_for_job(job_id: str) -> list[int]:
+    """Cancel a job, including the gaps before and between its subprocesses."""
+    with _active_lock:
+        token = _job_token(job_id)
+        assert token is not None
+        token.set()
+        targets = [state for state in _process_states.values() if state.job_id == job_id]
+        for state in targets:
+            if state.token is not None:
+                state.token.set()
+        targets = [state for state in targets if _request_stop(state, "canceled")]
+    for state in targets:
+        _stop_owned_process(state)
+    return [state.proc.pid for state in targets]
+
+
+def cancel_media_process_by_pid(pid: int) -> bool:
+    """Cancel an owned, registered process. Never act on an arbitrary PID."""
+    with _active_lock:
+        state = _process_states.get(pid)
+    return bool(_cancel_states([state])) if state is not None else False
+
+
+def _spawn(argv: list[str], job_id: str | None, **kwargs: object) -> _ProcessState:
+    # Serialize the cancellation check, spawn and registration. A cancel cannot
+    # land in a gap that leaves an untracked child running afterward.
+    with _active_lock:
+        attribution, token = _attribution(job_id)
+        if token is not None and token.is_set():
+            raise CanceledError(argv, -1, "explicitly canceled before process start")
+        options: dict[str, object] = {}
+        if os.name == "posix":
+            options["start_new_session"] = True
+        elif os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = subprocess.Popen(argv, **kwargs, **options)
+        _register_process(proc, attribution, owns_group=True, token=token)
+        return _process_states[proc.pid]
+
+
+def _finish(state: _ProcessState) -> str | None:
+    with _active_lock:
+        if state.reason is None:
+            if state.proc.poll() is not None:
+                _unregister_process(state.proc.pid)
+            else:
+                _start_reaper(state)
+            return None
+    _stop_owned_process(state)
+    with _active_lock:
+        if state.proc.poll() is not None:
+            _unregister_process(state.proc.pid)
+        else:
+            _start_reaper(state)
+        return state.reason
+
+
+def _start_reaper(state: _ProcessState) -> None:
+    """Retain ownership of an uninterruptible child until it actually exits."""
+    if state.reaper_started:
+        return
+    state.reaper_started = True
+
+    def reap() -> None:
+        state.proc.wait()
+        with _active_lock:
+            if _process_states.get(state.proc.pid) is state:
+                _unregister_process(state.proc.pid)
+
+    threading.Thread(target=reap, name="media-reaper", daemon=True).start()
+
+
+def _check_result(
+    argv: Sequence[str], state: _ProcessState, reason: str | None,
+    stderr: str, timeout: float | None,
+) -> None:
+    returncode = state.proc.returncode
+    if reason == "canceled":
+        raise CanceledError(argv, returncode if returncode is not None else -1, stderr)
+    if reason == "timeout":
+        raise MediaProcessError(argv, -1, f"timed out after {timeout} seconds")
+    if returncode != 0:
+        raise MediaProcessError(argv, returncode if returncode is not None else -1, stderr)
+
+
+def _wait_for_process(state: _ProcessState, timeout: float | None = None) -> None:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while state.reason is None:
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            state.proc.wait(timeout=0.1 if remaining is None else min(0.1, remaining))
+            return
+        except subprocess.TimeoutExpired:
+            if deadline is not None and time.monotonic() >= deadline:
+                _request_stop(state, "timeout")
 
 
 def run_media_process(
-    argv: Sequence[str],
-    *,
-    timeout: float | None = None,
-    capture_stdout: bool = False,
-    job_id: str | None = None,
+    argv: Sequence[str], *, timeout: float | None = None,
+    capture_stdout: bool = False, job_id: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run trusted argv without a shell and raise a structured error on failure."""
-
+    """Run trusted argv without a shell. Only explicit intent means canceled."""
     if not argv:
         raise ValueError("argv must not be empty")
-    cmd_strs = [str(part) for part in argv]
+    command = [str(part) for part in argv]
     try:
-        proc = subprocess.Popen(
-            cmd_strs,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        # Explicit job_id wins; otherwise inherit the thread's media scope.
-        attribution = job_id if job_id is not None else getattr(_current_job, "job_id", None)
-        pid = _register_process(proc, attribution)
-        try:
+        # Files avoid deadlock and inherited-pipe hangs after the child exits.
+        with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as output:
+            state = _spawn(
+                command, job_id, stdin=subprocess.DEVNULL, stderr=errors,
+                stdout=output if capture_stdout else subprocess.DEVNULL,
+            )
             try:
-                stdout_data, stderr_data = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
                 try:
-                    proc.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # SIGKILL did not reap the child yet (e.g. uninterruptible
-                    # I/O). It stays registered so cancellation helpers can
-                    # still target the lingering PID; this residual-linger case
-                    # is resolved by a later successful reap or process exit.
-                    pass
-                raise MediaProcessError(argv, -1, f"timed out after {timeout} seconds") from None
-        finally:
-            # Unregister only once the child's exit status is confirmed reaped,
-            # including when communicate() fails unexpectedly, so a stale PID
-            # can never be mistaken for a reused one.
-            if proc.poll() is not None:
-                _unregister_process(pid)
-
-        # If the process was killed (e.g. by cancel), treat it as canceled rather than failed.
-        returncode = proc.returncode
-        stderr_text = stderr_data or ""
-        stdout_text = stdout_data or ""
-
-        if returncode is not None and returncode < 0:
-            # Negative returncode indicates signal termination (e.g. SIGKILL from cancel).
-            raise CanceledError(argv, returncode, stderr_text)
-
-        # For non-zero positive return codes, it's a real failure.
-        if returncode is not None and returncode != 0:
-            raise MediaProcessError(argv, returncode, stderr_text)
-
-        # Reconstruct CompletedProcess-like result for compatibility.
-        result = subprocess.CompletedProcess(
-            args=cmd_strs,
-            returncode=returncode if returncode is not None else 0,
-            stdout=stdout_text,
-            stderr=stderr_text,
-        )
-        return result
-    except (MediaProcessError, CanceledError):
-        raise
+                    _wait_for_process(state, timeout)
+                except BaseException:
+                    _stop_owned_process(state)
+                    raise
+            finally:
+                reason = _finish(state)
+            errors.seek(0)
+            stderr = errors.read().decode("utf-8", errors="replace")
+            _check_result(argv, state, reason, stderr, timeout)
+            output.seek(0)
+            stdout = output.read().decode("utf-8", errors="replace") if capture_stdout else ""
+            return subprocess.CompletedProcess(command, 0, stdout, stderr)
     except OSError as exc:
         raise MediaProcessError(argv, -1, str(exc)) from exc
 
 
 def run_media_process_stream(
-    argv: Sequence[str],
-    chunks: Iterable[bytes],
-    *,
-    timeout: float | None = None,
+    argv: Sequence[str], chunks: Iterable[bytes], *, timeout: float | None = None,
     job_id: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run a tracked media process while incrementally feeding binary stdin.
+    """Feed lazy binary chunks, bounding blocked pipe writes with a watchdog.
 
-    Keeping the producer lazy avoids materializing a complete frame sequence in
-    memory or on disk. Stderr goes to a temporary file so FFmpeg can never
-    deadlock on a full stderr pipe while the caller is still producing frames.
+    A producer's own Python computation cannot be forcibly interrupted; producers
+    must yield or check cancellation cooperatively. The child still stops on time.
     """
-
     if not argv:
         raise ValueError("argv must not be empty")
-    cmd_strs = [str(part) for part in argv]
+    command = [str(part) for part in argv]
     iterator = iter(chunks)
-    started = time.monotonic()
+    done = threading.Event()
+    watcher: threading.Thread | None = None
     try:
-        with tempfile.TemporaryFile() as stderr_file:
-            proc = subprocess.Popen(
-                cmd_strs,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_file,
+        with tempfile.TemporaryFile() as errors:
+            state = _spawn(
+                command, job_id, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=errors, bufsize=0,
             )
-            attribution = job_id if job_id is not None else getattr(_current_job, "job_id", None)
-            pid = _register_process(proc, attribution)
+
+            def expire() -> None:
+                if not done.wait(timeout) and _request_stop(state, "timeout"):
+                    _stop_owned_process(state)
+
+            if timeout is not None:
+                watcher = threading.Thread(target=expire, name="media-timeout", daemon=True)
+                watcher.start()
+            failure: BaseException | None = None
             try:
-                try:
-                    assert proc.stdin is not None
-                    for chunk in iterator:
-                        if timeout is not None and time.monotonic() - started >= timeout:
-                            raise subprocess.TimeoutExpired(cmd=cmd_strs, timeout=timeout)
+                assert state.proc.stdin is not None
+                for chunk in iterator:
+                    if state.reason is not None:
+                        break
+                    view = memoryview(chunk)
+                    while view and state.reason is None:
                         try:
-                            proc.stdin.write(chunk)
+                            written = state.proc.stdin.write(view)
                         except BrokenPipeError:
                             break
-                    try:
-                        proc.stdin.close()
-                    except BrokenPipeError:
-                        pass
-                    remaining = (
-                        None if timeout is None
-                        else max(0.0, timeout - (time.monotonic() - started))
-                    )
-                    proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    raise MediaProcessError(argv, -1, f"timed out after {timeout} seconds") from None
-                except BaseException:
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    raise
+                        if not written:
+                            raise OSError("media process stdin write made no progress")
+                        view = view[written:]
+                    if view or state.proc.poll() is not None:
+                        break
+                with contextlib.suppress(BrokenPipeError):
+                    state.proc.stdin.close()
+                _wait_for_process(state)
+            except BaseException as exc:
+                failure = exc
+                _stop_owned_process(state)
             finally:
-                close_iterator = getattr(iterator, "close", None)
-                if callable(close_iterator):
-                    close_iterator()
-                if proc.poll() is not None:
-                    _unregister_process(pid)
-
-            stderr_file.seek(0)
-            stderr_text = stderr_file.read().decode("utf-8", errors="replace")
-            returncode = proc.returncode if proc.returncode is not None else 0
-            if returncode < 0:
-                raise CanceledError(argv, returncode, stderr_text)
-            if returncode != 0:
-                raise MediaProcessError(argv, returncode, stderr_text)
-            return subprocess.CompletedProcess(
-                args=cmd_strs, returncode=returncode, stdout=b"", stderr=stderr_text.encode(),
-            )
-    except (MediaProcessError, CanceledError):
-        raise
+                done.set()
+                reason = _finish(state)
+                if watcher is not None:
+                    watcher.join(timeout=_TERMINATE_SECONDS + 2 * _KILL_SECONDS + 0.5)
+                if state.proc.stdin is not None:
+                    with contextlib.suppress(OSError):
+                        state.proc.stdin.close()
+            errors.seek(0)
+            stderr = errors.read()
+            if failure is not None and reason is None:
+                raise failure
+            _check_result(argv, state, reason, stderr.decode("utf-8", errors="replace"), timeout)
+            return subprocess.CompletedProcess(command, 0, b"", stderr)
     except OSError as exc:
         raise MediaProcessError(argv, -1, str(exc)) from exc
+    finally:
+        close_iterator = getattr(iterator, "close", None)
+        if callable(close_iterator):
+            close_iterator()
