@@ -7073,7 +7073,9 @@ class PipelineService:
                     f"Predecessor scene {pred_scene.index + 1} has no current visual asset for continuity."
                 )
             pred_asset = pred_assets[-1]
-            pred_path = self.store.project_path(project) / pred_asset.filepath
+            pred_path = resolve_asset_path(
+                self.store.project_path(project), pred_asset.filepath
+            )
             if not pred_path.is_file() or pred_path.stat().st_size == 0:
                 raise PipelineError(
                     f"Predecessor video file is missing: {pred_path}"
@@ -8252,13 +8254,18 @@ class PipelineService:
         Timeline media always lives inside the project directory; anything else
         (a machine-absolute legacy path, a shared cache file) cannot transfer
         and must fail loudly here instead of persisting an unportable path.
+        Both sides are resolved before comparison so a symlinked storage root
+        (or symlinked parents such as /tmp on some hosts) does not produce a
+        spurious outside-project error, nor a path the other host cannot read.
         """
         try:
             absolute = Path(value)
             if not absolute.is_absolute():
                 # Already relative (e.g. a test-built timeline): canonicalize only.
                 return portable_relative_path(value)
-            return portable_relative_path(absolute.relative_to(root))
+            resolved_root = root.resolve()
+            resolved = absolute.resolve()
+            return portable_relative_path(resolved.relative_to(resolved_root))
         except ValueError as exc:
             raise PipelineError(
                 f"timeline {scope} media {str(value)[:120]!r} is not inside the project directory; "

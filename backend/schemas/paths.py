@@ -14,6 +14,8 @@ WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOU
     f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
 }
 _WINDOWS_RESERVED = WINDOWS_RESERVED_NAMES
+#: Characters Windows refuses in any filename; sanitized, never passed through.
+_WINDOWS_INVALID_CHARS = '<>|?*"'
 
 
 def _preview(value: object) -> str:
@@ -89,24 +91,37 @@ def safe_portable_filename(name: str | PurePath, *, max_length: int = _MAX_FILEN
 
     Windows strips trailing dots/spaces (so ``"take "`` and ``"take"`` would
     collide) and refuses reserved device names with any extension (``"con.png"``
-    cannot be created). Sanitize generated names here instead of failing on
-    the target host or, worse, writing a file the other OS cannot open.
-    Existing stored names are never rewritten by this helper; apply it only
-    when generating new files or directories.
+    cannot be created, and neither can ``"con .png"`` because the stem is
+    evaluated after stripping). Characters Windows forbids outright
+    (``<>|?*"``) are replaced. Existing stored names are never rewritten by
+    this helper; apply it only when generating new files or directories.
     """
     raw = name.as_posix() if isinstance(name, PurePath) else name
     if not isinstance(raw, str):
         raise ValueError(f"filename must be a string or path, got {_preview(name)!r}")
     if "/" in raw or "\\" in raw or ":" in raw or any(ord(c) < 32 for c in raw):
         raise ValueError(f"filename must be a single segment, got {_preview(raw)!r}")
-    cleaned = raw.strip().rstrip(".")
+    cleaned = "".join("_" if c in _WINDOWS_INVALID_CHARS else c for c in raw.strip())
+    cleaned = cleaned.rstrip(". ")
     if not cleaned or cleaned in {".", ".."}:
         raise ValueError(f"filename has no usable characters, got {_preview(raw)!r}")
-    stem = cleaned.split(".")[0]
-    if stem.upper() in _WINDOWS_RESERVED:
-        cleaned = f"_{cleaned}"
+
+    def _reserve(value: str) -> str:
+        # Windows evaluates the stem after stripping trailing dots/spaces,
+        # so "con .png" and "con." are as reserved as "con.png".
+        if value.split(".")[0].strip().upper() in _WINDOWS_RESERVED:
+            return f"_{value}"
+        return value
+
+    cleaned = _reserve(cleaned)
     if len(cleaned) > max_length:
-        cleaned = cleaned[:max_length].rstrip(".")
+        cleaned = cleaned[:max_length]
+    # Enforce the budget in bytes as well: transfer targets and filesystems
+    # may count UTF-8 bytes, and non-ASCII characters occupy several. Slicing
+    # a str never splits a code point, so shrinking by characters is safe.
+    while len(cleaned.encode("utf-8")) > max_length:
+        cleaned = cleaned[:-1]
+    cleaned = _reserve(cleaned.rstrip(". "))
     if not cleaned:
         raise ValueError(f"filename has no usable characters, got {_preview(raw)!r}")
     return cleaned

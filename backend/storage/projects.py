@@ -342,12 +342,19 @@ class ProjectStore:
 
         The stem derives from user-supplied upload names, so sanitize it:
         trailing dots/spaces and reserved device names would otherwise produce
-        files the other OS cannot open. The timestamp/hash suffix keeps the
-        name unique; only the untrusted stem is transformed.
+        files the other OS cannot open. The suffix is untrusted for the same
+        reason (only a leading dot plus alphanumerics survive). The
+        timestamp/hash suffix keeps the name unique; only the untrusted stem
+        is transformed.
         """
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         stem = safe_portable_filename(source.stem)
-        return f"{stem}-{stamp}-{uuid4().hex[:8]}{source.suffix}"
+        suffix = "".join(
+            character if character.isalnum() else "_"
+            for character in source.suffix.lstrip(".")
+        )[:16]
+        dot_suffix = f".{suffix}" if suffix else ""
+        return f"{stem}-{stamp}-{uuid4().hex[:8]}{dot_suffix}"
 
     @staticmethod
     def _archive_source(project_dir: Path, relative_path: str | Path) -> Path:

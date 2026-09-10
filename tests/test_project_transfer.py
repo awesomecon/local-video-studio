@@ -160,9 +160,10 @@ def test_generated_archive_names_survive_windows_rules(tmp_path: Path) -> None:
         title="Names", topic="ports", target_duration=1,
     ))
     root = service.store.project_path(project)
-    hostile = ["CON.png", "trailing-dot..png", "trailing-space .png", f"{'n' * 200}.png"]
-    expected_stems = ["_CON", "trailing-dot", "trailing-space", "n" * 100]
-    for name, expected in zip(hostile, expected_stems):
+    hostile = ["CON.png", "trailing-dot..png", "trailing-space .png", f"{'n' * 200}.png", "odd.pn<g"]
+    expected_stems = ["_CON", "trailing-dot", "trailing-space", "n" * 100, "odd"]
+    expected_suffixes = [".png", ".png", ".png", ".png", ".pn_g"]
+    for name, expected, suffix in zip(hostile, expected_stems, expected_suffixes):
         source = root / "scenes" / name
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(b"data")
@@ -178,6 +179,7 @@ def test_generated_archive_names_survive_windows_rules(tmp_path: Path) -> None:
             if part
         )
         assert not archived.name.endswith((".", " "))
+        assert archived.suffix == suffix
         assert len(archived.name) <= 160
 
 
@@ -186,12 +188,32 @@ def test_generated_archive_names_survive_windows_rules(tmp_path: Path) -> None:
     ("trailing. ", "trailing"),
     ("dots....", "dots"),
     ("CON.png", "_CON.png"),
+    ("con .png", "_con .png"),
     ("com1", "_com1"),
+    ("a<b>|c?.png", "a_b__c_.png"),
     ("ok name.png", "ok name.png"),
 ])
 def test_safe_portable_filename_cases(name: str, expected: str) -> None:
     assert safe_portable_filename(name) == expected
     assert len(safe_portable_filename("n" * 500 + ".png")) <= 100
+    wide = safe_portable_filename("é" * 60 + ".png")
+    assert len(wide.encode("utf-8")) <= 100 and len(wide) > 0
+    assert safe_portable_filename("conXYZ", max_length=3) == "_con"
+
+
+def test_timeline_relative_path_resolves_symlinked_root(tmp_path: Path) -> None:
+    real = tmp_path / "real" / "proj"
+    (real / "scenes").mkdir(parents=True)
+    media = real / "scenes" / "a.mp4"
+    media.write_bytes(b"0")
+    link = tmp_path / "link" / "proj"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(real, target_is_directory=True)
+    # The stored spelling is resolved while the root still carries the link:
+    # without resolving both sides this looks like an outside-project path.
+    assert PipelineService._timeline_relative_path(
+        link, str(media.resolve()), scope="clip",
+    ) == "scenes/a.mp4"
 
 
 @pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "a:b", "x\x00y"])
