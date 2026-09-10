@@ -1,10 +1,10 @@
 # Local Video Studio
 
-Local Video Studio is a local-first, restartable AI video-production application for Ubuntu. It
-runs your own models on your hardware, keeps prompts and media on your machine, uses FFmpeg for
-deterministic assembly, and stores projects in portable, human-readable directories. GPU and VRAM
-needs depend on which optional model backends you enable; the deterministic mock pipeline works
-without any GPU or model downloads.
+Local Video Studio is a local-first, restartable AI video-production application developed on
+Ubuntu. It runs your own models on your hardware, keeps prompts and media on your machine, uses
+FFmpeg for deterministic assembly, and stores projects in portable, human-readable directories.
+GPU and VRAM needs depend on which optional model backends you enable; the deterministic mock
+pipeline works without any GPU or model downloads.
 
 The core studio (mock pipeline, browser UI, FFmpeg rendering) is documented for installation on
 Windows (PowerShell), macOS, and Linux from a source checkout; the optional model backends are
@@ -26,8 +26,9 @@ and presets that fit. The table below is an honest per-card guide; the per-backe
 ## Requirements
 
 - Python 3.11 or 3.12
-- FFmpeg on `PATH` (required) and ffprobe (recommended; an existing `imageio-ffmpeg`
-  installation provides a bundled fallback)
+- FFmpeg on `PATH` (required unless an existing `imageio-ffmpeg` installation provides its
+  bundled binary) and ffprobe (recommended; there is no bundled fallback, so media QC is
+  limited without it)
 - Git
 - NVIDIA/CUDA only for optional real-model backends
 

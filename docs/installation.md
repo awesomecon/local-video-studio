@@ -21,8 +21,9 @@ Installing a built wheel or sdist outside a source checkout (`pip install local-
 ## Prerequisites (all platforms)
 
 - Python **3.11 or 3.12**
-- **FFmpeg** on `PATH` (required) and **ffprobe** (recommended; without it the media QC falls back
-  to FFmpeg-only probing and is limited)
+- **FFmpeg** (required unless an existing `imageio-ffmpeg` installation provides its bundled
+  binary) and **ffprobe** (recommended — there is no bundled ffprobe fallback; without it the
+  media QC falls back to FFmpeg-only probing and is limited)
 - Git
 - No Node.js, no GPU stack, no model downloads.
 
@@ -31,8 +32,8 @@ Installing a built wheel or sdist outside a source checkout (`pip install local-
 - **Windows**: install an official Windows build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
   (the builds linked from [ffmpeg.org](https://www.ffmpeg.org/download.html)), or
   `winget install Gyan.FFmpeg`. Add the build's `bin` directory to `PATH`.
-- **macOS**: `brew install ffmpeg` (Homebrew; the installation route ffmpeg.org recommends for
-  macOS).
+- **macOS**: `brew install ffmpeg` (Homebrew), or the official macOS static builds linked from
+  [ffmpeg.org](https://www.ffmpeg.org/download.html) (evermeet.cx).
 - **Debian/Ubuntu Linux**: `sudo apt-get update && sudo apt-get install --yes ffmpeg` (installs
   both `ffmpeg` and `ffprobe`).
 
@@ -98,9 +99,10 @@ python3.12 -m venv .venv
 This installs only the declared core dependencies (FastAPI, uvicorn, Pydantic, Pillow, PyYAML,
 psutil, httpx, python-multipart, websocket-client). It does not install PyTorch/CUDA, does not
 download model weights, and never touches an existing GPU stack. The editable install makes the
-repository importable as `backend.*` and adds two console scripts — `lvs-mock-render` and
-`local-video-studio` — in `.venv\Scripts\` (Windows) or `.venv/bin` (macOS/Linux); the commands on
-this page do not depend on them.
+repository importable as `backend.*` and adds three console scripts — `lvs-mock-render`,
+`local-video-studio`, and `lvs-ideogram-prompt` (builds Ideogram 4 prompts for the optional
+backend) — in `.venv\Scripts\` (Windows) or `.venv/bin` (macOS/Linux); the commands on this page
+do not depend on them.
 
 On a Bash host, `scripts/bootstrap.sh` reports the environment first, and
 `scripts/bootstrap.sh --install-lightweight` performs the same lightweight install. Note that it
@@ -129,6 +131,9 @@ venv-Python commands above remain the primary path.
   in restricted sandboxes where `nvidia-smi` probes are unavailable.
 - `check_ports.py` reports the state of the configured ports without claiming or terminating
   anything; port 1234 remains reserved for your externally managed local LLM.
+
+On a Bash host, `scripts/doctor.sh` combines the environment report, the port check, and a
+secret-safety note into one run (see [Troubleshooting](troubleshooting.md)).
 
 Many report warnings concern **optional AI dependencies or external services, not core
 mock-mode prerequisites**: "PyTorch is unavailable" (expected in a fresh core environment — the
@@ -185,13 +190,15 @@ LOCAL_VIDEO_STUDIO_MOCK_MODE` on bash/zsh) to run against real backends.
 Options: `--topic` (required), `--title`, `--duration` in seconds (default 30), `--resolution
 WxH` (default 640x360), `--output-root`, `--database`.
 
-Expected output — the command prints JSON with the project directory and final MP4:
+Expected output — the command prints JSON with the project directory and final MP4. Paths are
+printed expanded (an absolute path under the configured project root, or the path you pass to
+`--output-root`), not as `~`:
 
 ```json
 {
   "project_id": "…",
-  "project_directory": "~/ai/projects/how-roman-aqueducts-worked",
-  "final_mp4": "~/ai/projects/how-roman-aqueducts-worked/renders/final.mp4"
+  "project_directory": "/home/username/ai/projects/how-roman-aqueducts-worked",
+  "final_mp4": "/home/username/ai/projects/how-roman-aqueducts-worked/renders/final.mp4"
 }
 ```
 
