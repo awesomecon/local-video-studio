@@ -29,6 +29,7 @@ from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
 from backend.pipeline import PipelineService
 from backend.pipeline.service import LaneResolutionRejected, PipelineError
+from backend.schemas.paths import resolve_asset_path
 from backend.schemas import (
     AspectRatio, DurationMode, GenerationJob, JobStatus, ProjectCreate,
     ThumbnailCandidateRequest, ThumbnailPlan, VideoMode, VisualType,
@@ -1535,8 +1536,11 @@ def create_app(
         if asset is None or asset.project_id != project_id:
             raise HTTPException(status_code=404, detail="asset not found")
         root = service.store.project_path(project).resolve()
-        path = (root / asset.filepath).resolve()
-        if root not in path.parents or not path.is_file():
+        try:
+            path = resolve_asset_path(root, asset.filepath)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="asset file not found") from None
+        if not path.is_file():
             raise HTTPException(status_code=404, detail="asset file not found")
         return FileResponse(
             path,

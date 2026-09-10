@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process_stream
+from backend.schemas.paths import resolve_asset_path
 
 from .models import (
     EditPlan, EditorialAsset, EditorialComposition, EditorialElement, EvidenceClass,
@@ -973,8 +974,11 @@ class EditorialRenderer:
         if not asset.source or asset.source.startswith(("http://", "https://")):
             return None
         root = asset_root.resolve()
-        path = (root / asset.source).resolve()
-        if root not in path.parents or not path.is_file():
+        try:
+            path = resolve_asset_path(root, asset.source)
+        except ValueError:
+            return None
+        if not path.is_file():
             return None
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"

@@ -19,6 +19,7 @@ from uuid import uuid4
 from backend.models import GenerationRequest, GenerationResult
 from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
 from backend.schemas import Asset, AssetType, GenerationAttempt, GenerationJob, JobStatus, utc_now
+from backend.schemas.paths import resolve_asset_path
 
 from .audio import WavJoinResult, apply_wav_gain, join_wav_files_detailed, wav_duration
 from .chunking import chunk_narration, chunk_narration_tagged
@@ -622,7 +623,7 @@ class TTSManager:
             asset for asset in self.pipeline.database.list_assets(project_id)
             if asset.type is AssetType.NARRATION
             and asset.settings.get("role") in {"narration_take", "narration"}
-            and (root / asset.filepath).is_file()
+            and resolve_asset_path(root, asset.filepath).is_file()
         ]
         immutable = [
             asset for asset in candidates
@@ -678,9 +679,9 @@ class TTSManager:
                     })
         valid: list[dict[str, Any]] = []
         for item in chunks:
-            relative = Path(str(item.get("filepath", "")))
-            path = (root / relative).resolve()
-            if relative.is_absolute() or ".." in relative.parts or root.resolve() not in path.parents:
+            try:
+                path = resolve_asset_path(root, str(item.get("filepath", "")))
+            except ValueError:
                 continue
             if not path.is_file():
                 continue
@@ -697,7 +698,12 @@ class TTSManager:
         )
         if chunk is None:
             raise KeyError("narration chunk not found")
-        return self.pipeline.store.project_path(project) / str(chunk["filepath"])
+        try:
+            return resolve_asset_path(
+                self.pipeline.store.project_path(project), str(chunk["filepath"]),
+            )
+        except ValueError as exc:
+            raise KeyError(f"narration chunk path is not inside the project: {exc}") from exc
 
     def queue_chunk_regeneration(
         self, project_id: str, asset_id: str, chunk_index: int,
@@ -914,7 +920,9 @@ class TTSManager:
                 return None
             try:
                 actual_duration = wav_duration(
-                    self.pipeline.store.project_path(project) / asset.filepath,
+                    resolve_asset_path(
+                        self.pipeline.store.project_path(project), asset.filepath,
+                    ),
                 )
             except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error):
                 return None
@@ -975,7 +983,7 @@ class TTSManager:
         }:
             raise ValueError("asset is not a selectable narration take")
         root = self.pipeline.store.project_path(project)
-        source = root / asset.filepath
+        source = resolve_asset_path(root, asset.filepath)
         if not source.is_file() or source.stat().st_size <= 0:
             raise ValueError("narration take file is missing")
         digest = hashlib.sha256(source.read_bytes()).hexdigest()

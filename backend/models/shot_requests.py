@@ -33,6 +33,7 @@ from backend.models.base import GenerationRequest
 from backend.models.h3_shot_continuity import H3_NATIVE_AUDIO_MIX_POLICY
 from backend.models.lane_resolver import LaneResolutionError, LaneErrorCode
 from backend.schemas.models import Asset, Project, VisualType
+from backend.schemas.paths import resolve_asset_path
 from backend.schemas.shots import ReferenceRole, Shot
 
 REPO_ROOT = resource_path()
@@ -123,7 +124,15 @@ def resolve_reference_assets(
                 "reference_unknown_asset",
                 details={"role": reference.role.value, "asset_id": reference.asset_id},
             )
-        absolute = (project_root / asset.filepath).resolve()
+        try:
+            absolute = resolve_asset_path(project_root, asset.filepath)
+        except ValueError as exc:
+            raise ShotRequestError(
+                f"{reference.role.value} reference asset {reference.asset_id!r} escapes "
+                f"the project directory: {exc}",
+                "reference_outside_project",
+                details={"role": reference.role.value, "asset_id": reference.asset_id},
+            ) from exc
         if not absolute.is_file() or absolute.stat().st_size == 0:
             raise ShotRequestError(
                 f"{reference.role.value} reference asset {reference.asset_id!r} has no "
