@@ -16,6 +16,7 @@ from typing import Iterator, Sequence
 
 import psutil
 
+_CancellationLineage = tuple[tuple[str, threading.Event], ...]
 _TERMINATE_SECONDS = 0.5
 _KILL_SECONDS = 2.0
 
@@ -32,6 +33,7 @@ class _ProcessState:
     reaper_started: bool = False
     root: psutil.Process | None = None
     lifecycle_lock: threading.RLock = field(default_factory=threading.RLock)
+    lineage: _CancellationLineage = ()
 
 
 _active_processes: dict[int, subprocess.Popen] = {}
@@ -65,16 +67,20 @@ def _job_token(job_id: str | None) -> threading.Event | None:
 
 @contextlib.contextmanager
 def media_process_scope(job_id: str | None) -> Iterator[None]:
-    """Attribute work to one attempt; retries cannot uncancel an older scope."""
+    """Attribute work to this attempt and all immutable enclosing attempts."""
     previous = getattr(_current_job, "job_id", None)
     previous_token = getattr(_current_job, "token", None)
+    previous_lineage = getattr(_current_job, "lineage", ())
+    lineage = _cancellation_lineage(job_id)
     _current_job.job_id = job_id
-    _current_job.token = previous_token if previous == job_id else _job_token(job_id)
+    _current_job.token = next((token for owner, token in reversed(lineage) if owner == job_id), None)
+    _current_job.lineage = lineage
     try:
         yield
     finally:
         _current_job.job_id = previous
         _current_job.token = previous_token
+        _current_job.lineage = previous_lineage
 
 
 def reset_media_process_cancellation(job_id: str) -> None:
@@ -94,17 +100,26 @@ def current_media_job_id() -> str | None:
     return getattr(_current_job, "job_id", None)
 
 
+def _cancellation_lineage(job_id: str | None = None) -> _CancellationLineage:
+    lineage = getattr(_current_job, "lineage", ())
+    attribution = job_id if job_id is not None else current_media_job_id()
+    if attribution is not None and not any(owner == attribution for owner, _ in lineage):
+        token = _job_token(attribution)
+        assert token is not None
+        lineage = (*lineage, (attribution, token))
+    return lineage
+
+
 def _attribution(job_id: str | None) -> tuple[str | None, threading.Event | None]:
-    scoped_job = getattr(_current_job, "job_id", None)
-    if job_id is None or job_id == scoped_job:
-        return scoped_job, getattr(_current_job, "token", None)
-    return job_id, _job_token(job_id)
+    attribution = job_id if job_id is not None else current_media_job_id()
+    lineage = _cancellation_lineage(job_id)
+    token = next((token for owner, token in reversed(lineage) if owner == attribution), None)
+    return attribution, token
 
 
 def raise_if_media_job_canceled(job_id: str | None = None) -> None:
     """Check cancellation between subprocesses or before publishing an artifact."""
-    _, token = _attribution(job_id)
-    if token is not None and token.is_set():
+    if any(token.is_set() for _, token in _cancellation_lineage(job_id)):
         raise CanceledError([], -1, "explicitly canceled")
 
 
@@ -123,6 +138,7 @@ def media_output_publication(job_id: str | None = None) -> Iterator[None]:
 def _register_process(
     proc: subprocess.Popen, job_id: str | None, *, owns_group: bool = False,
     token: threading.Event | None = None,
+    lineage: _CancellationLineage | None = None,
 ) -> int:
     with _active_lock:
         # Capture identity while the newly spawned child has not been reaped.
@@ -138,6 +154,7 @@ def _register_process(
             proc, job_id, token if token is not None else _job_token(job_id), owns_group,
         )
         state.root = root
+        state.lineage = _cancellation_lineage(job_id) if lineage is None else lineage
         _process_states[proc.pid] = state
     return proc.pid
 
@@ -236,8 +253,8 @@ def cancel_all_media_processes() -> list[int]:
         for token in _job_cancellations.values():
             token.set()
         for state in states:
-            if state.token is not None:
-                state.token.set()
+            for _, token in state.lineage:
+                token.set()
         return_targets = [state for state in states if _request_stop(state, "canceled")]
     for state in return_targets:
         _stop_owned_process(state)
@@ -250,10 +267,14 @@ def cancel_media_processes_for_job(job_id: str) -> list[int]:
         token = _job_token(job_id)
         assert token is not None
         token.set()
-        targets = [state for state in _process_states.values() if state.job_id == job_id]
+        targets = [
+            state for state in _process_states.values()
+            if state.job_id == job_id or any(owner == job_id for owner, _ in state.lineage)
+        ]
         for state in targets:
-            if state.token is not None:
-                state.token.set()
+            for owner, ancestor_token in state.lineage:
+                if owner == job_id:
+                    ancestor_token.set()
         targets = [state for state in targets if _request_stop(state, "canceled")]
     for state in targets:
         _stop_owned_process(state)
@@ -272,7 +293,8 @@ def _spawn(argv: list[str], job_id: str | None, **kwargs: object) -> _ProcessSta
     # land in a gap that leaves an untracked child running afterward.
     with _active_lock:
         attribution, token = _attribution(job_id)
-        if token is not None and token.is_set():
+        lineage = _cancellation_lineage(job_id)
+        if any(ancestor_token.is_set() for _, ancestor_token in lineage):
             raise CanceledError(argv, -1, "explicitly canceled before process start")
         options: dict[str, object] = {}
         if os.name == "posix":
@@ -280,7 +302,7 @@ def _spawn(argv: list[str], job_id: str | None, **kwargs: object) -> _ProcessSta
         elif os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         proc = subprocess.Popen(argv, **kwargs, **options)
-        _register_process(proc, attribution, owns_group=True, token=token)
+        _register_process(proc, attribution, owns_group=True, token=token, lineage=lineage)
         return _process_states[proc.pid]
 
 

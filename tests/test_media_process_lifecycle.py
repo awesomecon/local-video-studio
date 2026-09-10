@@ -76,9 +76,13 @@ def test_cancel_before_spawn_and_retry_keeps_old_scope_canceled(tmp_path: Path) 
 def test_nested_scope_restores_outer_cancellation() -> None:
     outer, inner = job_id(), job_id()
     with process.media_process_scope(outer):
-        process.cancel_media_processes_for_job(outer)
         with process.media_process_scope(inner):
-            process.raise_if_media_job_canceled()
+            process.cancel_media_processes_for_job(inner)
+            with pytest.raises(process.CanceledError):
+                process.raise_if_media_job_canceled()
+        assert process.current_media_job_id() == outer
+        process.raise_if_media_job_canceled()
+        process.cancel_media_processes_for_job(outer)
         with pytest.raises(process.CanceledError):
             process.raise_if_media_job_canceled()
     process.raise_if_media_job_canceled()
@@ -94,11 +98,13 @@ def test_shutdown_cancels_scopes_between_processes() -> None:
     assert process.current_media_job_id() is None
 
 
-def test_explicit_job_overrides_enclosing_scope() -> None:
+def test_explicit_job_retains_enclosing_cancellation() -> None:
     enclosing, explicit = job_id(), job_id()
     process.cancel_media_processes_for_job(enclosing)
     with process.media_process_scope(enclosing):
-        process.run_media_process(command("pass"), job_id=explicit)
+        with pytest.raises(process.CanceledError):
+            process.run_media_process(command("pass"), job_id=explicit)
+    process.run_media_process(command("pass"), job_id=explicit)
 
 
 def test_publication_guard_preserves_existing_output_after_cancel(tmp_path: Path) -> None:
@@ -435,3 +441,71 @@ def test_group_escalation_stops_child_born_during_parent_termination(tmp_path: P
                     descendant.kill()
                 except psutil.NoSuchProcess:
                     pass
+
+
+@pytest.mark.parametrize("runner", ["regular", "stream", "owned"])
+def test_parent_cancel_reaches_nested_media_but_leaves_unrelated_job(runner: str) -> None:
+    parent, child, unrelated = job_id(), job_id(), job_id()
+
+    def nested_run():
+        with process.media_process_scope(parent):
+            with process.media_process_scope(child):
+                argv = command("import time; time.sleep(30)")
+                if runner == "stream":
+                    return process.run_media_process_stream(argv, [], job_id=child)
+                if runner == "owned":
+                    with process.owned_media_process(argv, job_id=child) as owned:
+                        wait_for(lambda: owned.poll() is not None)
+                    return None
+                return process.run_media_process(argv, job_id=child)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        nested = pool.submit(nested_run)
+        other = pool.submit(
+            process.run_media_process, command("import time; time.sleep(30)"), job_id=unrelated,
+        )
+        try:
+            wait_for(lambda: {child, unrelated}.issubset(set(process._process_jobs.values())))
+            assert len(process.cancel_media_processes_for_job(parent)) == 1
+            with pytest.raises(process.CanceledError):
+                nested.result(timeout=6)
+            assert not other.done()
+        finally:
+            process.cancel_media_processes_for_job(parent)
+            process.cancel_media_processes_for_job(unrelated)
+        with pytest.raises(process.CanceledError):
+            other.result(timeout=6)
+    # Canceling the ancestor does not poison an independent use of the leaf id.
+    process.raise_if_media_job_canceled(child)
+
+
+def test_reset_does_not_revive_ancestor_tokens_or_publication(tmp_path: Path) -> None:
+    parent, child, explicit = job_id(), job_id(), job_id()
+    staged, output = tmp_path / "staged", tmp_path / "output"
+    staged.write_text("canceled attempt")
+    output.write_text("previous artifact")
+    with process.media_process_scope(parent):
+        with process.media_process_scope(child):
+            process.cancel_media_processes_for_job(parent)
+            process.reset_media_process_cancellation(parent)
+            with process.media_process_scope(explicit):
+                with pytest.raises(process.CanceledError):
+                    process.raise_if_media_job_canceled(explicit)
+            with pytest.raises(process.CanceledError):
+                with process.media_output_publication(child):
+                    os.replace(staged, output)
+        with pytest.raises(process.CanceledError):
+            process.raise_if_media_job_canceled()
+    with process.media_process_scope(parent):
+        process.raise_if_media_job_canceled()
+    assert output.read_text() == "previous artifact"
+
+
+def test_anonymous_nested_scope_cannot_erase_ancestor_cancellation() -> None:
+    parent = job_id()
+    with process.media_process_scope(parent):
+        process.cancel_media_processes_for_job(parent)
+        with process.media_process_scope(None):
+            with pytest.raises(process.CanceledError):
+                process.raise_if_media_job_canceled()
+    process.raise_if_media_job_canceled()
