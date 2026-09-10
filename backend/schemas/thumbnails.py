@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 
 from .models import DomainModel, utc_now
+from .paths import portable_relative_path
 
 
 ThumbnailCandidateId = Literal["candidate-01", "candidate-02", "candidate-03"]
@@ -103,6 +104,11 @@ class ThumbnailCandidate(DomainModel):
     stale: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
+    @field_validator("artwork_path", "composite_path", "manifest_path")
+    @classmethod
+    def portable_paths(cls, value: str) -> str:
+        return portable_relative_path(value)
+
 
 class ThumbnailSelection(DomainModel):
     schema_version: Literal[1] = 1
@@ -111,3 +117,8 @@ class ThumbnailSelection(DomainModel):
     composite_path: str
     composite_hash: str
     selected_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("composite_path")
+    @classmethod
+    def portable_path(cls, value: str) -> str:
+        return portable_relative_path(value)

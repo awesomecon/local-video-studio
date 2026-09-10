@@ -259,7 +259,7 @@ def provenance_summary(
             shot.status.value if hasattr(shot.status, "value") else str(shot.status)
         ),
         "asset_id": asset.id if asset else None,
-        "filepath": str(asset.filepath) if asset else None,
+        "filepath": asset.filepath.as_posix() if asset else None,
         "sha256": asset.hash if asset else None,
         "backend": asset.backend if asset else None,
         "model": asset.model if asset else None,

@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -17,13 +17,22 @@ from backend.editorial.models import EditPlan, EditPlanProvenance
 from backend.schemas import (
     Project, ProjectPlan, Scene, Shot, ThumbnailPlan, ThumbnailSelection, VideoMode,
 )
+from backend.schemas.paths import resolve_project_path
 
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+MAX_PROJECT_SLUG_LENGTH = 80
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"} | {
+    f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+}
 
 
 def slugify(value: str) -> str:
+    """Generate a bounded new directory name without changing legacy slugs."""
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    slug = slug[:MAX_PROJECT_SLUG_LENGTH].rstrip("-")
+    if slug in _WINDOWS_RESERVED:
+        slug = f"project-{slug}"
     return slug or f"project-{uuid4().hex[:8]}"
 
 
@@ -42,6 +51,25 @@ class ProjectStore:
         if not _SLUG.fullmatch(slug):
             raise ValueError("invalid project slug")
         return self.root / slug
+
+    def available_slug(self, title: str, occupied: Iterable[str] = ()) -> str:
+        """Choose a new slug avoiding indexed and on-disk names on any host.
+
+        Include files and names differing only by case so a project created on
+        POSIX can later be copied onto a case-insensitive filesystem. This is
+        allocation advice; create_project still refuses an existing directory.
+        """
+        names = {name.casefold() for name in occupied}
+        if self.root.is_dir():
+            names.update(entry.name.casefold() for entry in self.root.iterdir())
+        base = slugify(title)
+        candidate = base
+        number = 2
+        while candidate.casefold() in names:
+            suffix = f"-{number}"
+            candidate = base[:MAX_PROJECT_SLUG_LENGTH - len(suffix)].rstrip("-") + suffix
+            number += 1
+        return candidate
 
     def create_project(self, project: Project, scenes: list[Scene] | None = None) -> Path:
         directory = self.project_path(project)
@@ -292,29 +320,35 @@ class ProjectStore:
 
     def archive_variant(self, slug: str, relative_path: str | Path) -> Path:
         project_dir = self.project_path(slug).resolve()
-        source = (project_dir / relative_path).resolve()
-        if project_dir not in source.parents or not source.is_file():
-            raise ValueError("variant must be an existing file inside the project")
+        source = self._archive_source(project_dir, relative_path)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        destination = project_dir / "variants" / "archive" / (
+        destination = resolve_project_path(project_dir, "variants/archive/" + (
             f"{source.stem}-{stamp}-{uuid4().hex[:8]}{source.suffix}"
-        )
+        ))
         destination.parent.mkdir(parents=True, exist_ok=True)
         return Path(shutil.move(str(source), str(destination)))
 
     def copy_to_archive(self, slug: str, relative_path: str | Path) -> Path:
         """Preserve a variant in history without removing the live publication."""
         project_dir = self.project_path(slug).resolve()
-        source = (project_dir / relative_path).resolve()
-        if project_dir not in source.parents or not source.is_file():
-            raise ValueError("variant must be an existing file inside the project")
+        source = self._archive_source(project_dir, relative_path)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        destination = project_dir / "variants" / "archive" / (
+        destination = resolve_project_path(project_dir, "variants/archive/" + (
             f"{source.stem}-{stamp}-{uuid4().hex[:8]}{source.suffix}"
-        )
+        ))
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         return destination
+
+    @staticmethod
+    def _archive_source(project_dir: Path, relative_path: str | Path) -> Path:
+        try:
+            source = resolve_project_path(project_dir, relative_path)
+            if not source.is_file():
+                raise ValueError("missing variant")
+        except ValueError as exc:
+            raise ValueError("variant must be an existing file inside the project") from exc
+        return source
 
     @staticmethod
     def _require_project_directory(directory: Path) -> None:

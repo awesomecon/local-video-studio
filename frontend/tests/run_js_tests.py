@@ -26,6 +26,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from backend.rendering.binaries import discover_chromium
+
 TESTS_DIR = Path(__file__).resolve().parent
 FRONTEND = TESTS_DIR.parent
 HARNESS_NAME = ".run-js-tests-harness.html"
@@ -44,17 +47,8 @@ HARNESS_HTML = """<!DOCTYPE html>
 
 
 def find_chrome() -> str | None:
-    candidate = os.environ.get("LVS_CHROME")
-    if candidate and Path(candidate).exists():
-        return candidate
-    snap = "/snap/chromium/current/usr/lib/chromium-browser/chrome"
-    if Path(snap).exists():
-        return snap
-    for name in ("chromium", "chromium-browser", "google-chrome"):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
+    executable = discover_chromium()
+    return str(executable) if executable is not None else None
 
 
 def main() -> int:
@@ -65,6 +59,9 @@ def main() -> int:
 
     chrome = find_chrome()
     if chrome is None:
+        if os.environ.get("LVS_REQUIRE_CORE_TOOLS") == "1":
+            print("FAIL: required Chromium/Chrome unavailable")
+            return 1
         print("SKIP: no Chromium/Chrome binary found "
               "(set LVS_CHROME to run the frontend logic tests)")
         return 0
@@ -84,7 +81,7 @@ def main() -> int:
             "--virtual-time-budget=4000",
             "--timeout=15000",
             "--dump-dom",
-            f"file://{harness}",
+            harness.resolve().as_uri(),
         ]
         env = dict(os.environ, HOME=env_home)
         proc = subprocess.run(

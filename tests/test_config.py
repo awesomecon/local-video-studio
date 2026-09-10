@@ -20,7 +20,7 @@ def test_default_configuration_is_local_and_expands_paths() -> None:
         1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199,
     ]
     assert config.paths.project_root == Path.home() / "ai/projects"
-    assert config.cache_environment()["TORCH_HOME"].endswith("/ai/cache/torch")
+    assert Path(config.cache_environment()["TORCH_HOME"]) == Path.home() / "ai/cache/torch"
     assert config.backends.qwen_tts.managed is True
     assert config.backends.ideogram4_local.managed is True
     assert config.backends.qwen_tts.python_path == Path.home() / "ai/services/Qwen3-TTS/.venv/bin/python"
@@ -69,7 +69,7 @@ def test_nested_and_compatibility_environment_overrides(tmp_path: Path) -> None:
     assert config.paths.project_root == tmp_path
     assert config.llm.base_url == "http://localhost:1234/v1"
     assert config.paths.huggingface_hub_cache == tmp_path / "hf-hub"
-    assert config.cache_environment()["HUGGINGFACE_HUB_CACHE"].endswith("/hf-hub")
+    assert Path(config.cache_environment()["HUGGINGFACE_HUB_CACHE"]) == tmp_path / "hf-hub"
 
 
 def test_rejects_non_loopback_binding_without_explicit_lan() -> None:

@@ -23,6 +23,16 @@ _THUMBNAIL_PALETTES = {
 }
 _THUMBNAIL_STROKE = (14, 14, 18, 255)
 
+#: Bundled Noto substitutes used when fontconfig is unavailable (Windows,
+#: minimal containers) or does not know the requested family. The wheel ships
+#: these files, so thumbnails never depend on host-installed fonts.
+_BUNDLED_THUMBNAIL_FONTS = {
+    "impact": "NotoSans-Bold.ttf",
+    "clean": "NotoSans-Bold.ttf",
+    "editorial": "NotoSerif-Bold.ttf",
+}
+_BUNDLED_FONT_ROOT = Path(__file__).resolve().parent.parent / "editorial" / "fonts"
+
 
 def _smooth(portion: float) -> float:
     """Clamped smoothstep easing for deterministic gradient scrims."""
@@ -46,9 +56,18 @@ def _chromium_env(profile: Path) -> dict[str, str]:
 
 class GraphicScreenRenderer:
     def __init__(self, executable: Path | None = None, *, timeout_seconds: float = 30.0) -> None:
-        self.executable = executable or discover_chromium()
+        self._executable = executable
+        self._discovery_attempted = executable is not None
         self.timeout_seconds = timeout_seconds
         self._version: str | None = None
+
+    @property
+    def executable(self) -> Path | None:
+        """Resolve Chromium on first use, never during application startup."""
+        if not self._discovery_attempted:
+            self._executable = discover_chromium()
+            self._discovery_attempted = True
+        return self._executable
 
     @property
     def available(self) -> bool:
@@ -65,6 +84,10 @@ class GraphicScreenRenderer:
     def _query_version(self) -> str:
         if not self.executable:
             return "unavailable"
+        validated = os.environ.get("LVS_CHROME")
+        if os.environ.get("LVS_CHROME_VALIDATED") == "1" and validated \
+                and Path(validated).absolute() == self.executable.absolute():
+            return os.environ.get("LVS_CHROME_VERSION", "validated")[:200]
         try:
             completed = subprocess.run(
                 [str(self.executable), "--version"], shell=False, capture_output=True,
@@ -119,7 +142,7 @@ class GraphicScreenRenderer:
                     raise RuntimeError("Chromium PNG does not match the project resolution")
             publish = output.with_name(f".{output.name}.graphic-screen.tmp")
             shutil.copyfile(temporary_png, publish)
-            with publish.open("rb") as handle:
+            with publish.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(publish, output)
             return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -162,7 +185,7 @@ class GraphicScreenRenderer:
                 rgba = image.convert("RGBA")
                 publish = output.with_name(f".{output.name}.overlay.tmp")
                 rgba.save(publish, format="PNG")
-            with publish.open("rb") as handle:
+            with publish.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(publish, output)
             return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -275,7 +298,7 @@ class GraphicScreenRenderer:
             with Image.open(temporary) as rendered:
                 if rendered.size != (width, height):
                     raise RuntimeError("Thumbnail composite has unexpected dimensions")
-            with temporary.open("rb") as handle:
+            with temporary.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, output)
         finally:
@@ -476,4 +499,7 @@ class GraphicScreenRenderer:
                 return str(font), hashlib.sha256(font.read_bytes()).hexdigest()
         except (OSError, subprocess.SubprocessError):
             pass
+        bundled = _BUNDLED_FONT_ROOT / _BUNDLED_THUMBNAIL_FONTS[preset]
+        if bundled.is_file():
+            return str(bundled), hashlib.sha256(bundled.read_bytes()).hexdigest()
         return family, None

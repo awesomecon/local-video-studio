@@ -514,8 +514,7 @@ def create_app(
         try:
             yield
         finally:
-            service.ideogram_worker.stop()
-            service.tts_workers.stop_all()
+            service.shutdown()
 
     application = FastAPI(title="Local Video Studio", version="0.1.0", lifespan=lifespan)
     application.state.settings = settings
@@ -2235,7 +2234,7 @@ def create_app(
                 raise PipelineError(
                     f"stage '{target.stage}' runs inside its parent pipeline; rerun that stage instead"
                 )
-            job = service.jobs.retry(job_id)
+            job = service.retry_job(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except Exception as exc:
@@ -2263,7 +2262,8 @@ def create_app(
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
-    frontend = Path(__file__).resolve().parents[2] / "frontend"
+    from backend.core.resources import resource_path
+    frontend = resource_path("frontend")
     if frontend.is_dir():
         application.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
 
@@ -2288,4 +2288,5 @@ def run() -> None:
         host=settings.network.bind_address,
         port=port,
         reload=False,
+        timeout_graceful_shutdown=10,
     )

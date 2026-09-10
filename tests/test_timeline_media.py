@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -66,7 +67,7 @@ def test_timeline_json_is_human_readable(tmp_path: Path) -> None:
 
     text = destination.read_text(encoding="utf-8")
     assert '"scene_id": "one"' in text
-    assert str(tmp_path / "image.png") in text
+    assert json.loads(text)["clips"][0]["path"] == str(tmp_path / "image.png")
 
 
 def test_build_timeline_applies_narration_gain(tmp_path: Path) -> None:

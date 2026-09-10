@@ -458,7 +458,7 @@ class EditorialPlanner:
                         "only verified user-imported local media may be planned as evidence"
                     )
             resolved_assets.append(planned_asset.model_copy(update={
-                "source": str(registered_asset.filepath) if registered_asset else None,
+                "source": registered_asset.filepath.as_posix() if registered_asset else None,
             }))
         return EditorialComposition.model_validate({
             **authored.model_dump(mode="python"),

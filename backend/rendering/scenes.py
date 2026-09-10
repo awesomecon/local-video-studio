@@ -195,7 +195,7 @@ def _valid_scene_artifact(
     return stored
 
 
-def _copy_into_place(source: Path, destination: Path) -> None:
+def _copy_into_place(source: Path, destination: Path, job_id: str | None = None) -> None:
     """Copy ``source`` over ``destination`` atomically via a staged sibling."""
     descriptor, staged_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",
@@ -207,7 +207,9 @@ def _copy_into_place(source: Path, destination: Path) -> None:
     try:
         shutil.copyfile(source, staged)
         fsync_file(staged)
-        os.replace(staged, destination)
+        from .process import media_output_publication
+        with media_output_publication(job_id):
+            os.replace(staged, destination)
     finally:
         staged.unlink(missing_ok=True)
 
@@ -344,7 +346,7 @@ class SceneAssembler:
                 cached_manifest, cached_media, identity,
             )
             if hit_payload is not None:
-                _copy_into_place(cached_media, output)
+                _copy_into_place(cached_media, output, job_id)
                 write_manifest(manifest_target, {**hit_payload, "media": output.name})
                 return SceneRenderResult(
                     scene_id=plan.scene_id,
@@ -389,14 +391,16 @@ class SceneAssembler:
                 scope = self._scope_directory(plan.scene_id, key)
                 scope.mkdir(parents=True, exist_ok=True)
                 cached_media = scope / "rendered.mp4"
-                os.replace(staged, cached_media)
+                from .process import media_output_publication
+                with media_output_publication(job_id):
+                    os.replace(staged, cached_media)
                 write_manifest(scope / "manifest.json", {
                     **base_payload,
                     "media": cached_media.name,
                     "media_sha256": media_digest,
                     "media_bytes": media_size,
                 })
-                _copy_into_place(cached_media, output)
+                _copy_into_place(cached_media, output, job_id)
                 published_payload = {
                     **base_payload,
                     "media": output.name,
@@ -404,7 +408,9 @@ class SceneAssembler:
                     "media_bytes": media_size,
                 }
             else:
-                os.replace(staged, output)
+                from .process import media_output_publication
+                with media_output_publication(job_id):
+                    os.replace(staged, output)
                 published_payload = {
                     **base_payload,
                     "media": output.name,

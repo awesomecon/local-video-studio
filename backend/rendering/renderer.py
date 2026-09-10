@@ -11,7 +11,7 @@ from backend.timeline.models import Timeline
 
 from .binaries import FFmpegBinaries, discover_binaries, require_ffmpeg
 from .commands import RenderOptions, build_finalize_command, build_video_command
-from .process import run_media_process
+from .process import run_media_process, media_output_publication
 from .probe import MediaInfo, probe_media
 from .subtitles import write_ass, write_srt
 
@@ -53,6 +53,12 @@ class FFmpegRenderer:
         timeline.validate()
         selected = options or RenderOptions()
         selected.validate()
+        from .capabilities import require_render_features
+        require_render_features(
+            require_ffmpeg(self.binaries), video_codec=selected.video_codec,
+            audio_codec=selected.audio_codec,
+            burn_subtitles=selected.burn_subtitles and bool(timeline.subtitles),
+        )
         output = Path(destination)
         output.parent.mkdir(parents=True, exist_ok=True)
         if self.temp_root:
@@ -93,7 +99,8 @@ class FFmpegRenderer:
                     ),
                     timeout=max(120.0, timeline.duration_seconds * 10),
                 )
-                os.replace(staged_output, output)
+                with media_output_publication():
+                    os.replace(staged_output, output)
             finally:
                 staged_output.unlink(missing_ok=True)
         return probe_media(output, self.binaries)
@@ -171,7 +178,8 @@ class FFmpegRenderer:
                     f"Frame extraction produced no output at {timestamp_seconds:.6f}s; "
                     "the timestamp may lie beyond the end of the source media"
                 )
-            os.replace(staged_output, output)
+            with media_output_publication():
+                os.replace(staged_output, output)
         finally:
             staged_output.unlink(missing_ok=True)
         return output

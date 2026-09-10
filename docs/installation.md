@@ -12,11 +12,13 @@ image/video/music, captions) are optional and are installed separately — see
 | Platform | Status |
 | --- | --- |
 | Ubuntu / Linux | Natively verified: CI runs the full Python suite on Ubuntu 24.04 with Python 3.11 and 3.12, and the runtime commands on this page (mock render, environment and port checks) were exercised on Ubuntu. |
-| macOS | Documented against the official Python and FFmpeg sources; **not natively verified** (no macOS CI runner, no local macOS execution). |
-| Windows (PowerShell) | Documented against the official Python and FFmpeg sources; **not natively verified** (no Windows CI runner, no local Windows execution). |
+| macOS | Native Intel CI is configured; **qualification pending actual runner results**. Apple Silicon is a separate target. |
+| Windows (PowerShell) | Native x64 CI is configured; **qualification pending actual runner results**. Windows ARM is a separate target. |
 
-Installing a built wheel or sdist outside a source checkout (`pip install local-video-studio`) is
-**not yet qualified**. Install the editable package from a source checkout, as below.
+The build now includes core runtime resources and tests an unpacked wheel outside
+the checkout. Clean-machine and native release qualification remain pending; this
+does not mean a package has been published to PyPI. Use the editable source-checkout
+instructions below. See [qualification](cross-platform-qualification.md).
 
 ## Prerequisites (all platforms)
 
@@ -32,16 +34,21 @@ Installing a built wheel or sdist outside a source checkout (`pip install local-
 - **Windows**: install an official Windows build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
   (the builds linked from [ffmpeg.org](https://www.ffmpeg.org/download.html)), or
   `winget install Gyan.FFmpeg`. Add the build's `bin` directory to `PATH`.
-- **macOS**: `brew install ffmpeg` (Homebrew), or the official macOS static builds linked from
-  [ffmpeg.org](https://www.ffmpeg.org/download.html) (evermeet.cx).
+- **macOS**: Homebrew's default `ffmpeg` bottle is built **without libass**, so
+  caption burn-in fails with a missing `subtitles` filter. Install a full
+  static build instead — the Intel builds at [evermeet.cx](https://evermeet.cx/ffmpeg/)
+  are compiled with `--enable-libass` (the keg-only `ffmpeg-full` formula is the
+  Homebrew alternative). Apple Silicon is a separate, unqualified target.
 - **Debian/Ubuntu Linux**: `sudo apt-get update && sudo apt-get install --yes ffmpeg` (installs
   both `ffmpeg` and `ffprobe`).
 
-Verify on any platform:
+Verify on any platform (the second command must list a `subtitles` filter;
+without it, caption burn-in is rejected before rendering starts):
 
 ```text
 ffmpeg -version
 ffprobe -version
+ffmpeg -hide_banner -filters | grep " subtitles "
 ```
 
 The application never installs FFmpeg itself. It locates `ffmpeg` on `PATH`; if the Python package
@@ -218,13 +225,13 @@ Start the service in a shell where mock mode is configured (step 4).
 ### Windows (PowerShell)
 
 ```powershell
-& .venv\Scripts\python.exe -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009
+& .venv\Scripts\python.exe -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009 --timeout-graceful-shutdown 10
 ```
 
 ### macOS / Linux
 
 ```bash
-.venv/bin/python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009
+.venv/bin/python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009 --timeout-graceful-shutdown 10
 ```
 
 The installed `local-video-studio` console script runs the same app and auto-selects a free port
@@ -264,8 +271,9 @@ These are separate requirements:
   renderer). The Classic mock pipeline on this page does not need it.
 
 Discovery: the app first honors the `LVS_CHROME` environment variable (path to a browser binary),
-then checks Linux-specific snap Chromium locations, then `chromium` or `chromium-browser` on
-`PATH`. It renders with a throw-away profile and never uses your everyday browser profile. Install
+then checks Chrome/Chromium on `PATH` and conventional Windows, macOS and Linux install locations.
+Linux Snap dispatchers prefer the underlying Chromium binary when available.
+It renders with a throw-away profile and never uses your everyday browser profile. Install
 a Chromium/Chrome build for your OS if you plan to use Editorial Mode or Graphic Screens.
 
 ## Configuration precedence
@@ -302,13 +310,14 @@ store them in YAML. Keep at least 50 GiB free on model and cache targets.
 
 ## Native verification gaps
 
-- **Windows (PowerShell)**: not executed natively (no Windows machine or CI runner). Commands were
+- **Windows (PowerShell)**: native CI results still need review. Commands were
   checked against the repository entry points and standard PowerShell path/invocation syntax; a
   Windows machine is still needed to confirm the venv layout, `winget` package versions, and
   FFmpeg-on-`PATH` behavior.
 - **macOS**: not executed natively. Confirm the Homebrew/python.org interpreter layout and FFmpeg
   on `PATH` on a Mac.
 - **Python 3.11 vs 3.12 on Windows/macOS**: CI covers both versions on Ubuntu only.
-- **Headless Chromium on Windows/macOS**: discovery is OS-agnostic code, but only Linux execution
-  has been verified.
-- **Wheel/sdist installation outside a source checkout**: not yet qualified.
+- **Headless Chromium on Windows/macOS**: platform-aware discovery is implemented; native
+  browser execution still needs qualification.
+- **Wheel/sdist installation outside a source checkout**: see the artifact checks and remaining
+  clean-machine/native gaps in [qualification](cross-platform-qualification.md).

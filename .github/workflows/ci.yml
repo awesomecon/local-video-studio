@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,11 +15,27 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    name: Core / ${{ matrix.os }} / x64 / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    # Windows legs are slow (process spawning plus on-access scanning); the
+    # faulthandler dump below names the stall instead of dying silent.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        include:
+          - {os: ubuntu-24.04, python-version: '3.11', pytest-workers: 0}
+          - {os: ubuntu-24.04, python-version: '3.12', pytest-workers: 0}
+          - {os: windows-2025, python-version: '3.12', pytest-workers: 2}
+          - {os: macos-15-intel, python-version: '3.12', pytest-workers: 0}
+    env:
+      LVS_REQUIRE_CORE_TOOLS: '1'
+      LVS_CI_RUNNER: ${{ matrix.os }}
+      # Ubuntu 23.10+ runners disable unprivileged user namespaces via
+      # AppArmor, so Chromium 151 aborts with "No usable sandbox" unless the
+      # test browser opts out. Throwaway CI profiles only; never set this for
+      # everyday browsing. Playwright's own launches already behave this way.
+      LVS_CHROMIUM_NO_SANDBOX: '1'
 
     steps:
       - name: Check out repository
@@ -28,37 +45,91 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          architecture: x64
           cache: pip
 
       - name: Install FFmpeg
+        if: runner.os == 'Linux'
+        shell: bash
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
 
-      - name: Install application and test dependencies
-        run: python -m pip install -e '.[dev]'
-
-      - name: Select and report CI browser
+      - name: Install FFmpeg (macOS, full static build with libass)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          lvs_chrome=$(command -v google-chrome)
-          test -x "$lvs_chrome"
-          echo "LVS_CHROME=$lvs_chrome" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/test-reports"
-          {
-            echo "Browser executable: $lvs_chrome"
-            "$lvs_chrome" --version
-          } | tee "$RUNNER_TEMP/test-reports/browser.txt"
+          # Homebrew's default ffmpeg bottle omits libass, which the
+          # burn-subtitles path requires (its libass builds live in keg-only
+          # ffmpeg-full). Use pinned Intel static builds compiled with
+          # --enable-libass, placed ahead of anything else on PATH.
+          mkdir -p "$RUNNER_TEMP/ffmpeg-full"
+          cd "$RUNNER_TEMP/ffmpeg-full"
+          curl -fsSL -o ffmpeg.zip https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip
+          curl -fsSL -o ffprobe.zip https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip
+          unzip -o -q ffmpeg.zip && unzip -o -q ffprobe.zip
+          xattr -dr com.apple.quarantine ffmpeg ffprobe
+          chmod +x ffmpeg ffprobe
+          ./ffmpeg -hide_banner -filters | grep -q " subtitles " \
+            || { echo "static ffmpeg lacks the libass subtitles filter"; exit 1; }
+          echo "$RUNNER_TEMP/ffmpeg-full" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installed = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install ffmpeg --yes --no-progress
+            $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+            if ($ffmpeg -and $ffprobe) {
+              & $ffmpeg.Source -version | Out-Null
+              $ffmpegOk = $LASTEXITCODE -eq 0
+              & $ffprobe.Source -version | Out-Null
+              $ffprobeOk = $LASTEXITCODE -eq 0
+              if ($ffmpegOk -and $ffprobeOk) {
+                $installed = $true
+                break
+              }
+            }
+            Write-Warning "FFmpeg install attempt $attempt did not produce usable tools"
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+          }
+          if (-not $installed) { throw "FFmpeg and ffprobe are unavailable after 3 attempts" }
+
+      - name: Install core and test dependencies (CI only)
+        # Playwright is CI/UI-inspection tooling, not a package dependency: pin
+        # it here so the bundled Chromium can only change on a deliberate bump.
+        run: python -m pip install -e ".[dev]" "playwright==1.62.0"
+
+      - name: Install Chromium (Linux, including native libraries)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install Chromium (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: python -m playwright install chromium
+
+      - name: Require prerequisites and record versions
+        run: python scripts/ci_core_smoke.py --prerequisites
+
+      - name: Native core smoke
+        run: python scripts/ci_core_smoke.py
 
       - name: Run Python tests
-        run: python -m pytest --junitxml="$RUNNER_TEMP/test-reports/pytest.xml"
+        run: python -m pytest --junitxml=ci-raw-pytest.xml -o faulthandler_timeout=600 -n ${{ matrix.pytest-workers }}
+
+      - name: Run frontend static checks
+        run: python frontend/tests/static_checks.py
+
+      - name: Sanitize test report
+        if: ${{ always() }}
+        run: python scripts/ci_test_report.py
 
       - name: Upload test report
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: test-report-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/test-reports/
+          name: core-${{ matrix.os }}-x64-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
+          path: ci-reports/
           retention-days: 14
-          if-no-files-found: warn
-
-      - name: Run frontend static checks
-        run: python3 frontend/tests/static_checks.py
+          if-no-files-found: error

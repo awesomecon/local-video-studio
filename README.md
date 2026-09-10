@@ -79,7 +79,7 @@ To use the local web interface:
 ```bash
 export LOCAL_VIDEO_STUDIO_MOCK_MODE=1
 .venv/bin/python scripts/check_ports.py --verify-external
-.venv/bin/python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009
+.venv/bin/python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8009 --timeout-graceful-shutdown 10
 ```
 
 Open `http://127.0.0.1:8009/`. The frontend is plain HTML, CSS, and JavaScript served by FastAPI;

@@ -1116,7 +1116,7 @@ class TTSManager:
         temporary = Path(name)
         try:
             shutil.copyfile(source, temporary)
-            handle = os.open(temporary, os.O_RDONLY)
+            handle = os.open(temporary, os.O_RDWR)
             try:
                 os.fsync(handle)
             finally:
@@ -1572,7 +1572,7 @@ class TTSManager:
         temporary = Path(name)
         try:
             result = join_wav_files_detailed(inputs, temporary, pause_ms=pause_ms)
-            handle = os.open(temporary, os.O_RDONLY)
+            handle = os.open(temporary, os.O_RDWR)
             try:
                 os.fsync(handle)
             finally:

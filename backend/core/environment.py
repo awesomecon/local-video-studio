@@ -14,6 +14,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .capabilities import (
+    CapabilityReport,
+    CapabilityStatus,
+    build_capability_report,
+)
 from .config import AppConfig, load_config
 
 
@@ -45,6 +50,7 @@ class GPUInfo(ReportModel):
 class TorchInfo(ReportModel):
     installed: bool
     version: str | None = None
+    import_probed: bool = False
     cuda_runtime: str | None = None
     cuda_probed: bool = False
     cuda_available: bool = False
@@ -83,6 +89,7 @@ class EnvironmentReport(ReportModel):
     minimum_free_disk_gb: float = 50
     optional_packages: dict[str, str | None] = Field(default_factory=dict)
     backend_compatibility: dict[str, BackendCompatibility] = Field(default_factory=dict)
+    capabilities: CapabilityReport
     warnings: list[str] = Field(default_factory=list)
     version_conflicts: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
@@ -107,29 +114,59 @@ def _command_version(executable: str | None, *arguments: str) -> ToolInfo:
 
 
 def _ffmpeg_info() -> ToolInfo:
-    executable = shutil.which("ffmpeg")
-    source = "system"
-    if executable is None:
-        try:
-            import imageio_ffmpeg
+    # Reuse the renderer's portable discovery order.  In particular, it avoids
+    # treating a confined Snap shim that answers ``-version`` inconsistently as
+    # preferable to a working bundled imageio-ffmpeg executable.
+    from backend.rendering.binaries import discover_binaries
 
-            executable = imageio_ffmpeg.get_ffmpeg_exe()
-            source = "imageio-ffmpeg"
-        except (ImportError, RuntimeError, OSError):
-            return ToolInfo(available=False)
-    result = _command_version(executable, "-version")
-    return result.model_copy(update={"source": source})
+    binaries = discover_binaries()
+    result = _command_version(str(binaries.ffmpeg) if binaries.ffmpeg else None, "-version")
+    return result.model_copy(update={"source": binaries.source})
 
 
 def _ffprobe_info() -> ToolInfo:
-    return _command_version(shutil.which("ffprobe"), "-version")
+    from backend.rendering.binaries import discover_binaries
+
+    binaries = discover_binaries()
+    result = _command_version(str(binaries.ffprobe) if binaries.ffprobe else None, "-version")
+    return result.model_copy(update={"source": binaries.source})
 
 
-def _torch_info(probe_cuda: bool) -> TorchInfo:
+def _chromium_info() -> ToolInfo:
+    """Discover Chromium without statically coupling core diagnostics to a UI module."""
+    try:
+        try:
+            # Platform discovery owns this helper once available.
+            from backend.rendering.binaries import discover_chromium
+        except ImportError:
+            # Compatibility fallback for older checkouts.
+            from backend.graphics.browser import discover_chromium
+
+        executable = discover_chromium()
+    except Exception as exc:  # Discovery is diagnostic and must not break the report.
+        return ToolInfo(available=False, source="discovery", error=type(exc).__name__)
+    return ToolInfo(
+        available=executable is not None,
+        path=str(executable) if executable is not None else None,
+        source="discovery",
+    )
+
+
+def _torch_info(probe_cuda: bool, installed_version: str | None = None) -> TorchInfo:
+    if not probe_cuda:
+        # Package metadata is enough to distinguish absent from deliberately
+        # unprobed, and avoids importing a heavyweight model runtime merely to
+        # determine whether the core Python/FFmpeg path is ready.
+        return TorchInfo(installed=installed_version is not None, version=installed_version)
     try:
         import torch
     except Exception as exc:  # Import failures often reveal binary conflicts.
-        return TorchInfo(installed=False, import_error=f"{type(exc).__name__}: {exc}")
+        return TorchInfo(
+            installed=False,
+            version=installed_version,
+            import_probed=True,
+            import_error=f"{type(exc).__name__}: {exc}",
+        )
     cuda_available = False
     cuda_error = None
     if probe_cuda:
@@ -148,6 +185,7 @@ def _torch_info(probe_cuda: bool) -> TorchInfo:
     return TorchInfo(
         installed=True,
         version=str(torch.__version__),
+        import_probed=True,
         cuda_runtime=str(torch.version.cuda) if torch.version.cuda else None,
         cuda_probed=probe_cuda,
         cuda_available=cuda_available,
@@ -157,20 +195,26 @@ def _torch_info(probe_cuda: bool) -> TorchInfo:
     )
 
 
-def _nvidia_gpus() -> list[GPUInfo]:
+def _nvidia_probe() -> tuple[list[GPUInfo], CapabilityStatus, dict[str, str]]:
     executable = shutil.which("nvidia-smi")
     if executable is None:
-        return []
+        return [], CapabilityStatus.ABSENT, {}
     try:
         completed = subprocess.run(
             [executable, "--query-gpu=name,driver_version,memory.total,memory.free",
              "--format=csv,noheader,nounits"],
             check=False, capture_output=True, text=True, timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (
+            [], CapabilityStatus.PROBE_FAILED,
+            {"path": executable, "error": type(exc).__name__},
+        )
     if completed.returncode != 0:
-        return []
+        return (
+            [], CapabilityStatus.PROBE_FAILED,
+            {"path": executable, "error": f"exit code {completed.returncode}"},
+        )
     results = []
     for line in completed.stdout.splitlines():
         parts = [part.strip() for part in line.split(",")]
@@ -184,7 +228,13 @@ def _nvidia_gpus() -> list[GPUInfo]:
             ))
         except ValueError:
             continue
-    return results
+    status = CapabilityStatus.AVAILABLE if results else CapabilityStatus.ABSENT
+    return results, status, {"path": executable, "gpu_count": str(len(results))}
+
+
+def _nvidia_gpus() -> list[GPUInfo]:
+    """Return the legacy inventory view while the typed report retains probe state."""
+    return _nvidia_probe()[0]
 
 
 def _system_ram_gb() -> float:
@@ -319,16 +369,94 @@ def _backend_compatibility(torch: TorchInfo, packages: dict[str, str | None],
     }
 
 
+def _tool_capability(tool: ToolInfo) -> tuple[CapabilityStatus, dict[str, str]]:
+    evidence: dict[str, str] = {}
+    if tool.path:
+        evidence["path"] = tool.path
+    if tool.version:
+        evidence["version"] = tool.version
+    if tool.source:
+        evidence["source"] = tool.source
+    if tool.error:
+        evidence["error"] = tool.error
+    if tool.available:
+        return CapabilityStatus.AVAILABLE, evidence
+    if tool.path or tool.error:
+        return CapabilityStatus.PROBE_FAILED, evidence
+    return CapabilityStatus.ABSENT, evidence
+
+
+def _torch_capabilities(
+    torch: TorchInfo,
+    installed_version: str | None,
+    *,
+    probe_cuda: bool,
+) -> tuple[
+    CapabilityStatus, dict[str, str], CapabilityStatus, dict[str, str],
+]:
+    pytorch_evidence: dict[str, str] = {}
+    if torch.version or installed_version:
+        pytorch_evidence["version"] = torch.version or installed_version or ""
+    if torch.import_error:
+        pytorch_evidence["error"] = torch.import_error
+
+    if not probe_cuda:
+        pytorch_status = (
+            CapabilityStatus.NOT_PROBED
+            if installed_version is not None
+            else CapabilityStatus.ABSENT
+        )
+    elif torch.installed:
+        pytorch_status = CapabilityStatus.AVAILABLE
+    elif installed_version is None and torch.import_error and torch.import_error.startswith(
+        "ModuleNotFoundError:"
+    ):
+        pytorch_status = CapabilityStatus.ABSENT
+    else:
+        pytorch_status = CapabilityStatus.PROBE_FAILED
+
+    cuda_evidence: dict[str, str] = {}
+    if torch.cuda_runtime:
+        cuda_evidence["runtime"] = torch.cuda_runtime
+    if torch.cuda_device_name:
+        cuda_evidence["device"] = torch.cuda_device_name
+    if torch.cuda_error:
+        cuda_evidence["error"] = torch.cuda_error
+    if not probe_cuda:
+        cuda_status = CapabilityStatus.NOT_PROBED
+    elif torch.import_error:
+        cuda_status = (
+            CapabilityStatus.ABSENT
+            if pytorch_status == CapabilityStatus.ABSENT
+            else CapabilityStatus.PROBE_FAILED
+        )
+    elif torch.cuda_runtime is None:
+        cuda_status = CapabilityStatus.UNSUPPORTED
+    elif torch.cuda_error:
+        cuda_status = CapabilityStatus.PROBE_FAILED
+    elif torch.cuda_available:
+        cuda_status = CapabilityStatus.AVAILABLE
+    else:
+        cuda_status = CapabilityStatus.ABSENT
+    return pytorch_status, pytorch_evidence, cuda_status, cuda_evidence
+
+
 def inspect_environment(config: AppConfig | None = None, *,
                         probe_cuda: bool = True) -> EnvironmentReport:
     """Inspect only; never installs, downloads, starts, or terminates anything."""
     settings = config or load_config()
-    torch = _torch_info(probe_cuda)
     packages = _package_versions()
+    torch = _torch_info(probe_cuda, packages["torch"])
     ffmpeg = _ffmpeg_info()
     ffprobe = _ffprobe_info()
+    chromium = _chromium_info()
     git = _command_version(shutil.which("git"), "--version")
-    gpus = _nvidia_gpus() if probe_cuda else []
+    if probe_cuda:
+        gpus, nvidia_status, nvidia_evidence = _nvidia_probe()
+    else:
+        gpus = []
+        nvidia_status = CapabilityStatus.NOT_PROBED
+        nvidia_evidence = {}
     disk_targets = {
         "model_root": settings.paths.model_root,
         "project_root": settings.paths.project_root,
@@ -342,14 +470,48 @@ def inspect_environment(config: AppConfig | None = None, *,
     python_version = sys.version.split()[0]
     python_pair = sys.version_info[:2]
     incompatible = python_pair < (3, 11)
+    ffmpeg_status, ffmpeg_evidence = _tool_capability(ffmpeg)
+    ffprobe_status, ffprobe_evidence = _tool_capability(ffprobe)
+    chromium_status, chromium_evidence = _tool_capability(chromium)
+    pytorch_status, pytorch_evidence, cuda_status, cuda_evidence = _torch_capabilities(
+        torch, packages["torch"], probe_cuda=probe_cuda,
+    )
+    host_system = platform.system()
+    host_release = platform.release()
+    host_architecture = platform.machine()
+    repository_root = Path(__file__).resolve().parents[2]
+    ideogram_script = repository_root / "scripts" / "start_ideogram4.sh"
+    ideogram_script_path = (
+        str(ideogram_script)
+        if ideogram_script.is_file() and os.access(ideogram_script, os.X_OK)
+        else None
+    )
+    tts_worker = repository_root / "services" / "tts_worker" / "app.py"
+    tts_worker_path = str(tts_worker) if tts_worker.is_file() else None
+    capabilities = build_capability_report(
+        python_version=python_version,
+        python_supported=not incompatible,
+        ffmpeg_status=ffmpeg_status,
+        ffmpeg_evidence=ffmpeg_evidence,
+        ffprobe_status=ffprobe_status,
+        ffprobe_evidence=ffprobe_evidence,
+        chromium_status=chromium_status,
+        chromium_evidence=chromium_evidence,
+        pytorch_status=pytorch_status,
+        pytorch_evidence=pytorch_evidence,
+        cuda_status=cuda_status,
+        cuda_evidence=cuda_evidence,
+        nvidia_status=nvidia_status,
+        nvidia_evidence=nvidia_evidence,
+        host_system=host_system,
+        host_release=host_release,
+        host_architecture=host_architecture,
+        bash_path=shutil.which("bash"),
+        ideogram_script_path=ideogram_script_path,
+        tts_worker_path=tts_worker_path,
+    )
     if incompatible:
         conflicts.append("Python 3.11 or newer is required for the main application")
-    if not torch.installed:
-        warnings.append("PyTorch is unavailable; mock mode remains usable if FFmpeg is available")
-    elif probe_cuda and not torch.cuda_available:
-        warnings.append("PyTorch cannot access CUDA in this execution context")
-    if not gpus and probe_cuda:
-        warnings.append("nvidia-smi did not report a GPU; rerun outside a restricted sandbox")
     low_vram = [gpu for gpu in gpus if gpu.free_vram_gb is not None and
                 gpu.free_vram_gb < settings.gpu.minimum_free_vram_gb_for_heavy_job]
     if low_vram:
@@ -363,8 +525,6 @@ def inspect_environment(config: AppConfig | None = None, *,
         )
     if not ffmpeg.available:
         conflicts.append("FFmpeg is required for the end-to-end mock and render pipelines")
-    if not ffprobe.available:
-        warnings.append("ffprobe is not on PATH; media QC will be limited")
     low_disks = [disk.target for disk in disks if not disk.meets_free_space_policy]
     if low_disks:
         warnings.append(
@@ -394,6 +554,7 @@ def inspect_environment(config: AppConfig | None = None, *,
         minimum_free_disk_gb=settings.paths.minimum_free_disk_gb,
         optional_packages=packages,
         backend_compatibility=_backend_compatibility(torch, packages, ffmpeg),
+        capabilities=capabilities,
         warnings=warnings,
         version_conflicts=conflicts,
         recommendations=recommendations,
@@ -404,6 +565,13 @@ def format_markdown(report: EnvironmentReport) -> str:
     """Render a secret-free diagnostic report suitable for docs/system-diagnostics.md."""
     lines = [
         "# System diagnostics", "", f"Classification: `{report.classification.value}`", "",
+        "## Core readiness", "",
+        f"- Status: `{report.capabilities.core.status.value}`",
+        f"- {report.capabilities.core.detail}",
+        "- Core requirements: " + ", ".join(
+            f"{name}={item.status.value}"
+            for name, item in report.capabilities.core.requirements.items()
+        ), "",
         "## Runtime", "", f"- Python: `{report.python_version}`",
         f"- Executable: `{report.python_executable}`",
         f"- OS: `{report.operating_system}`", f"- System RAM: `{report.system_ram_gb:.2f} GiB`", "",
@@ -416,6 +584,19 @@ def format_markdown(report: EnvironmentReport) -> str:
         "## Tools", "", f"- FFmpeg: `{report.ffmpeg.path or 'not found'}` ({report.ffmpeg.source})",
         f"- ffprobe: `{report.ffprobe.path or 'not found'}`",
         f"- Git: `{report.git.path or 'not found'}`", "",
+        "## Feature and optional capabilities", "",
+        *(
+            f"- Feature `{name}`: `{item.status.value}` — {item.detail}"
+            for name, item in report.capabilities.features.items()
+        ),
+        *(
+            f"- Optional `{name}`: `{item.status.value}` — {item.detail}"
+            for name, item in report.capabilities.optional.items()
+        ), "",
+        "## Host evidence (descriptive only)", "",
+        f"- Operating system label: `{report.capabilities.host.operating_system}`",
+        f"- Release label: `{report.capabilities.host.release}`",
+        f"- Architecture label: `{report.capabilities.host.architecture}`", "",
         "## System-wide GPU memory", "",
     ]
     if report.nvidia_gpus:

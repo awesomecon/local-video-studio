@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from backend.captions import CaptionWord, build_caption_cues, restore_authored_punctuation
 from backend.core import AppConfig
+from backend.core.resources import resource_path
 from backend.director import DirectorEngine
 from backend.director.image_routing import (
     IMAGE_MODEL_DIRNAMES,
@@ -130,7 +131,7 @@ from backend.schemas import (
     utc_now,
     validate_shot_sequence,
 )
-from backend.storage import PersistentJobQueue, ProjectStore, StudioDatabase, slugify
+from backend.storage import PersistentJobQueue, ProjectStore, StudioDatabase
 from backend.storage.generation_cache import CachedGeneration, GenerationCache
 from backend.storage.jobs import InvalidJobTransition
 from backend.timeline import (
@@ -175,25 +176,25 @@ class PipelineService:
     """Coordinates stateful stages while keeping artifacts portable and reproducible."""
 
     H3_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "minimax-h3-av.workflow.json"
     )
     H3_FIRST_FRAME_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "minimax-h3-av-first-frame.workflow.json"
     )
     KREA2_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "krea2-turbo.workflow.json"
     )
     QWEN_IMAGE_2512_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "qwen-image-2512.workflow.json"
@@ -201,13 +202,13 @@ class PipelineService:
     # Ideogram 4 runs locally through its ComfyUI workflow template. Added to
     # TEST against Qwen Image for embedded-text scenes; Qwen stays available.
     IDEOGRAM4_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "ideogram4-local.workflow.json"
     )
     IDEOGRAM4_THUMBNAIL_WORKFLOW = (
-        Path(__file__).resolve().parents[2]
+        resource_path()
         / "workflows"
         / "comfyui"
         / "ideogram4-thumbnail-local.workflow.json"
@@ -249,7 +250,9 @@ class PipelineService:
         # API upload staging and FFmpeg may both need a working directory.
         # Keep it concrete even when callers rely on the configured default.
         self.temp_root = Path(temp_root or config.paths.temp_root).expanduser()
-        self.jobs = PersistentJobQueue(self.database)
+        self._job_control_lock = threading.RLock()
+        self._stopping = False
+        self.jobs = PersistentJobQueue(self.database, control_lock=self._job_control_lock)
         self.registry = BackendRegistry.from_config(config.model_dump(mode="python"), mock_mode=self.mock_mode)
         self.generation_cache = self._build_generation_cache(config)
         self._snapshot_provider = snapshot_provider or query_nvidia_smi
@@ -305,12 +308,9 @@ class PipelineService:
 
     def create_project(self, request: ProjectCreate) -> Project:
         with self._lock:
-            base = slugify(request.title)
-            slug = base
-            suffix = 2
-            while self.database.get_project_by_slug(slug) or self.store.project_path(slug).exists():
-                slug = f"{base}-{suffix}"
-                suffix += 1
+            slug = self.store.available_slug(
+                request.title, (item.slug for item in self.database.list_projects()),
+            )
             project = Project(
                 **request.model_dump(),
                 slug=slug,
@@ -733,7 +733,7 @@ class PipelineService:
             replacement = planned_asset.model_copy(update={
                 "type": EditorialAssetType.USER_UPLOADED_IMAGE,
                 "asset_id": registered.id,
-                "source": str(registered.filepath),
+                "source": registered.filepath.as_posix(),
                 "evidence_class": (
                     EvidenceClass.EVIDENCE if evidence else EvidenceClass.ILLUSTRATION
                 ),
@@ -873,7 +873,7 @@ class PipelineService:
                 )
                 replacement = planned_asset.model_copy(update={
                     "asset_id": registered.id,
-                    "source": str(registered.filepath),
+                    "source": registered.filepath.as_posix(),
                     "evidence_class": EvidenceClass.ILLUSTRATION,
                     "metadata": {
                         **planned_asset.metadata,
@@ -2856,6 +2856,9 @@ class PipelineService:
         Every runner re-enters safely: completed stages are kept and only the
         missing ones are rebuilt.
         """
+        with self._job_control_lock:
+            if self._stopping:
+                raise PipelineError("The application is shutting down; restart before running jobs.")
         job = self.jobs.get(job_id)
         if job is None:
             raise KeyError(f"job not found: {job_id}")
@@ -3230,7 +3233,7 @@ class PipelineService:
                 and child.parameters.get("canceled_with_parent")
             ):
                 try:
-                    children[key] = self.jobs.retry(child.id)
+                    children[key] = self.retry_job(child.id)
                 except InvalidJobTransition:
                     pass
 
@@ -3305,6 +3308,38 @@ class PipelineService:
         self.jobs.complete(job_id)
 
     def cancel_job(self, job_id: str) -> GenerationJob:
+        with self._job_control_lock:
+            return self._cancel_job(job_id)
+
+    def retry_job(self, job_id: str) -> GenerationJob:
+        from backend.rendering.process import reset_media_process_cancellation
+        with self._job_control_lock:
+            if self._stopping:
+                raise PipelineError("The application is shutting down; retry after restart.")
+            job = self.jobs.retry(job_id)
+            reset_media_process_cancellation(job_id)
+            return job
+
+    def shutdown(self) -> None:
+        """Cancel this service's jobs and stop only its owned workers."""
+        with self._job_control_lock:
+            self._stopping = True
+            self.jobs.close_submissions()
+            for job in self.jobs.list():
+                if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED}:
+                    try:
+                        self._cancel_job(job.id)
+                    except InvalidJobTransition:
+                        pass  # The job completed before cancellation won.
+                else:
+                    # A canceled/failed row may still own a winding-down child.
+                    cancel_media_processes_for_job(job.id)
+        try:
+            self.ideogram_worker.stop()
+        finally:
+            self.tts_workers.stop_all()
+
+    def _cancel_job(self, job_id: str) -> GenerationJob:
         """Cancel one job (and, for visual batches, every job it created).
 
         Batch children are canceled with the parent: queued rows immediately,
@@ -3324,6 +3359,10 @@ class PipelineService:
         return canceled
 
     def cancel_all_jobs(self, project_id: str) -> list[GenerationJob]:
+        with self._job_control_lock:
+            return self._cancel_all_jobs(project_id)
+
+    def _cancel_all_jobs(self, project_id: str) -> list[GenerationJob]:
         """Cancel every active job for a project (storyboard's Cancel all).
 
         Visual batches are canceled parent-first so their children carry
@@ -3815,7 +3854,7 @@ class PipelineService:
                 relative = destination.relative_to(root)
                 for asset in assets:
                     self.database.save_asset(asset.model_copy(update={"filepath": relative}))
-                archived.append(str(relative))
+                archived.append(relative.as_posix())
             elif not archive_media and (
                 path == shots_directory or shots_directory in path.parents
             ):
@@ -4443,7 +4482,7 @@ class PipelineService:
             destination.parent.mkdir(parents=True, exist_ok=True)
             staged = destination.with_name(f".{destination.name}.pending")
             shutil.copyfile(source_path, staged)
-            with staged.open("rb") as handle:
+            with staged.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(staged, destination)
             digest = hashlib.sha256(destination.read_bytes()).hexdigest()
@@ -4725,6 +4764,7 @@ class PipelineService:
         font_size = max(9, int(height * 0.052))
         font = None
         for candidate in (
+            Path(__file__).resolve().parents[1] / "editorial/fonts/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         ):
@@ -4753,7 +4793,7 @@ class PipelineService:
             draw.text((anchor_x, y), text, font=font, fill=(*rgb, 255), anchor=anchor)
         staged = output.with_name(f".{output.name}.pillow.tmp")
         image.save(staged, format="PNG")
-        with staged.open("rb") as handle:
+        with staged.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(staged, output)
         return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -4867,7 +4907,7 @@ class PipelineService:
         self._invalidate_stages(project, set(self._SHOT_TIMELINE_STAGES))
         return {
             "scene_id": scene.id,
-            "path": str(destination.relative_to(root)),
+            "path": destination.relative_to(root).as_posix(),
             "total_frames": result.total_frames,
             "duration_seconds": result.duration_seconds,
             "cache_hit": result.cache_hit,
@@ -4952,7 +4992,7 @@ class PipelineService:
                     or (root / visual.filepath).stat().st_size == 0:
                 issues.append({
                     "scope": label, "shot_id": shot.id, "code": "corrupt_visual",
-                    "detail": f"visual file {visual.filepath} is missing or empty",
+                    "detail": f"visual file {visual.filepath.as_posix()} is missing or empty",
                 })
             if shot.source_asset_id is not None:
                 source = next(
@@ -5826,7 +5866,7 @@ class PipelineService:
                 "settings": {
                     "renderer": "chromium-headless" if not self.mock_mode else "mock",
                     "sanitizer_version": "graphic-screen-sanitizer-v1", "source_hash": source_hash,
-                    "png_hash": png_hash, "manifest": str(manifest_path.relative_to(self.store.project_path(project))),
+                    "png_hash": png_hash, "manifest": manifest_path.relative_to(self.store.project_path(project)).as_posix(),
                     "cache_hit": generator.cache_hit if not self.mock_mode else False,
                     "cache_key": generator.cache_key if not self.mock_mode else None,
                     "graphic_revision": (
@@ -5971,6 +6011,7 @@ class PipelineService:
         from PIL import ImageFont
 
         for candidate in (
+            Path(__file__).resolve().parents[1] / "editorial/fonts/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -6096,7 +6137,7 @@ class PipelineService:
             )
         staged = output.with_name(f".{output.name}.tmp")
         base.convert("RGB").save(staged, format="PNG")
-        with staged.open("rb") as handle:
+        with staged.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(staged, output)
         return hashlib.sha256(output.read_bytes()).hexdigest()
@@ -6190,9 +6231,9 @@ class PipelineService:
             "text_overlay_literals": literals,
             "text_overlay_colors": colors or ["#F2EEE5", "#E78A2E"],
             "text_overlay_png_sha256": png_hash,
-            "generated_background": str(
-                background_path.relative_to(self.store.project_path(project))
-            ),
+            "generated_background": background_path.relative_to(
+                self.store.project_path(project)
+            ).as_posix(),
         })
         metadata["settings"] = settings
         metadata["workflow_version"] = "generated-background-exact-text-v3"
@@ -7113,7 +7154,7 @@ class PipelineService:
                 "group": block.group,
                 "predecessor_asset_id": pred_asset.id,
                 "predecessor_video_sha256": pred_hash,
-                "keyframe_path": str(keyframe_path.relative_to(self.store.project_path(project))),
+                "keyframe_path": keyframe_path.relative_to(self.store.project_path(project)).as_posix(),
                 "keyframe_sha256": actual_frame_hash,
             }
         return block, tuple(references), continuity_meta
@@ -8120,7 +8161,7 @@ class PipelineService:
         audio_hash = hashlib.sha256(narration.read_bytes()).hexdigest()
         metadata = dict(result.metadata)
         settings = dict(metadata.get("settings", {}))
-        settings["input_audio"] = str(narration.relative_to(self.store.project_path(project)))
+        settings["input_audio"] = narration.relative_to(self.store.project_path(project)).as_posix()
         settings["input_audio_sha256"] = audio_hash
         metadata["settings"] = settings
         timing_payload = json.loads(destination.read_text(encoding="utf-8"))
@@ -8194,9 +8235,9 @@ class PipelineService:
             payload = timeline.to_dict()
             root = self.store.project_path(project)
             for clip in payload["clips"]:
-                clip["path"] = str(Path(clip["path"]).relative_to(root))
+                clip["path"] = Path(clip["path"]).relative_to(root).as_posix()
             for track in payload["audio_tracks"]:
-                track["path"] = str(Path(track["path"]).relative_to(root))
+                track["path"] = Path(track["path"]).relative_to(root).as_posix()
             self._atomic_json(destination, payload)
             return timeline, [destination]
 
@@ -8339,7 +8380,8 @@ class PipelineService:
                     "duration": composition.duration,
                 }
                 clips.append(clip)
-            self._archive_output(project, output)
+            if output.is_file():
+                self.store.copy_to_archive(project.slug, output.relative_to(root))
             self._assemble_editorial_compositions(plan, clips, output)
             self._atomic_json(manifest_path, {
                 "workflow_version": "editorial-composition-cache-v1",
@@ -8413,27 +8455,32 @@ class PipelineService:
             raise PipelineError("The Editorial Edit Plan contains no compositions.")
         publish = output.with_name(f".{output.stem}.editorial.tmp{output.suffix}")
         publish.unlink(missing_ok=True)
-        if len(clips) == 1:
-            shutil.copyfile(clips[0], publish)
-        else:
-            ffmpeg = require_ffmpeg(self.renderer.binaries)
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", prefix=".editorial-concat-",
-                suffix=".txt", dir=output.parent, delete=False,
-            ) as concat_file:
-                concat_path = Path(concat_file.name)
-                for clip in clips:
-                    escaped = str(clip.resolve()).replace("'", "'\\''")
-                    concat_file.write(f"file '{escaped}'\n")
-            try:
-                run_media_process([
-                    str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "concat", "-safe", "0", "-i", str(concat_path),
-                    "-an", "-c:v", "copy", "-movflags", "+faststart", str(publish),
-                ], timeout=max(120.0, plan.duration * 2))
-            finally:
-                concat_path.unlink(missing_ok=True)
-        os.replace(publish, output)
+        from backend.rendering.process import media_output_publication
+        try:
+            if len(clips) == 1:
+                shutil.copyfile(clips[0], publish)
+            else:
+                ffmpeg = require_ffmpeg(self.renderer.binaries)
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", prefix=".editorial-concat-",
+                    suffix=".txt", dir=output.parent, delete=False,
+                ) as concat_file:
+                    concat_path = Path(concat_file.name)
+                    for clip in clips:
+                        escaped = clip.resolve().as_posix().replace("'", "'\\''")
+                        concat_file.write(f"file '{escaped}'\n")
+                try:
+                    run_media_process([
+                        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "concat", "-safe", "0", "-i", str(concat_path),
+                        "-an", "-c:v", "copy", "-movflags", "+faststart", str(publish),
+                    ], timeout=max(120.0, plan.duration * 2))
+                finally:
+                    concat_path.unlink(missing_ok=True)
+            with media_output_publication():
+                os.replace(publish, output)
+        finally:
+            publish.unlink(missing_ok=True)
 
     def _ensure_preview(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "renders" / "preview.mp4"
@@ -8443,7 +8490,8 @@ class PipelineService:
         def operation() -> tuple[Path, list[Path]]:
             timeline = self._build_timeline(project)
             width, height = self.config.render.preview_resolution
-            self._archive_output(project, output)
+            if output.is_file():
+                self.store.copy_to_archive(project.slug, output.relative_to(self.store.project_path(project)))
             info = self.renderer.render_preview(
                 timeline,
                 output,
@@ -8456,7 +8504,7 @@ class PipelineService:
                 ),
             )
             self.database.record_render_metadata(
-                project.id, str(output.relative_to(self.store.project_path(project))),
+                project.id, output.relative_to(self.store.project_path(project)).as_posix(),
                 self._jsonable(asdict(info)), utc_now(),
             )
             self._record_render_asset(project, output, role="preview_render")
@@ -8500,7 +8548,8 @@ class PipelineService:
 
         def operation() -> tuple[Path, list[Path]]:
             timeline = self._build_timeline(project)
-            self._archive_output(project, output)
+            if output.is_file():
+                self.store.copy_to_archive(project.slug, output.relative_to(self.store.project_path(project)))
             info = self.renderer.render_final(
                 timeline,
                 output,
@@ -8513,7 +8562,7 @@ class PipelineService:
                 ),
             )
             self.database.record_render_metadata(
-                project.id, str(output.relative_to(self.store.project_path(project))),
+                project.id, output.relative_to(self.store.project_path(project)).as_posix(),
                 self._jsonable(asdict(info)), utc_now(),
             )
             self._record_render_asset(project, output, role="final_render")
@@ -9212,7 +9261,7 @@ class PipelineService:
                 "status": "completed",
                 "job_id": job_id,
                 "completed_at": utc_now().isoformat(),
-                "outputs": [str(path.relative_to(root)) for path in outputs],
+                "outputs": [path.relative_to(root).as_posix() for path in outputs],
             }
             self._atomic_json(self._state_path(project), state)
 

@@ -623,7 +623,7 @@ def test_candidate_deletion_frees_slot_clears_selection_and_keeps_archive(
     candidate_rows_before = {
         asset.id
         for asset in service.database.list_assets(project.id)
-        if str(asset.filepath).startswith("thumbnails/candidate-01/")
+        if Path(asset.filepath).parts[:2] == ("thumbnails", "candidate-01")
     }
     assert candidate_rows_before
 
@@ -648,7 +648,7 @@ def test_candidate_deletion_frees_slot_clears_selection_and_keeps_archive(
     remaining_assets = {
         asset.id
         for asset in service.database.list_assets(project.id)
-        if str(asset.filepath).startswith("thumbnails/candidate-01/")
+        if Path(asset.filepath).parts[:2] == ("thumbnails", "candidate-01")
     }
     assert candidate_rows_before.isdisjoint(remaining_assets)
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import subprocess
+import os
+import tempfile
 import threading
 import wave
 from pathlib import Path
@@ -42,6 +43,7 @@ class MockGeneratorBackend(GeneratorBackend):
         self.ffmpeg_path = ffmpeg_path or find_ffmpeg()
         self._active: set[str] = set()
         self._canceled: set[str] = set()
+        self._media_jobs: dict[str, str] = {}
         self._lock = threading.Lock()
         self._loaded = False
 
@@ -71,13 +73,18 @@ class MockGeneratorBackend(GeneratorBackend):
         self._loaded = False
 
     def cancel(self, job_id: str) -> bool:
+        from backend.rendering.process import cancel_media_processes_for_job
         with self._lock:
-            if job_id in self._active:
-                self._canceled.add(job_id)
+            self._canceled.add(job_id)
+            media_job = self._media_jobs.get(job_id)
+        if media_job is not None:
+            cancel_media_processes_for_job(media_job)
         return True
 
     def reset_cancel(self, job_id: str) -> None:
+        from backend.rendering.process import reset_media_process_cancellation
         with self._lock:
+            reset_media_process_cancellation(job_id)
             self._canceled.discard(job_id)
 
     def _check_canceled(self, job_id: str) -> None:
@@ -93,15 +100,23 @@ class MockGeneratorBackend(GeneratorBackend):
         }
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
+        from backend.rendering.process import (
+            CanceledError, current_media_job_id, media_process_scope,
+        )
         with self._lock:
+            inherited = current_media_job_id()
+            attribution = inherited or request.job_id
             self._active.add(request.job_id)
-            self._canceled.discard(request.job_id)
+            self._media_jobs[request.job_id] = attribution
         try:
-            return self._generate(request)
+            with media_process_scope(attribution):
+                return self._generate(request)
+        except CanceledError as exc:
+            raise BackendError(BackendErrorCode.CANCELED, "The mock generation was canceled.") from exc
         finally:
             with self._lock:
                 self._active.discard(request.job_id)
-                self._canceled.discard(request.job_id)
+                self._media_jobs.pop(request.job_id, None)
 
     def _generate(self, request: GenerationRequest) -> GenerationResult:
         self._check_canceled(request.job_id)
@@ -221,13 +236,28 @@ class MockGeneratorBackend(GeneratorBackend):
             "aac",
             str(output),
         ]
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        if completed.returncode:
+        from backend.rendering.process import (
+            CanceledError, MediaProcessError, media_output_publication, run_media_process,
+        )
+        descriptor, name = tempfile.mkstemp(prefix=".mock-video-", suffix=".mp4", dir=output.parent)
+        os.close(descriptor)
+        staged = Path(name)
+        command[-1] = str(staged)
+        try:
+            run_media_process(command, timeout=max(60.0, duration * 10))
+            self._check_canceled(request.job_id)
+            with media_output_publication():
+                os.replace(staged, output)
+        except CanceledError:
+            raise
+        except MediaProcessError as exc:
             raise BackendError(
                 BackendErrorCode.BACKEND_UNAVAILABLE,
                 "FFmpeg could not create the mock video.",
-                details=completed.stderr[-1000:],
-            )
+                details=exc.stderr[-1000:],
+            ) from exc
+        finally:
+            staged.unlink(missing_ok=True)
         return [output]
 
     def _write_wave(self, path: Path, duration: float, frequency: float, volume: float) -> None:

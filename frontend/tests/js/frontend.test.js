@@ -2666,6 +2666,30 @@ record("stale: reused-media badge suggests re-import, not regeneration", () => {
 
 /* --- report -------------------------------------------------------------- */
 
+const { capabilityPanel } = await import("../../js/pages/models.js");
+record("core readiness stays ready when optional AI is absent", () => {
+  const panel = capabilityPanel({
+    core: { ready: true, detail: "Core mock rendering is ready", requirements: {
+      python: { status: "available", detail: "Python available" },
+      ffmpeg: { status: "available", detail: "FFmpeg available" },
+    } },
+    features: { browser_rendering: { status: "available", detail: "Chromium available" } },
+    optional: { cuda: { status: "not_probed", detail: "Optional CUDA not checked" } },
+  });
+  assert(panel.textContent.includes("Ready"));
+  assert(panel.textContent.includes("not probed"));
+  assert(!panel.textContent.includes("Needs attention"));
+  assert(panel.querySelector("details"), "optional models should be separate");
+});
+
+record("missing core requirement is visible and diagnostic text is escaped", () => {
+  const panel = capabilityPanel({core: { ready: false, detail: "FFmpeg missing <img src=x>", requirements: {} }});
+  assert(panel.textContent.includes("Needs attention"));
+  assert(panel.textContent.includes("<img src=x>"));
+  assert(!panel.querySelector("img"));
+  eq(capabilityPanel(null), null);
+});
+
 const passed = results.filter((r) => r[1]).length;
 const out = document.getElementById("out");
 out.textContent = `LVSTESTS ${JSON.stringify({ passed, total: results.length, results })}`;

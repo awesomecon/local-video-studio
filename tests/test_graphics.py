@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,8 @@ def test_sanitizer_requires_exact_visible_text_in_dom_order() -> None:
         sanitize_graphic_screen(response(visible_text=["62%", "Tokens"]), width=320, height=180)
 
 
-def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path) -> None:
+def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LVS_CHROMIUM_NO_SANDBOX", raising=False)
     command = chromium_argv(
         Path("/snap/bin/chromium"), document=tmp_path / "screen.html", output=tmp_path / "screen.png",
         profile=tmp_path / "profile", width=320, height=180,
@@ -76,6 +78,18 @@ def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path) -> No
     assert "--window-size=320,180" in command
     assert any(item.startswith("--user-data-dir=") for item in command)
     assert command[-1].startswith("file:")
+
+
+def test_chromium_argv_no_sandbox_requires_explicit_opt_in(tmp_path: Path, monkeypatch) -> None:
+    """The sandbox is on by default; only an explicit operator opt-in (used by
+    CI containers whose kernels cannot run it) adds --no-sandbox."""
+    monkeypatch.setenv("LVS_CHROMIUM_NO_SANDBOX", "1")
+    command = chromium_argv(
+        Path("/snap/bin/chromium"), document=tmp_path / "screen.html", output=tmp_path / "screen.png",
+        profile=tmp_path / "profile", width=320, height=180,
+    )
+
+    assert "--no-sandbox" in command
 
 
 def test_renderer_rejects_wrong_output_dimensions_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,6 +109,54 @@ def test_renderer_rejects_wrong_output_dimensions_atomically(tmp_path: Path, mon
     with pytest.raises(RuntimeError, match="resolution"):
         renderer.render("<html></html>", output, width=320, height=180)
     assert not output.exists()
+
+
+def test_renderer_defers_chromium_discovery_until_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.graphics import renderer as graphics_renderer
+
+    executable = tmp_path / "chromium"
+    calls: list[bool] = []
+
+    def discover() -> Path:
+        calls.append(True)
+        return executable
+
+    def fake_run(command, **kwargs):
+        output = Path(next(
+            value.split("=", 1)[1]
+            for value in command
+            if value.startswith("--screenshot=")
+        ))
+        Image.new("RGB", (320, 180), "black").save(output)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(graphics_renderer, "discover_chromium", discover)
+    monkeypatch.setattr(graphics_renderer.subprocess, "run", fake_run)
+    renderer = GraphicScreenRenderer()
+
+    assert calls == []
+    renderer.render("<html></html>", tmp_path / "screen.png", width=320, height=180)
+    assert calls == [True]
+
+
+def test_renderer_reuses_validated_chromium_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.graphics import renderer as graphics_renderer
+
+    executable = tmp_path / "chrome.exe"
+    monkeypatch.setenv("LVS_CHROME", str(executable))
+    monkeypatch.setenv("LVS_CHROME_VALIDATED", "1")
+    monkeypatch.setenv("LVS_CHROME_VERSION", "151.0.7890.0")
+    monkeypatch.setattr(
+        graphics_renderer.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("validated Chromium must not be probed again"),
+    )
+
+    assert GraphicScreenRenderer(executable).version == "151.0.7890.0"
 
 
 def test_thumbnail_composite_is_deterministic_and_dedupes_repeated_hook(tmp_path: Path) -> None:
@@ -495,3 +557,24 @@ def test_generator_regenerates_cleanly_from_corrupt_cache_entry(tmp_path: Path) 
     assert generator.cache_hit is False
     assert regenerated[0].title == "Tokens"
     assert generator.cache.store("local_graphic", key, b"refreshed") is True
+
+
+@pytest.mark.parametrize("preset", ["impact", "clean", "editorial"])
+def test_thumbnail_fonts_fall_back_to_bundled_noto_without_fontconfig(
+    tmp_path: Path, monkeypatch, preset: str,
+) -> None:
+    """Windows and minimal hosts have no fc-match: thumbnails use the wheel's
+    bundled Noto files instead of failing."""
+    import subprocess
+
+    from backend.graphics import renderer as graphics_renderer
+
+    def _no_fontconfig(*args, **kwargs):
+        raise FileNotFoundError("fc-match is unavailable on this host")
+
+    monkeypatch.setattr(graphics_renderer.subprocess, "run", _no_fontconfig)
+    renderer = GraphicScreenRenderer(tmp_path / "chromium")
+    font_path, font_hash = renderer.thumbnail_font_metadata(preset)
+    assert Path(font_path).is_file()
+    assert font_path.endswith(".ttf")
+    assert font_hash is not None and len(font_hash) == 64

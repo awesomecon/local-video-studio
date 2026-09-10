@@ -108,6 +108,7 @@ import { apiUrl } from "./config.js";
  * @property {string[]} warnings
  * @property {string[]} version_conflicts
  * @property {string[]} recommendations
+ * @property {{core: {ready: boolean, detail: string, requirements: Object}, features: Object, optional: Object}} [capabilities]
  */
 
 /**

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
-from typing import Any
+from typing import Any, ContextManager
 
 from backend.schemas import GenerationJob, JobStatus, utc_now
 
@@ -48,13 +49,22 @@ _STARTED_STATES = {
 
 
 class PersistentJobQueue:
-    def __init__(self, database: StudioDatabase):
+    def __init__(self, database: StudioDatabase, *, control_lock: ContextManager[Any] | None = None) -> None:
         self.database = database
+        self._control_lock = control_lock or threading.RLock()
+        self._accepting = True
+
+    def close_submissions(self) -> None:
+        with self._control_lock:
+            self._accepting = False
 
     def enqueue(self, job: GenerationJob) -> GenerationJob:
-        if job.status is not JobStatus.QUEUED:
-            raise ValueError("new jobs must be queued")
-        return self.database.save_job(job)
+        with self._control_lock:
+            if not self._accepting:
+                raise InvalidJobTransition("application is shutting down; new jobs are not accepted")
+            if job.status is not JobStatus.QUEUED:
+                raise ValueError("new jobs must be queued")
+            return self.database.save_job(job)
 
     def claim_next(self, now: datetime | None = None) -> GenerationJob | None:
         return self.database.claim_queued_job(now or utc_now())
@@ -120,6 +130,12 @@ class PersistentJobQueue:
         return self.database.update_job_in_transaction(job_id, apply)
 
     def retry(self, job_id: str, now: datetime | None = None) -> GenerationJob:
+        with self._control_lock:
+            if not self._accepting:
+                raise InvalidJobTransition("application is shutting down; retries are not accepted")
+            return self._retry(job_id, now)
+
+    def _retry(self, job_id: str, now: datetime | None = None) -> GenerationJob:
         job = self._required(job_id)
         if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
             raise InvalidJobTransition("only failed or canceled jobs can be retried")

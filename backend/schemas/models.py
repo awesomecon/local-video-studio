@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+
+from .paths import portable_relative_path
 
 
 def utc_now() -> datetime:
@@ -244,14 +246,14 @@ class Asset(DomainModel):
     hash: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
-    @field_validator("filepath")
+    @field_validator("filepath", mode="before")
     @classmethod
-    def portable_filepath(cls, value: Path) -> Path:
-        if value.is_absolute():
-            raise ValueError("asset filepath must be project-relative for portability")
-        if ".." in value.parts:
-            raise ValueError("asset filepath cannot escape the project directory")
-        return value
+    def portable_filepath(cls, value: str | Path) -> str:
+        return portable_relative_path(value)
+
+    @field_serializer("filepath", when_used="json")
+    def serialize_filepath(self, value: Path) -> str:
+        return portable_relative_path(value)
 
 
 class GenerationAttempt(DomainModel):

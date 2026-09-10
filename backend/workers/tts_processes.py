@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import threading
 import time
@@ -137,6 +138,18 @@ class TTSWorkerSupervisor:
                 self._wait_until_healthy(spec, owned.process)
                 return False
             self._validate_spec(spec)
+            if spec.provider == "higgs_tts_3" and platform.system() != "Linux":
+                raise BackendError(
+                    BackendErrorCode.BACKEND_UNAVAILABLE,
+                    "Managed Higgs TTS uses a Linux CUDA toolchain. Use a compatible "
+                    "external service on this platform; core mock mode needs no GPU.",
+                )
+            if not (Path(__file__).resolve().parents[2] / "services/tts_worker/app.py").is_file():
+                raise BackendError(
+                    BackendErrorCode.BACKEND_UNAVAILABLE,
+                    "Managed TTS startup requires the optional worker source checkout. "
+                    "Configure an already-running compatible service instead.",
+                )
             self.output_root.mkdir(parents=True, exist_ok=True)
             self.log_root.mkdir(parents=True, exist_ok=True)
             log_handle = (self.log_root / f"tts-{provider}.log").open("ab")
