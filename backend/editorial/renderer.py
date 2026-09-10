@@ -995,20 +995,22 @@ class EditorialRenderer:
             args.insert(2, "--no-sandbox")
         from backend.rendering.process import owned_media_process, raise_if_media_job_canceled
         # Chromium's stderr is the only witness when it exits before exposing
-        # DevTools: keep it in a temp file and attach its tail to early-exit
+        # DevTools: keep it in a temp file and attach its head to early-exit
         # errors instead of discarding it, so CI failures are diagnosable.
+        # Crash reasons (signal/CHECK/FATAL lines) print at the top of the
+        # dump while register/stack frames trail at the bottom.
         with tempfile.TemporaryFile(prefix="lvs-chromium-stderr-") as diagnostics, \
                 owned_media_process(
                     args, env=dict(os.environ, HOME=str(profile)), stdout=subprocess.DEVNULL,
                     stderr=diagnostics,
                 ) as process:
-            def _diagnostic_tail() -> str:
+            def _diagnostic_head() -> str:
                 try:
                     diagnostics.seek(0)
-                    tail = diagnostics.read().decode("utf-8", errors="replace").strip()
+                    head = diagnostics.read().decode("utf-8", errors="replace").strip()
                 except OSError:
                     return "unavailable"
-                return tail[-2000:] or "empty"
+                return head[:2000] or "empty"
             client: _CDP | None = None
             try:
                 port_file = profile / "DevToolsActivePort"
@@ -1020,7 +1022,7 @@ class EditorialRenderer:
                         raise RuntimeError(
                             "Chromium exited before exposing Editorial renderer control; "
                             f"executable={self.chromium} argv={args!r} "
-                            f"browser stderr tail: {_diagnostic_tail()}"
+                            f"browser stderr head: {_diagnostic_head()}"
                         )
                     time.sleep(0.1)
                 if not port_file.is_file():

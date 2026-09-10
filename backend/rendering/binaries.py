@@ -6,8 +6,6 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
-from contextlib import ExitStack
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,10 +26,10 @@ class FFmpegBinaries:
         return self.ffmpeg is not None
 
 
-#: First execution of a freshly installed desktop browser on CI can stall
-#: well beyond a normal probe: on-access scanning of a ~150MB unsigned binary
-#: on Windows runners regularly costs tens of seconds, while Playwright's own
-#: launch (which the smoke step uses) allows a far longer handshake.
+#: Generous headroom for a cold first execution (e.g. on-access scanning of a
+#: ~150MB unsigned binary on Windows runners). The probe itself is a bare
+#: `--version` that prints and exits without initializing a browser, so
+#: anything slower than this is treated as unusable rather than waited out.
 _BROWSER_PROBE_TIMEOUT_SECONDS = 30.0
 
 
@@ -52,16 +50,16 @@ def _usable_executable(
     if current_platform != "Windows" and not os.access(path, os.X_OK):
         return None
     try:
-        with ExitStack() as stack:
-            command = [str(path), *version_args]
-            if version_args == ("--version",):
-                profile = stack.enter_context(tempfile.TemporaryDirectory(prefix="lvs-browser-probe-"))
-                command.extend(("--headless=new", "--no-first-run", "--disable-background-networking",
-                                f"--user-data-dir={profile}"))
-            result = subprocess.run(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=False, timeout=timeout,
-            )
+        # A version probe must not initialize a browser: no headless mode, no
+        # profile directory, no first-run machinery. `--version` prints and
+        # exits on every platform, so extra flags only add ways to hang (a
+        # headed-stack launch wedged for the full probe budget on Windows CI
+        # while the same binary launched fine through Playwright).
+        result = subprocess.run(
+            [str(path), *version_args],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=timeout,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     # Keep the path exactly as found: dispatchers such as /snap/bin/ffmpeg

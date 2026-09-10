@@ -72,7 +72,7 @@ def test_linux_discovery_prefers_bundled_ffmpeg_over_snap_shim(
     )
     monkeypatch.setattr(
         binaries_module, "_usable_executable",
-        lambda value: Path(value) if value else None,
+        lambda value, *args, **kwargs: Path(value) if value else None,
     )
     monkeypatch.setattr(binaries_module, "_is_snap_shim", lambda path: path == snap)
     monkeypatch.setattr(binaries_module, "_bundled_ffmpeg", lambda: bundled)

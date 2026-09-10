@@ -50,8 +50,9 @@ def test_usable_executable_handles_spaces_and_preserves_dispatch_path(
 
     assert found == dispatcher.absolute()
     assert found != dispatcher.resolve()
-    assert len(calls) == 1 and calls[0][:2] == [str(dispatcher), "--version"]
-    assert any(arg.startswith("--user-data-dir=") for arg in calls[0])
+    # A version probe must not initialize a browser: bare `--version` only,
+    # never a headed stack with a profile directory.
+    assert calls == [[str(dispatcher), "--version"]]
 
 
 def test_usable_executable_rejects_failed_version_probe(
@@ -133,8 +134,7 @@ def test_chromium_override_precedes_path_and_install_locations(
     )
 
     assert discover_chromium() == override.absolute()
-    assert len(calls) == 1 and calls[0][:2] == [str(override), "--version"]
-    assert any(arg.startswith("--user-data-dir=") for arg in calls[0])
+    assert calls == [[str(override), "--version"]]
 
 
 def test_chromium_path_precedes_linux_install_location(
