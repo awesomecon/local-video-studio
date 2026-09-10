@@ -149,7 +149,7 @@ def test_delete_shot_archives_media_and_keeps_asset_record(tmp_path: Path) -> No
     assert archived.is_file() and archived.read_bytes() == b"png"
     reloaded = service.database.get_asset(asset.id)
     assert reloaded is not None
-    assert str(reloaded.filepath) == result["archived_assets"][0]
+    assert Path(reloaded.filepath).parts == Path(result["archived_assets"][0]).parts
     # Only the materialized implicit shot remains.
     assert result["remaining_shots"] == 1
     assert result["scene_reverted_to_implicit"] is False
