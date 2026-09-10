@@ -65,7 +65,8 @@ def test_sanitizer_requires_exact_visible_text_in_dom_order() -> None:
         sanitize_graphic_screen(response(visible_text=["62%", "Tokens"]), width=320, height=180)
 
 
-def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path) -> None:
+def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LVS_CHROMIUM_NO_SANDBOX", raising=False)
     command = chromium_argv(
         Path("/snap/bin/chromium"), document=tmp_path / "screen.html", output=tmp_path / "screen.png",
         profile=tmp_path / "profile", width=320, height=180,
@@ -76,6 +77,18 @@ def test_chromium_argv_is_fixed_and_never_disables_sandbox(tmp_path: Path) -> No
     assert "--window-size=320,180" in command
     assert any(item.startswith("--user-data-dir=") for item in command)
     assert command[-1].startswith("file:")
+
+
+def test_chromium_argv_no_sandbox_requires_explicit_opt_in(tmp_path: Path, monkeypatch) -> None:
+    """The sandbox is on by default; only an explicit operator opt-in (used by
+    CI containers whose kernels cannot run it) adds --no-sandbox."""
+    monkeypatch.setenv("LVS_CHROMIUM_NO_SANDBOX", "1")
+    command = chromium_argv(
+        Path("/snap/bin/chromium"), document=tmp_path / "screen.html", output=tmp_path / "screen.png",
+        profile=tmp_path / "profile", width=320, height=180,
+    )
+
+    assert "--no-sandbox" in command
 
 
 def test_renderer_rejects_wrong_output_dimensions_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
