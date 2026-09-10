@@ -76,8 +76,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install ffmpeg --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install ffmpeg --yes --no-progress
+            $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
+            if ($ffmpeg -and $ffprobe) {
+              & $ffmpeg.Source -version | Out-Null
+              $ffmpegOk = $LASTEXITCODE -eq 0
+              & $ffprobe.Source -version | Out-Null
+              $ffprobeOk = $LASTEXITCODE -eq 0
+              if ($ffmpegOk -and $ffprobeOk) {
+                $installed = $true
+                break
+              }
+            }
+            Write-Warning "FFmpeg install attempt $attempt did not produce usable tools"
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+          }
+          if (-not $installed) { throw "FFmpeg and ffprobe are unavailable after 3 attempts" }
 
       - name: Install core and test dependencies (CI only)
         # Playwright is CI/UI-inspection tooling, not a package dependency: pin
