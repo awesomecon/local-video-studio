@@ -178,3 +178,63 @@ def test_environment_optional_absence_does_not_degrade_core_classification(
     assert report.capabilities.optional["pytorch"].status == CapabilityStatus.ABSENT
     assert report.capabilities.optional["nvidia_gpu_inventory"].status == CapabilityStatus.ABSENT
     assert not any("sandbox" in warning.lower() for warning in report.warnings)
+
+
+def test_system_status_serves_separated_capability_report(tmp_path: Path, monkeypatch) -> None:
+    """The served status payload must preserve the core/optional separation.
+
+    Unit tests pin the report builder; this pins the serving layer so an
+    unavailable optional backend served over HTTP can never decide core
+    readiness, and host labels stay descriptive evidence only.
+    """
+    from fastapi.testclient import TestClient
+
+    import backend.api.main as api_main
+    from backend.core import load_config
+
+    report = _capability_report()
+    assert report.core.ready is True
+    monkeypatch.setattr(api_main, "inspect_environment", lambda *_a, **_k: environment.EnvironmentReport(
+        classification=environment.EnvironmentClassification.COMPATIBLE,
+        python_version="3.12.1",
+        python_executable="/tools/python",
+        operating_system="TestOS",
+        system_ram_gb=16,
+        torch=environment.TorchInfo(installed=False, import_probed=True),
+        ffmpeg=environment.ToolInfo(available=True, path="/tools/ffmpeg", source="test"),
+        ffprobe=environment.ToolInfo(available=False, source="test"),
+        git=environment.ToolInfo(available=False, source="test"),
+        capabilities=report,
+    ))
+
+    class _Snapshot:
+        def as_dict(self) -> dict:
+            return {"devices": [], "active_backend": None}
+
+    class _GPU:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def snapshot(self) -> _Snapshot:
+            return _Snapshot()
+
+    monkeypatch.setattr(api_main, "GPUResourceManager", _GPU)
+    app = api_main.create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    response = TestClient(app).get("/api/system/status")
+    assert response.status_code == 200
+    served = response.json()["environment"]["capabilities"]
+    requirements = served["core"]["requirements"]
+    assert set(requirements) == {"python", "ffmpeg"}
+    assert served["core"]["ready"] is True
+    assert served["core"]["ready"] == all(
+        entry["status"] == CapabilityStatus.AVAILABLE for entry in requirements.values()
+    )
+    assert {"pytorch", "cuda", "managed_higgs_launch"} <= set(served["optional"])
+    assert not set(served["optional"]).intersection(requirements)
+    assert served["host"]["qualification"] == "descriptive_evidence_only"
