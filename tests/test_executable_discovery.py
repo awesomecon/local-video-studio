@@ -117,6 +117,7 @@ def test_chromium_override_precedes_path_and_install_locations(
     calls: list[list[str]] = []
     monkeypatch.setattr(binaries_module.platform, "system", lambda: "Windows")
     monkeypatch.setenv("LVS_CHROME", str(override))
+    monkeypatch.delenv("LVS_CHROME_VALIDATED", raising=False)
     monkeypatch.setattr(
         binaries_module.shutil,
         "which",
