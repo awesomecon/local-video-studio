@@ -82,7 +82,14 @@ reopen, mock render, unportable-reference handling, portable round-trip
 archiving, disk-free hostile-name sanitizing, symlinked-root timeline
 serialization, and generated-name rules); `tests/test_media_process_lifecycle.py` 34 passed (includes the
 POSIX late-group-member escalation case); editorial/render-stage/serial-worker
-retry cases 4 passed; `frontend/tests/static_checks.py` passed;
+retry cases 4 passed; Stage 4 lifecycle acceptance 207 passed with no code
+changes (media-process lifecycle, job queue including restart recovery,
+service shutdown/cancel boundaries, render-stage API, worker lanes,
+editorial, media rendering, multishot archive/rollback publication, graphic
+publication restore, and regeneration archiving: canceled/failed work stays
+retryable, restarts fail active jobs instead of resuming them, and staged
+publication keeps the last good output until its replacement succeeds);
+`frontend/tests/static_checks.py` passed;
 `frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then
 captured against the user's running backend (`scripts/ui_shots.py`, throw-away
 Chromium profile): every route rendered with no uncaught page exceptions; the
