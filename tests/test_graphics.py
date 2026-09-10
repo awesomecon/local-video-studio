@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,54 @@ def test_renderer_rejects_wrong_output_dimensions_atomically(tmp_path: Path, mon
     with pytest.raises(RuntimeError, match="resolution"):
         renderer.render("<html></html>", output, width=320, height=180)
     assert not output.exists()
+
+
+def test_renderer_defers_chromium_discovery_until_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.graphics import renderer as graphics_renderer
+
+    executable = tmp_path / "chromium"
+    calls: list[bool] = []
+
+    def discover() -> Path:
+        calls.append(True)
+        return executable
+
+    def fake_run(command, **kwargs):
+        output = Path(next(
+            value.split("=", 1)[1]
+            for value in command
+            if value.startswith("--screenshot=")
+        ))
+        Image.new("RGB", (320, 180), "black").save(output)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(graphics_renderer, "discover_chromium", discover)
+    monkeypatch.setattr(graphics_renderer.subprocess, "run", fake_run)
+    renderer = GraphicScreenRenderer()
+
+    assert calls == []
+    renderer.render("<html></html>", tmp_path / "screen.png", width=320, height=180)
+    assert calls == [True]
+
+
+def test_renderer_reuses_validated_chromium_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.graphics import renderer as graphics_renderer
+
+    executable = tmp_path / "chrome.exe"
+    monkeypatch.setenv("LVS_CHROME", str(executable))
+    monkeypatch.setenv("LVS_CHROME_VALIDATED", "1")
+    monkeypatch.setenv("LVS_CHROME_VERSION", "151.0.7890.0")
+    monkeypatch.setattr(
+        graphics_renderer.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("validated Chromium must not be probed again"),
+    )
+
+    assert GraphicScreenRenderer(executable).version == "151.0.7890.0"
 
 
 def test_thumbnail_composite_is_deterministic_and_dedupes_repeated_hook(tmp_path: Path) -> None:

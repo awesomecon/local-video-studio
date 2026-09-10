@@ -22,6 +22,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 REPORTS = Path("ci-reports")
+SERVER_BIND_TIMEOUT_SECONDS = 60.0
 
 
 def write_report(name: str, payload: dict) -> None:
@@ -50,8 +51,12 @@ def prerequisites() -> dict:
     if os.environ.get("GITHUB_ENV"):
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
             output.write(f"LVS_CHROME={executable}\n")
+            output.write("LVS_CHROME_VALIDATED=1\n")
+            output.write(f"LVS_CHROME_VERSION={versions['chromium']}\n")
     # Set for this process too; the separate smoke command checks again.
     os.environ["LVS_CHROME"] = executable
+    os.environ["LVS_CHROME_VALIDATED"] = "1"
+    os.environ["LVS_CHROME_VERSION"] = versions["chromium"]
     if os.environ.get("LVS_REQUIRE_CORE_TOOLS") == "1":
         for package in ("torch", "torchvision", "torchaudio", "faster_whisper"):
             assert importlib.util.find_spec(package) is None, f"Unexpected AI dependency: {package}"
@@ -64,27 +69,39 @@ def prerequisites() -> dict:
 
 def serve(config_path: str, ready, stop) -> None:
     """Spawn-safe entry point; even the module-level app gets isolated config."""
-    import uvicorn
-    from backend.core.config import load_config
+    try:
+        import uvicorn
+        from backend.core.config import load_config
 
-    config = load_config(config_path, environ={})
-    with patch("backend.core.load_config", return_value=config):
-        from backend.api.main import create_app
-    app = create_app(config, mock_mode=True)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False,
-                                          timeout_graceful_shutdown=10))
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(128)
-        ready.send(listener.getsockname()[1])
+        config = load_config(config_path, environ={})
+        with patch("backend.core.load_config", return_value=config):
+            from backend.api.main import create_app
+        app = create_app(config, mock_mode=True)
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False,
+                                              timeout_graceful_shutdown=10))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(128)
+            ready.send({"status": "ready", "port": listener.getsockname()[1]})
+
+            def watch_stop() -> None:
+                stop.wait()
+                server.should_exit = True
+
+            threading.Thread(target=watch_stop, daemon=True).start()
+            server.run(sockets=[listener])
+    except BaseException as error:
+        try:
+            ready.send({
+                "status": "error",
+                "error_type": type(error).__name__,
+                "message": str(error)[:500],
+            })
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        raise
+    finally:
         ready.close()
-
-        def watch_stop() -> None:
-            stop.wait()
-            server.should_exit = True
-
-        threading.Thread(target=watch_stop, daemon=True).start()
-        server.run(sockets=[listener])
 
 
 @contextmanager
@@ -96,8 +113,30 @@ def running_app(config_path: Path):
     process.start()
     send.close()
     try:
-        assert receive.poll(30), "Server did not bind within 30 seconds"
-        port = receive.recv()
+        deadline = time.monotonic() + SERVER_BIND_TIMEOUT_SECONDS
+        while not receive.poll(0.1):
+            if not process.is_alive():
+                process.join()
+                raise AssertionError(
+                    f"Owned server exited before binding (exit code {process.exitcode})"
+                )
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"Server did not bind within {SERVER_BIND_TIMEOUT_SECONDS:g} seconds"
+                )
+        try:
+            startup = receive.recv()
+        except EOFError as error:
+            process.join()
+            raise AssertionError(
+                f"Owned server closed its startup channel (exit code {process.exitcode})"
+            ) from error
+        if startup.get("status") == "error":
+            raise RuntimeError(
+                "Owned server startup failed: "
+                f"{startup['error_type']}: {startup['message']}"
+            )
+        port = startup["port"]
         assert port != 1234
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False,
                           timeout=10) as client:
@@ -115,6 +154,7 @@ def running_app(config_path: Path):
                 raise AssertionError("Server did not become ready")
             yield client
     finally:
+        active_error = sys.exc_info()[0] is not None
         receive.close()
         stop.set()
         process.join(20)
@@ -127,7 +167,8 @@ def running_app(config_path: Path):
             process.join(5)
         exitcode = process.exitcode
         process.close()
-        assert not forced and exitcode == 0, "Owned server failed graceful shutdown"
+        if not active_error:
+            assert not forced and exitcode == 0, "Owned server failed graceful shutdown"
 
 
 def smoke(completed: list[str]) -> None:

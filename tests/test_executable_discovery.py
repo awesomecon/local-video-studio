@@ -137,6 +137,22 @@ def test_chromium_override_precedes_path_and_install_locations(
     assert calls == [[str(override), "--version"]]
 
 
+def test_validated_chromium_override_skips_redundant_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    override = _executable(tmp_path / "Playwright" / "chrome.exe")
+    monkeypatch.setattr(binaries_module.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LVS_CHROME", str(override))
+    monkeypatch.setenv("LVS_CHROME_VALIDATED", "1")
+    monkeypatch.setattr(
+        binaries_module.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("validated Chromium must not be probed again"),
+    )
+
+    assert discover_chromium() == override.absolute()
+
+
 def test_chromium_path_precedes_linux_install_location(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

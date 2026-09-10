@@ -32,6 +32,7 @@ dev = [
   "numpy>=1.26",
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "pytest-xdist>=3.8",
   "soundfile>=0.12",
 ]
 

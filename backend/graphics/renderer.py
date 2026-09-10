@@ -56,9 +56,18 @@ def _chromium_env(profile: Path) -> dict[str, str]:
 
 class GraphicScreenRenderer:
     def __init__(self, executable: Path | None = None, *, timeout_seconds: float = 30.0) -> None:
-        self.executable = executable or discover_chromium()
+        self._executable = executable
+        self._discovery_attempted = executable is not None
         self.timeout_seconds = timeout_seconds
         self._version: str | None = None
+
+    @property
+    def executable(self) -> Path | None:
+        """Resolve Chromium on first use, never during application startup."""
+        if not self._discovery_attempted:
+            self._executable = discover_chromium()
+            self._discovery_attempted = True
+        return self._executable
 
     @property
     def available(self) -> bool:
@@ -75,6 +84,10 @@ class GraphicScreenRenderer:
     def _query_version(self) -> str:
         if not self.executable:
             return "unavailable"
+        validated = os.environ.get("LVS_CHROME")
+        if os.environ.get("LVS_CHROME_VALIDATED") == "1" and validated \
+                and Path(validated).absolute() == self.executable.absolute():
+            return os.environ.get("LVS_CHROME_VERSION", "validated")[:200]
         try:
             completed = subprocess.run(
                 [str(self.executable), "--version"], shell=False, capture_output=True,

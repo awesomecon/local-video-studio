@@ -24,10 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-24.04, python-version: '3.11'}
-          - {os: ubuntu-24.04, python-version: '3.12'}
-          - {os: windows-2025, python-version: '3.12'}
-          - {os: macos-15-intel, python-version: '3.12'}
+          - {os: ubuntu-24.04, python-version: '3.11', pytest-workers: 0}
+          - {os: ubuntu-24.04, python-version: '3.12', pytest-workers: 0}
+          - {os: windows-2025, python-version: '3.12', pytest-workers: 2}
+          - {os: macos-15-intel, python-version: '3.12', pytest-workers: 0}
     env:
       LVS_REQUIRE_CORE_TOOLS: '1'
       LVS_CI_RUNNER: ${{ matrix.os }}
@@ -99,11 +99,9 @@ jobs:
         run: python scripts/ci_core_smoke.py
 
       - name: Run Python tests
-        if: ${{ !cancelled() }}
-        run: python -m pytest --junitxml=ci-raw-pytest.xml -o faulthandler_timeout=600
+        run: python -m pytest --junitxml=ci-raw-pytest.xml -o faulthandler_timeout=600 -n ${{ matrix.pytest-workers }}
 
       - name: Run frontend static checks
-        if: ${{ !cancelled() }}
         run: python frontend/tests/static_checks.py
 
       - name: Sanitize test report

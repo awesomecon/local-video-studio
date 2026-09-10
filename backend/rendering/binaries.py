@@ -250,6 +250,16 @@ def discover_chromium(
         if chromium_override is None
         else chromium_override
     )
+    # The CI prerequisite launches this exact Playwright executable before it
+    # exports the marker. Re-running chrome.exe --version is both redundant and
+    # unreliable on Windows runners, where that command can consume the entire
+    # probe timeout even though an actual Playwright launch succeeds.
+    if chromium_override is None \
+            and os.environ.get("LVS_CHROME_VALIDATED") == "1" \
+            and override:
+        path = Path(override).expanduser()
+        if path.is_file() and (current_platform == "Windows" or os.access(path, os.X_OK)):
+            return Path(os.path.abspath(str(path)))
     explicit = _usable_executable(
         override,
         version_args=("--version",),
