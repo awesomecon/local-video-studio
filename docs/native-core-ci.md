@@ -11,8 +11,9 @@ required native smoke on each matrix entry:
 
 Runner labels and architectures follow the [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 This matrix does not cover Apple Silicon, Windows ARM, or every Linux distribution.
-Adding jobs is not evidence of native success: all four remote results must be
-reviewed before claiming the covered configurations work.
+All four required remote results were reviewed and passed. The matrix establishes
+automated native CI support for the covered core configurations; it does not replace
+hands-on testing on physical Windows or macOS machines.
 
 ## CI prerequisites and execution
 
@@ -76,10 +77,18 @@ Required remote checks, not executable on a Linux workstation:
 Runtime portability failures exposed by these jobs belong to a subsequent stage.
 Do not weaken their assertions or make required jobs optional to hide failures.
 
-## Local verification status (Linux only)
+## Recorded verification status
 
-Local Linux run of this branch: full Python suite 1166 passed; frontend static
-checks and 127/127 JS logic tests passed. Playwright is not installed locally
-and was not added; its CI smoke remains pending. No Windows or macOS native
-results have been reviewed in this pass, so no claim is made about those
-configurations.
+The final local Linux run passed all 1204 Python tests; frontend static checks
+and 127/127 JS logic tests also passed. The required CI matrix then passed on
+Ubuntu 24.04 x64 with Python 3.11 and 3.12, Windows 2025 x64 with Python 3.12,
+and macOS 15 Intel with Python 3.12. On every runner, prerequisite discovery,
+the isolated browser/server smoke, the full Python suite, frontend checks,
+sanitized report upload and wheel acceptance completed successfully. Observed
+final Windows jobs completed in roughly 10-11 minutes.
+
+These results qualify the covered core source-checkout configurations through
+automated native CI. Hands-on testing on physical Windows/macOS machines,
+interactive microphone/recording and media-lock behavior, Apple Silicon,
+Windows ARM, clean-machine packaged installers, and optional AI/model backends
+remain outside that qualification.
