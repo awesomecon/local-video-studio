@@ -48,12 +48,14 @@ Managed AI worker scripts are optional source-checkout components. A wheel does
 not contain their model environments. A compatible external HTTP worker can be
 used without a local launcher, subject to the existing endpoint/privacy settings.
 
-## Required native evidence before release
+## Native CI evidence and remaining manual checks
 
-Review actual results for Ubuntu 24.04 x64 (Python 3.11/3.12), Windows 2025 x64
-(Python 3.12), and macOS 15 Intel (Python 3.12). The configured CI matrix alone is
-not evidence that those jobs passed. Apple Silicon and Windows ARM remain
-separate qualification targets.
+The required native CI results were reviewed and passed for Ubuntu 24.04 x64
+(Python 3.11/3.12), Windows 2025 x64 (Python 3.12), and macOS 15 Intel
+(Python 3.12). This establishes core source-checkout support for those covered
+configurations through automated native CI. It does not claim hands-on testing
+on physical Windows or macOS machines. Apple Silicon and Windows ARM remain
+separate, unqualified targets.
 
 For each target, retain runner/tool versions and test outcomes, then check:
 
@@ -74,10 +76,10 @@ guarantee. Python frame producers must cooperate with cancellation between calls
 Passing the core checks makes no claim about individual AI models, GPU drivers,
 VRAM sufficiency, Metal, ROCm, or remote worker hardware.
 
-## Local verification status (Linux only)
+## Recorded verification status
 
 On a local Linux workstation run of this branch: full Python suite
-1183 passed (including 26 project-transfer tests: copy-across-roots recovery,
+1204 passed (including 26 project-transfer tests: copy-across-roots recovery,
 reopen, mock render, unportable-reference handling, portable round-trip
 archiving, disk-free hostile-name sanitizing, symlinked-root timeline
 serialization, and generated-name rules); `tests/test_media_process_lifecycle.py` 34 passed (includes the
@@ -109,8 +111,14 @@ on-disk directory is absent (SQLite references a slug with no directory; the
 same `load_project` FileNotFoundError path exists on the base commit, so this
 is pre-existing data state, not a branch regression). Remaining per-page
 resource 404s are missing media assets for that same project, and the Models
-503 is an optional AI service probe when its worker is down. These results are
-Linux-only evidence. Native Windows
-(`windows-2025`) and macOS (`macos-15-intel`) runs, interactive
-microphone/recording and media-lock checks, and review of all required CI job
-results remain pending before any platform claim.
+503 is an optional AI service probe when its worker is down.
+
+The full required matrix also passed on native GitHub-hosted Ubuntu 24.04,
+Windows 2025 x64, and macOS 15 Intel runners. Each job completed prerequisite
+installation and discovery, the isolated browser/server smoke, the full Python
+suite, frontend static checks, report sanitization and wheel acceptance. Final
+Windows jobs completed in roughly 10-11 minutes after the Chromium startup and
+parallel-test fixes. These automated native results qualify the covered core
+configurations as supported. Hands-on physical Windows/macOS testing,
+interactive microphone/recording and media-lock checks, Apple Silicon, Windows
+ARM, and individual optional AI backends remain outside that claim.

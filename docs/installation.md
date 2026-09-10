@@ -11,14 +11,16 @@ image/video/music, captions) are optional and are installed separately — see
 
 | Platform | Status |
 | --- | --- |
-| Ubuntu / Linux | Natively verified: CI runs the full Python suite on Ubuntu 24.04 with Python 3.11 and 3.12, and the runtime commands on this page (mock render, environment and port checks) were exercised on Ubuntu. |
-| macOS | Native Intel CI is configured; **qualification pending actual runner results**. Apple Silicon is a separate target. |
-| Windows (PowerShell) | Native x64 CI is configured; **qualification pending actual runner results**. Windows ARM is a separate target. |
+| Ubuntu / Linux | **Supported.** Native CI passes the full core suite on Ubuntu 24.04 x64 with Python 3.11 and 3.12, and the runtime commands on this page were also exercised on a Linux workstation. |
+| macOS | **Supported on Intel x64 with Python 3.12.** Native macOS 15 Intel CI passes installation, FFmpeg/Chromium discovery, the browser/server smoke, the full core suite, frontend checks and wheel acceptance. Hands-on testing on a physical Mac has not been performed; Apple Silicon is not covered. |
+| Windows (PowerShell) | **Supported on x64 with Python 3.12.** Native Windows 2025 x64 CI passes installation, FFmpeg/Chromium discovery, the browser/server smoke, the full core suite, frontend checks and wheel acceptance. Hands-on testing on a physical Windows machine has not been performed; Windows ARM is not covered. |
 
-The build now includes core runtime resources and tests an unpacked wheel outside
-the checkout. Clean-machine and native release qualification remain pending; this
-does not mean a package has been published to PyPI. Use the editable source-checkout
-instructions below. See [qualification](cross-platform-qualification.md).
+The build includes core runtime resources and tests an unpacked wheel outside the
+checkout. The supported configurations above are qualified through automated native
+CI; this is distinct from hands-on testing on physical Windows and macOS machines.
+A clean-machine packaged-application installer remains unqualified, and no package
+has been published to PyPI. Use the editable source-checkout instructions below. See
+[qualification](cross-platform-qualification.md).
 
 ## Prerequisites (all platforms)
 
@@ -308,16 +310,18 @@ store them in YAML. Keep at least 50 GiB free on model and cache targets.
 - [Troubleshooting](troubleshooting.md) covers ports, missing FFmpeg, VRAM, and interrupted
   generation.
 
-## Native verification gaps
+## CI coverage and hands-on verification gaps
 
-- **Windows (PowerShell)**: native CI results still need review. Commands were
-  checked against the repository entry points and standard PowerShell path/invocation syntax; a
-  Windows machine is still needed to confirm the venv layout, `winget` package versions, and
-  FFmpeg-on-`PATH` behavior.
-- **macOS**: not executed natively. Confirm the Homebrew/python.org interpreter layout and FFmpeg
-  on `PATH` on a Mac.
+- **Windows (PowerShell)**: native Windows x64 CI passes. Hands-on testing on a physical Windows
+  machine is still needed for interactive workflows and installation variants outside the CI
+  recipe, including `winget` package behavior.
+- **macOS**: native macOS Intel CI passes. Hands-on testing on a physical Mac is still needed for
+  interactive workflows and Homebrew/python.org installation variants outside the CI recipe.
 - **Python 3.11 vs 3.12 on Windows/macOS**: CI covers both versions on Ubuntu only.
-- **Headless Chromium on Windows/macOS**: platform-aware discovery is implemented; native
-  browser execution still needs qualification.
-- **Wheel/sdist installation outside a source checkout**: see the artifact checks and remaining
-  clean-machine/native gaps in [qualification](cross-platform-qualification.md).
+- **Architectures**: Apple Silicon and Windows ARM are not covered by the current matrix.
+- **Headless Chromium on Windows/macOS**: native CI validates browser discovery, startup and the
+  isolated UI smoke; interactive microphone/recording and media-lock behavior remain manual.
+- **Wheel/sdist installation outside a source checkout**: wheel contents, import, UI serving and a
+  mock render are tested outside the checkout using CI's installed dependencies. Clean-machine
+  dependency resolution and packaged installers remain gaps; see
+  [qualification](cross-platform-qualification.md).
