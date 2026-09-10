@@ -733,7 +733,7 @@ class PipelineService:
             replacement = planned_asset.model_copy(update={
                 "type": EditorialAssetType.USER_UPLOADED_IMAGE,
                 "asset_id": registered.id,
-                "source": str(registered.filepath),
+                "source": registered.filepath.as_posix(),
                 "evidence_class": (
                     EvidenceClass.EVIDENCE if evidence else EvidenceClass.ILLUSTRATION
                 ),
@@ -873,7 +873,7 @@ class PipelineService:
                 )
                 replacement = planned_asset.model_copy(update={
                     "asset_id": registered.id,
-                    "source": str(registered.filepath),
+                    "source": registered.filepath.as_posix(),
                     "evidence_class": EvidenceClass.ILLUSTRATION,
                     "metadata": {
                         **planned_asset.metadata,
@@ -3854,7 +3854,7 @@ class PipelineService:
                 relative = destination.relative_to(root)
                 for asset in assets:
                     self.database.save_asset(asset.model_copy(update={"filepath": relative}))
-                archived.append(str(relative))
+                archived.append(relative.as_posix())
             elif not archive_media and (
                 path == shots_directory or shots_directory in path.parents
             ):
@@ -4992,7 +4992,7 @@ class PipelineService:
                     or (root / visual.filepath).stat().st_size == 0:
                 issues.append({
                     "scope": label, "shot_id": shot.id, "code": "corrupt_visual",
-                    "detail": f"visual file {visual.filepath} is missing or empty",
+                    "detail": f"visual file {visual.filepath.as_posix()} is missing or empty",
                 })
             if shot.source_asset_id is not None:
                 source = next(

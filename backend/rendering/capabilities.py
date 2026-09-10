@@ -1,9 +1,27 @@
 """Bounded FFmpeg feature inspection; discovery alone does not prove rendering."""
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
 from .process import CanceledError, MediaProcessError, run_media_process
+
+#: Entry lines in `-encoders`/`-filters` output start with exactly one space;
+#: legend lines use two and titles use none. Flag-column widths changed across
+#: releases (three filter flags through FFmpeg 8, two from FFmpeg 9), so the
+#: structure, not the width, identifies an entry.
+_NAME = re.compile(r"[A-Za-z0-9_+.@-]+")
+
+
+def _entry_names(output: str) -> frozenset[str]:
+    names = set()
+    for line in output.splitlines():
+        if not line.startswith(" ") or line.startswith("  "):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and _NAME.fullmatch(parts[1]):
+            names.add(parts[1])
+    return frozenset(names)
 
 
 @lru_cache(maxsize=8)
@@ -12,12 +30,7 @@ def _probe(executable: str, size: int, modified: int) -> tuple[frozenset[str], f
     outputs = []
     for option in ("-encoders", "-filters"):
         result = run_media_process([executable, "-hide_banner", option], timeout=10, capture_stdout=True)
-        names = set()
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] != "=" and len(parts[0]) in (3, 6):
-                names.add(parts[1])
-        outputs.append(frozenset(names))
+        outputs.append(_entry_names(result.stdout))
     return outputs[0], outputs[1]
 
 

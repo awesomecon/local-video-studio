@@ -23,6 +23,16 @@ _THUMBNAIL_PALETTES = {
 }
 _THUMBNAIL_STROKE = (14, 14, 18, 255)
 
+#: Bundled Noto substitutes used when fontconfig is unavailable (Windows,
+#: minimal containers) or does not know the requested family. The wheel ships
+#: these files, so thumbnails never depend on host-installed fonts.
+_BUNDLED_THUMBNAIL_FONTS = {
+    "impact": "NotoSans-Bold.ttf",
+    "clean": "NotoSans-Bold.ttf",
+    "editorial": "NotoSerif-Bold.ttf",
+}
+_BUNDLED_FONT_ROOT = Path(__file__).resolve().parent.parent / "editorial" / "fonts"
+
 
 def _smooth(portion: float) -> float:
     """Clamped smoothstep easing for deterministic gradient scrims."""
@@ -476,4 +486,7 @@ class GraphicScreenRenderer:
                 return str(font), hashlib.sha256(font.read_bytes()).hexdigest()
         except (OSError, subprocess.SubprocessError):
             pass
+        bundled = _BUNDLED_FONT_ROOT / _BUNDLED_THUMBNAIL_FONTS[preset]
+        if bundled.is_file():
+            return str(bundled), hashlib.sha256(bundled.read_bytes()).hexdigest()
         return family, None

@@ -127,7 +127,7 @@ def resolve_reference_assets(
         if not absolute.is_file() or absolute.stat().st_size == 0:
             raise ShotRequestError(
                 f"{reference.role.value} reference asset {reference.asset_id!r} has no "
-                f"readable media file at {asset.filepath}.",
+                f"readable media file at {asset.filepath.as_posix()}.",
                 "reference_missing_media",
                 details={"role": reference.role.value, "asset_id": reference.asset_id},
             )

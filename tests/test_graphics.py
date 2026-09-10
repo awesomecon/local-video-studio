@@ -495,3 +495,24 @@ def test_generator_regenerates_cleanly_from_corrupt_cache_entry(tmp_path: Path) 
     assert generator.cache_hit is False
     assert regenerated[0].title == "Tokens"
     assert generator.cache.store("local_graphic", key, b"refreshed") is True
+
+
+@pytest.mark.parametrize("preset", ["impact", "clean", "editorial"])
+def test_thumbnail_fonts_fall_back_to_bundled_noto_without_fontconfig(
+    tmp_path: Path, monkeypatch, preset: str,
+) -> None:
+    """Windows and minimal hosts have no fc-match: thumbnails use the wheel's
+    bundled Noto files instead of failing."""
+    import subprocess
+
+    from backend.graphics import renderer as graphics_renderer
+
+    def _no_fontconfig(*args, **kwargs):
+        raise FileNotFoundError("fc-match is unavailable on this host")
+
+    monkeypatch.setattr(graphics_renderer.subprocess, "run", _no_fontconfig)
+    renderer = GraphicScreenRenderer(tmp_path / "chromium")
+    font_path, font_hash = renderer.thumbnail_font_metadata(preset)
+    assert Path(font_path).is_file()
+    assert font_path.endswith(".ttf")
+    assert font_hash is not None and len(font_hash) == 64

@@ -17,7 +17,9 @@ jobs:
   test:
     name: Core / ${{ matrix.os }} / x64 / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Windows legs are slow (process spawning plus on-access scanning); the
+    # faulthandler dump below names the stall instead of dying silent.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +31,11 @@ jobs:
     env:
       LVS_REQUIRE_CORE_TOOLS: '1'
       LVS_CI_RUNNER: ${{ matrix.os }}
+      # Ubuntu 23.10+ runners disable unprivileged user namespaces via
+      # AppArmor, so Chromium 151 aborts with "No usable sandbox" unless the
+      # test browser opts out. Throwaway CI profiles only; never set this for
+      # everyday browsing. Playwright's own launches already behave this way.
+      LVS_CHROMIUM_NO_SANDBOX: '1'
 
     steps:
       - name: Check out repository
@@ -93,7 +100,7 @@ jobs:
 
       - name: Run Python tests
         if: ${{ !cancelled() }}
-        run: python -m pytest --junitxml=ci-raw-pytest.xml
+        run: python -m pytest --junitxml=ci-raw-pytest.xml -o faulthandler_timeout=600
 
       - name: Run frontend static checks
         if: ${{ !cancelled() }}
