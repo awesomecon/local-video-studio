@@ -89,6 +89,10 @@ editorial, media rendering, multishot archive/rollback publication, graphic
 publication restore, and regeneration archiving: canceled/failed work stays
 retryable, restarts fail active jobs instead of resuming them, and staged
 publication keeps the last good output until its replacement succeeds);
+Stage 5 media acceptance 53 passed with three new hostile-path cases
+(executable discovery, encoder/subtitle feature checks, real preview render
+and frame extraction under accented, CJK, bracketed, and quoted native
+paths, bundled-font identity, and wheel resource inclusion);
 `frontend/tests/static_checks.py` passed;
 `frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then
 captured against the user's running backend (`scripts/ui_shots.py`, throw-away
