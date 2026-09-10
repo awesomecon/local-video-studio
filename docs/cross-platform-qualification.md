@@ -96,6 +96,9 @@ paths, bundled-font identity, and wheel resource inclusion);
 Stage 6 readiness acceptance 8 passed with one new serving-layer case
 (`/api/system/status` preserves the core/optional separation over HTTP:
 optional absence cannot decide core status, host labels stay descriptive);
+Stage 7 wheel acceptance 3 passed with no code changes (distribution
+resources plus CI infrastructure: the wheel carries its resource allowlist,
+imports away from the checkout, serves its UI, and completes a mock render);
 `frontend/tests/static_checks.py` passed;
 `frontend/tests/run_js_tests.py` 127/127 passed. Live UI screenshots were then
 captured against the user's running backend (`scripts/ui_shots.py`, throw-away
