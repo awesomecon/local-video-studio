@@ -30,6 +30,8 @@ class _ProcessState:
     stop_lock: threading.Lock = field(default_factory=threading.Lock)
     stopped: bool = False
     reaper_started: bool = False
+    root: psutil.Process | None = None
+    lifecycle_lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 _active_processes: dict[int, subprocess.Popen] = {}
@@ -123,12 +125,20 @@ def _register_process(
     token: threading.Event | None = None,
 ) -> int:
     with _active_lock:
+        # Capture identity while the newly spawned child has not been reaped.
+        # Never reconstruct root ownership from a bare PID during cancellation.
+        try:
+            root = psutil.Process(proc.pid)
+        except psutil.Error:
+            root = None
         _active_processes[proc.pid] = proc
         if job_id is not None:
             _process_jobs[proc.pid] = job_id
-        _process_states[proc.pid] = _ProcessState(
+        state = _ProcessState(
             proc, job_id, token if token is not None else _job_token(job_id), owns_group,
         )
+        state.root = root
+        _process_states[proc.pid] = state
     return proc.pid
 
 
@@ -147,56 +157,66 @@ def get_active_media_pids() -> list[int]:
 def _stop_owned_process(state: _ProcessState) -> None:
     """Bounded terminate/kill/reap of this process and observed descendants.
 
-    POSIX children also share a private session, so group termination reaches
-    descendants created during the snapshot. On Windows, psutil holds process
-    identities (including creation times), never names or ports. Descendants
-    which deliberately detach before discovery require native job containment.
+    Reaping and signaling share one lock. POSIX group escalation occurs before
+    reaping its leader, including when the leader exits during the grace period.
+    This keeps its PID reserved and reaches new group members without risking a
+    reused process group. Once a leader was already reaped, only captured process
+    identities are safe targets. Detached or already-orphaned descendants on
+    Windows require native job containment for a stronger guarantee.
     """
     with state.stop_lock:
         if state.stopped:
             return
-        proc = state.proc
-        descendants: list[psutil.Process] = []
-        if proc.poll() is None:
-            try:
-                descendants = psutil.Process(proc.pid).children(recursive=True)
-            except psutil.Error:
-                pass
-            if state.owns_group and os.name == "posix":
-                try:
+        with state.lifecycle_lock:
+            proc = state.proc
+            descendants: list[psutil.Process] = []
+            root_owned = False
+            if proc.returncode is None and state.root is not None:
+                with contextlib.suppress(psutil.Error):
+                    root_owned = state.root.is_running()
+                    if root_owned:
+                        descendants = state.root.children(recursive=True)
+            group_owned = root_owned and state.owns_group and os.name == "posix"
+            if group_owned:
+                # Do not call Popen.poll/terminate/wait until group escalation:
+                # those methods may reap an exited leader and release its PID.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(proc.pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            elif proc.returncode is None and (state.root is None or root_owned):
+                with contextlib.suppress(OSError):
+                    proc.terminate()
             for child in reversed(descendants):
                 with contextlib.suppress(psutil.Error):
                     child.terminate()
-            with contextlib.suppress(OSError):
-                proc.terminate()
-        try:
-            proc.wait(timeout=_TERMINATE_SECONDS)
-        except subprocess.TimeoutExpired:
-            # The group remains owned while the unreaped group leader exists.
-            if state.owns_group and os.name == "posix":
+            if group_owned:
+                # The runner cannot reap while this lock is held. Even a zombie
+                # group leader therefore still reserves the group's identity.
+                time.sleep(_TERMINATE_SECONDS)
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(OSError):
-                proc.kill()
-        for child in reversed(descendants):
-            with contextlib.suppress(psutil.Error):
-                if child.is_running():
-                    child.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=_KILL_SECONDS)
-        if descendants:
-            psutil.wait_procs(descendants, timeout=_KILL_SECONDS)
-        state.stopped = True
+            else:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_TERMINATE_SECONDS)
+            for child in reversed(descendants):
+                with contextlib.suppress(psutil.Error):
+                    if child.is_running():
+                        child.kill()
+            if proc.returncode is None and (state.root is None or root_owned):
+                with contextlib.suppress(OSError):
+                    proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_KILL_SECONDS)
+            if descendants:
+                psutil.wait_procs(descendants, timeout=_KILL_SECONDS)
+            state.stopped = True
 
 
 def _request_stop(state: _ProcessState, reason: str) -> bool:
     with _active_lock:
         if _process_states.get(state.proc.pid) is not state or state.reason is not None:
             return False
-        state.reason = reason
+        with state.lifecycle_lock:
+            state.reason = reason
         return True
 
 
@@ -267,17 +287,19 @@ def _spawn(argv: list[str], job_id: str | None, **kwargs: object) -> _ProcessSta
 def _finish(state: _ProcessState) -> str | None:
     with _active_lock:
         if state.reason is None:
+            with state.lifecycle_lock:
+                if state.proc.poll() is not None:
+                    _unregister_process(state.proc.pid)
+                else:
+                    _start_reaper(state)
+            return None
+    _stop_owned_process(state)
+    with _active_lock:
+        with state.lifecycle_lock:
             if state.proc.poll() is not None:
                 _unregister_process(state.proc.pid)
             else:
                 _start_reaper(state)
-            return None
-    _stop_owned_process(state)
-    with _active_lock:
-        if state.proc.poll() is not None:
-            _unregister_process(state.proc.pid)
-        else:
-            _start_reaper(state)
         return state.reason
 
 
@@ -288,7 +310,8 @@ def _start_reaper(state: _ProcessState) -> None:
     state.reaper_started = True
 
     def reap() -> None:
-        state.proc.wait()
+        with state.lifecycle_lock:
+            state.proc.wait()
         with _active_lock:
             if _process_states.get(state.proc.pid) is state:
                 _unregister_process(state.proc.pid)
@@ -314,11 +337,74 @@ def _wait_for_process(state: _ProcessState, timeout: float | None = None) -> Non
     while state.reason is None:
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         try:
-            state.proc.wait(timeout=0.1 if remaining is None else min(0.1, remaining))
+            with state.lifecycle_lock:
+                if state.reason is not None:
+                    return
+                state.proc.wait(timeout=0.1 if remaining is None else min(0.1, remaining))
             return
         except subprocess.TimeoutExpired:
             if deadline is not None and time.monotonic() >= deadline:
                 _request_stop(state, "timeout")
+
+
+class OwnedMediaProcess:
+    """A tracked process handle whose polling respects cancellation ownership."""
+
+    def __init__(self, state: _ProcessState) -> None:
+        self._state = state
+
+    @property
+    def pid(self) -> int:
+        return self._state.proc.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self._state.proc.returncode
+
+    def poll(self) -> int | None:
+        with self._state.lifecycle_lock:
+            # Once cancellation wins, cleanup must keep the leader unreaped
+            # until group signaling ends. Polling must not release that PID.
+            if self._state.reason is not None:
+                return self._state.proc.returncode
+            return self._state.proc.poll()
+
+
+@contextlib.contextmanager
+def owned_media_process(
+    argv: Sequence[str], *, job_id: str | None = None, **popen_options: object,
+) -> Iterator[OwnedMediaProcess]:
+    """Track a long-lived local child, terminating its owned tree on scope exit.
+
+    Useful for a browser controlled through a separate protocol. Use the yielded
+    handle's poll() instead of raw Popen operations. Normal scope cleanup is not
+    cancellation; an explicit cancel raises CanceledError. Process creation is
+    shell-free, and the caller cannot override ownership/session isolation.
+    """
+    if not argv:
+        raise ValueError("argv must not be empty")
+    prohibited = {"shell", "start_new_session", "creationflags", "preexec_fn", "process_group"}
+    if prohibited.intersection(popen_options):
+        raise ValueError("owned media process options cannot override shell or process ownership")
+    command = [str(part) for part in argv]
+    try:
+        state = _spawn(command, job_id, **popen_options)
+    except OSError as exc:
+        raise MediaProcessError(argv, -1, str(exc)) from exc
+    failure: BaseException | None = None
+    try:
+        yield OwnedMediaProcess(state)
+    except BaseException as exc:
+        failure = exc
+    finally:
+        _request_stop(state, "closed" if failure is None else "failed")
+        _stop_owned_process(state)
+        reason = _finish(state)
+    if reason == "canceled":
+        raise CanceledError(argv, state.proc.returncode if state.proc.returncode is not None else -1,
+                            "explicitly canceled")
+    if failure is not None:
+        raise failure
 
 
 def run_media_process(
@@ -340,6 +426,7 @@ def run_media_process(
                 try:
                     _wait_for_process(state, timeout)
                 except BaseException:
+                    _request_stop(state, "failed")
                     _stop_owned_process(state)
                     raise
             finally:
@@ -398,13 +485,14 @@ def run_media_process_stream(
                         if not written:
                             raise OSError("media process stdin write made no progress")
                         view = view[written:]
-                    if view or state.proc.poll() is not None:
+                    if view or OwnedMediaProcess(state).poll() is not None:
                         break
                 with contextlib.suppress(BrokenPipeError):
                     state.proc.stdin.close()
                 _wait_for_process(state)
             except BaseException as exc:
                 failure = exc
+                _request_stop(state, "failed")
                 _stop_owned_process(state)
             finally:
                 done.set()
@@ -416,7 +504,7 @@ def run_media_process_stream(
                         state.proc.stdin.close()
             errors.seek(0)
             stderr = errors.read()
-            if failure is not None and reason is None:
+            if failure is not None and reason not in {"canceled", "timeout"}:
                 raise failure
             _check_result(argv, state, reason, stderr.decode("utf-8", errors="replace"), timeout)
             return subprocess.CompletedProcess(command, 0, b"", stderr)

@@ -274,3 +274,164 @@ def test_regular_stdout_and_nonzero_stderr_are_preserved() -> None:
         process.run_media_process(command("import sys; sys.stderr.write('bad input'); sys.exit(9)"))
     assert raised.value.returncode == 9
     assert raised.value.stderr == "bad input"
+
+
+def test_owned_context_cleans_up_without_false_cancellation() -> None:
+    with process.owned_media_process(command("import time; time.sleep(30)")) as owned:
+        pid = owned.pid
+        assert owned.poll() is None
+        assert pid in process.get_active_media_pids()
+    assert owned.returncode is not None
+    assert pid not in process.get_active_media_pids()
+
+
+def test_owned_context_preserves_body_error_and_explicit_cancel() -> None:
+    with pytest.raises(ValueError, match="browser protocol failed"):
+        with process.owned_media_process(command("import time; time.sleep(30)")):
+            raise ValueError("browser protocol failed")
+    job = job_id()
+    with pytest.raises(process.CanceledError):
+        with process.owned_media_process(command("import time; time.sleep(30)"), job_id=job):
+            process.cancel_media_processes_for_job(job)
+            raise RuntimeError("browser disappeared during cancellation")
+
+
+def test_owned_context_refuses_shell_or_group_override() -> None:
+    for option in ("shell", "start_new_session", "creationflags", "preexec_fn", "process_group"):
+        with pytest.raises(ValueError, match="ownership"):
+            with process.owned_media_process(command("pass"), **{option: True}):
+                pytest.fail("unsafe process option reached the body")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX group lifetime semantics")
+def test_already_reaped_owned_context_never_signals_its_old_group(monkeypatch) -> None:
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(process.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    with process.owned_media_process(command("pass")) as owned:
+        wait_for(lambda: owned.poll() is not None)
+    assert signals == []
+
+
+def test_poll_does_not_reap_after_cancellation_intent() -> None:
+    class Child:
+        returncode = None
+
+        def poll(self):
+            pytest.fail("poll would release the owned leader before group cleanup")
+
+    state = process._ProcessState(Child(), None, reason="canceled")
+    assert process.OwnedMediaProcess(state).poll() is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX group lifetime semantics")
+def test_cleanup_uses_captured_identity_and_escalates_before_reaping(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Child:
+        pid = 999_910
+        returncode = None
+
+        def poll(self):
+            pytest.fail("cleanup must not reap before signaling its group")
+
+        def kill(self):
+            calls.append("kill-root")
+
+        def wait(self, timeout=None):
+            calls.append("reap")
+            self.returncode = 0
+            return 0
+
+    class Identity:
+        def is_running(self):
+            return True
+
+        def children(self, recursive=False):
+            calls.append("snapshot")
+            return []
+
+    monkeypatch.setattr(process.psutil, "Process", lambda pid: Identity())
+    child = Child()
+    process._register_process(child, None, owns_group=True)
+    state = process._process_states[child.pid]
+
+    def reconstructed(pid):
+        pytest.fail("cleanup reconstructed ownership from a potentially reused PID")
+
+    monkeypatch.setattr(process.psutil, "Process", reconstructed)
+    monkeypatch.setattr(process.os, "killpg", lambda pid, sig: calls.append(f"group-{sig}"))
+    monkeypatch.setattr(process.time, "sleep", lambda duration: None)
+    try:
+        process._stop_owned_process(state)
+    finally:
+        process._unregister_process(child.pid)
+    assert calls[:3] == ["snapshot", f"group-{signal.SIGTERM}", f"group-{signal.SIGKILL}"]
+    assert calls.index(f"group-{signal.SIGKILL}") < calls.index("reap")
+
+
+def test_changed_root_identity_is_never_signaled(monkeypatch) -> None:
+    class Child:
+        pid = 999_911
+        returncode = None
+
+        def terminate(self):
+            pytest.fail("the original root identity no longer exists")
+
+        def kill(self):
+            pytest.fail("the original root identity no longer exists")
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    class GoneIdentity:
+        def is_running(self):
+            return False
+
+        def children(self, recursive=False):
+            pytest.fail("do not discover children from a reused root PID")
+
+    state = process._ProcessState(Child(), None, owns_group=True, root=GoneIdentity())
+    process._stop_owned_process(state)
+    assert state.proc.returncode == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX late process-group member")
+def test_group_escalation_stops_child_born_during_parent_termination(tmp_path: Path) -> None:
+    parent_ready = tmp_path / "parent-ready"
+    descendant_ready = tmp_path / "descendant.pid"
+    descendant_script = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(descendant_ready)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+    )
+    script = (
+        "import os, signal, subprocess, sys, time\n"
+        "def stopped(*args):\n"
+        f"    subprocess.Popen([sys.executable, '-c', {descendant_script!r}])\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGTERM, stopped)\n"
+        f"open({str(parent_ready)!r}, 'w').close()\n"
+        "time.sleep(30)\n"
+    )
+    job = job_id()
+    descendant = None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(process.run_media_process, command(script), job_id=job)
+        try:
+            wait_for(parent_ready.exists)
+            process.cancel_media_processes_for_job(job)
+            with pytest.raises(process.CanceledError):
+                future.result(timeout=6)
+            assert descendant_ready.exists(), "the helper never reached the intended race"
+            try:
+                descendant = psutil.Process(int(descendant_ready.read_text()))
+            except psutil.NoSuchProcess:
+                return
+            assert not descendant.is_running() or descendant.status() == psutil.STATUS_ZOMBIE
+        finally:
+            process.cancel_media_processes_for_job(job)
+            if descendant is not None:
+                try:
+                    descendant.kill()
+                except psutil.NoSuchProcess:
+                    pass
