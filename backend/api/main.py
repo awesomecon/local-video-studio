@@ -480,13 +480,17 @@ def _model_runtime_status(
             state, detail = "disabled", "Disabled in the configuration."
         elif key_status.get("configured"):
             state, detail = "ready", (
-                "Ready. Only generated narration text is sent to Google's Gemini "
-                f"API, on demand, using the user's own key ({backend_config.api_key_env})."
+                "Ready. Generated narration text and any delivery direction are sent "
+                "to Google's Gemini API on demand, using the user's own key "
+                f"({backend_config.api_key_env})."
             )
         else:
-            state, detail = "needs_key", (
-                "Needs a Google AI Studio API key (Voice page, or "
-                f"{backend_config.api_key_env})."
+            state = "needs_key"
+            detail = (
+                "The configured Gemini API key is malformed; replace it."
+                if key_status.get("invalid")
+                else "Needs a Google AI Studio API key (Voice page, or "
+                     f"{backend_config.api_key_env})."
             )
         return {
             "state": state,
@@ -791,7 +795,7 @@ def create_app(
 
     @application.put("/api/tts/gemini/key", status_code=status.HTTP_204_NO_CONTENT)
     def gemini_key_save(request: GeminiKeyRequest) -> None:
-        """Store a Google AI Studio key in the local 0600 secret file.
+        """Store a Google AI Studio key in a user-private local secret file.
 
         The key is validated before anything is written, is never echoed back
         by any endpoint, and never leaves the machine except as the
@@ -1423,6 +1427,11 @@ def create_app(
                         )
                     key = backend.key_status()
                     if not key["configured"]:
+                        if key.get("invalid"):
+                            raise PipelineError(
+                                "The configured Gemini API key is malformed. Replace it "
+                                f"in the Gemini panel or {backend.api_key_env}."
+                            )
                         raise PipelineError(
                             "Gemini TTS needs a Google AI Studio API key. Add one in "
                             f"the Gemini panel on this page, or set {backend.api_key_env} "

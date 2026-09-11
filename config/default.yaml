@@ -158,8 +158,9 @@ backends:
   # Remote Google Gemini TTS (the one cloud provider; see docs/gemini-tts.md).
   # Always registered, but generates only when you pick it in the Voice page
   # and a Google AI Studio key is available: the GEMINI_API_KEY environment
-  # variable, or a key saved from the Voice page (private 0600 file; the
-  # environment variable always wins). Only narration text is sent to Google —
+  # variable, or a key saved from the Voice page (user-private file; the
+  # environment variable always wins). Narration text and an optional delivery
+  # direction are sent to Google —
   # no audio, voice samples, or other project content. It speaks Google's
   # preset voices only and cannot clone a recorded profile.
   gemini_tts:

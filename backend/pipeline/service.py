@@ -257,7 +257,7 @@ class PipelineService:
         self.jobs = PersistentJobQueue(self.database, control_lock=self._job_control_lock)
         self.registry = BackendRegistry.from_config(
             config.model_dump(mode="python"), mock_mode=self.mock_mode,
-            # One 0600 file per provider key under the app-data dir; keys are
+            # One user-private file per provider key under the app-data dir; keys are
             # never written into projects, logs, or diagnostics. Environment
             # variables always take precedence over stored values.
             secret_store=LocalSecretStore(config.paths.app_data / "secrets"),

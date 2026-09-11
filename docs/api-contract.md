@@ -19,7 +19,7 @@ Core endpoints:
 - `POST /api/projects/{project_id}/tts/narrations/import?name=...` (PCM WAV body; stores and
   activates an immutable user-recorded voiceover take)
 - `GET /api/tts/gemini/key` (key availability only: `configured`, `source`, never the value)
-- `PUT /api/tts/gemini/key` (stores the key in a local 0600 secret file; `204`)
+- `PUT /api/tts/gemini/key` (stores the key in a user-private local secret file; `204`)
 - `DELETE /api/tts/gemini/key` (deletes the stored key; `204`)
 - `POST /api/scenes/{scene_id}/generate`
 - `POST /api/scenes/{scene_id}/regenerate`
@@ -92,10 +92,12 @@ All reads, edits, regeneration, and deletion affect only that provider's script.
 request time in this order: the `api_key_env` environment variable (default
 `GEMINI_API_KEY`), then a file saved via `PUT /api/tts/gemini/key`.
 
-- `GET /api/tts/gemini/key` returns `{ configured, source: "environment"|"file"|"none",
-  api_key_env, secret_file, enabled, detail }`. It never returns the key or a fragment of it.
-- `PUT /api/tts/gemini/key` accepts `{ "api_key": "..." }` and writes a mode-`0600` file under
-  the application data directory. Invalid keys (empty, whitespace, or control characters) are
+- `GET /api/tts/gemini/key` returns `{ configured, invalid,
+  source: "environment"|"file"|"none", api_key_env, secret_file, enabled, detail }`. It never
+  returns the key or a fragment of it.
+- `PUT /api/tts/gemini/key` accepts `{ "api_key": "..." }` and writes a user-private file under
+  the application data directory (`0600` on POSIX, user-only ACL on Windows). Invalid keys (empty,
+  whitespace, or control characters) are
   rejected with `422` and nothing is written. Successful saves return `204` without echoing the
   value.
 - `DELETE /api/tts/gemini/key` removes the file (environment variables are untouched) and
@@ -106,7 +108,8 @@ before queueing when the provider is disabled or no key is configured, and `422`
 profile is combined with the provider (Gemini cannot clone). An optional `gemini_model`
 request field overrides the configured model for that take (any well-formed Gemini TTS model
 identifier; unknown IDs fail that take with a clear `model_unavailable` error). While generation
-runs, only narration text and the key (as a header) leave the machine.
+runs, only narration text, the optional delivery direction, and the key (as a
+header) leave the machine.
 
 `GET /api/tts/models` includes a `gemini_models` gallery (`[{ id, description }]`) and the
 `default_model` on the `gemini_tts` entry; the Voice page builds its model picker from it.

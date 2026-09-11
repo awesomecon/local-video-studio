@@ -6,7 +6,7 @@ loopback dashboard still needs a way to configure a key without opening a
 shell, so this module provides one deliberately narrow fallback:
 
 * one git-ignored file per secret under the application data directory,
-* created with `0600` (and its directory with `0700`),
+* created with `0600`/`0700` on POSIX or a user-only ACL on Windows,
 * never returned, echoed, or summarized by any read endpoint,
 * never written into a project folder, a log, or a diagnostic report.
 
@@ -15,8 +15,10 @@ Values are only ever read at request time by the backend that owns them.
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,9 +51,32 @@ def validate_api_key(value: object, *, max_length: int = 512) -> str:
     return candidate
 
 
+def _secure_path(path: Path, *, directory: bool) -> None:
+    """Restrict a secret path to the current user on POSIX and Windows."""
+
+    if os.name != "nt":
+        os.chmod(path, 0o700 if directory else 0o600)
+        return
+    permission = "(OI)(CI)F" if directory else "F"
+    try:
+        completed = subprocess.run(
+            [
+                "icacls", str(path), "/inheritance:r", "/grant:r",
+                f"{getpass.getuser()}:{permission}",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise OSError("could not apply a private Windows ACL to the secret store") from exc
+    if completed.returncode != 0:
+        raise OSError("could not apply a private Windows ACL to the secret store")
+
+
 @dataclass(frozen=True, slots=True)
 class LocalSecretStore:
-    """Reads and writes `0600` secret files inside one application-owned root."""
+    """Reads and writes user-private secret files inside one application-owned root."""
 
     root: Path
 
@@ -86,22 +111,16 @@ class LocalSecretStore:
         clean = validate_api_key(value)
         path = self.path_for(name)
         self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            # Some filesystems (or pre-existing user directories) reject the
-            # mode change; the file-level mode below is the real protection.
-            pass
+        _secure_path(self.root, directory=True)
         handle, temporary = tempfile.mkstemp(dir=str(self.root), prefix=f".{name}.", suffix=".tmp")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as output:
                 output.write(clean)
-            os.chmod(temporary, 0o600)
+            _secure_path(Path(temporary), directory=False)
             os.replace(temporary, path)
-            os.chmod(path, 0o600)
         except Exception:
             try:
-                os.unlink(temporary)
+                Path(temporary).unlink()
             except OSError:
                 pass
             raise

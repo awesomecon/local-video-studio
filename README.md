@@ -94,7 +94,8 @@ local LLM, and the application never starts or stops that service.
 
 Local Video Studio binds to loopback by default, does not enable telemetry, and never downloads
 model weights automatically. The one exception to local-only processing is the optional
-[Gemini TTS](docs/gemini-tts.md) cloud provider: narration text is sent to Google's API only
+[Gemini TTS](docs/gemini-tts.md) cloud provider: narration text and an optional delivery
+direction are sent to Google's API only
 when you select that provider and start a generation with your own Google AI Studio key.
 See [installation](docs/installation.md),
 [architecture](docs/architecture.md), [local LLM](docs/local-llm.md),

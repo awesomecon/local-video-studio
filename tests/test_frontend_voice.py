@@ -17,7 +17,7 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
     assert 'const breezeGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("3. Generate narration with a local model"')
+    panel_start = source.index('section("3. Generate narration with a model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "breezeGrid," in source[panel_start:panel_end]
 
@@ -40,9 +40,9 @@ def test_scene_chunk_combining_is_saved_and_sent() -> None:
 def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
-    # The panel is built and attached to the local-model narration section.
+    # The panel is built and attached to the narration-generation section.
     assert "performancePanel(project, current, tags, provider, script, refresh)" in source
-    panel_start = source.index('section("3. Generate narration with a local model"')
+    panel_start = source.index('section("3. Generate narration with a model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]
 
@@ -143,8 +143,8 @@ def test_gemini_model_picker_is_backend_driven_with_fallback() -> None:
 def test_gemini_style_prompt_reaches_the_backend_as_voice_instruction() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
-    # The style field is sent as voice_instruction (the backend's stylePrompt
-    # input); without this mapping the prompt would be saved but never spoken.
+    # The style field is sent as voice_instruction; the backend incorporates it
+    # into the text prompt because prebuiltVoiceConfig accepts voiceName only.
     assert '(provider.value === "gemini_tts" ? geminiStyle.value.trim() : "")' in source
 
 
@@ -166,9 +166,9 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     # Key-required state is surfaced in the option labels.
     assert 'needsKey ? "needs API key"' in source
 
-    # The panel is built and attached to the local-model narration section.
+    # The panel is built and attached to the narration-generation section.
     assert 'const geminiGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("3. Generate narration with a local model"')
+    panel_start = source.index('section("3. Generate narration with a model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     panel = source[panel_start:panel_end]
     assert "geminiGrid," in panel
@@ -177,7 +177,11 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     # The profile selector is suspended for Gemini and the generate button
     # stays disabled until a key is present.
     assert "voice.disabled = gemini;" in source
-    assert 'provider.value === "gemini_tts" && !geminiKeyReady()' in source
+    assert 'provider.value === "gemini_tts" && !geminiReady()' in source
+    assert 'badge("good", "Ready to generate")' in source
+    assert 'badge("warning", "API key needed")' in source
+    assert 'badge("offline", "Gemini disabled")' in source
+    assert 'entry?.health?.remote !== true' in source
     assert "Gemini API key required" in source
     # Saving/removing the key talks to the dedicated endpoints.
     api_js = VOICE_JS.parent.parent / "api.js"

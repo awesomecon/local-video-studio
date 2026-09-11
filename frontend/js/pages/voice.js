@@ -390,8 +390,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       + "prominently credit Boson AI's Higgs Audio under the model license."));
   // Remote Gemini TTS (cloud provider): preset voices only, no reference
   // cloning, and the user's own Google AI Studio key. The key comes from the
-  // environment or from a 0600 file saved via this panel; only narration
-  // text ever leaves this machine, and only when generating with this
+  // environment or from a user-private file saved via this panel; narration
+  // text and an optional delivery direction leave this machine only when generating with this
   // provider. See docs/gemini-tts.md.
   const geminiVoiceFilter = el("input", {
     type: "search", class: "input",
@@ -467,7 +467,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const geminiStyle = el("input", { type: "text", class: "input", maxlength: "500",
     value: current.gemini_style || "",
     placeholder: "e.g. warm documentary narrator, measured pace (optional)" });
-  const geminiKeyStatus = el("span", { class: "muted small" }, "Checking key status…");
+  const geminiKeyStatus = el("div", {
+    class: "gemini-key-status", role: "status", "aria-live": "polite",
+  }, badge("neutral", "Checking Gemini readiness"));
   const geminiKeyInput = el("input", { type: "password", class: "input",
     autocomplete: "off", spellcheck: "false",
     placeholder: "Paste a Google AI Studio API key — stored only on this machine" });
@@ -476,7 +478,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const geminiNote = el("div", { class: "callout" },
     el("strong", {}, "Gemini TTS is a remote Google service"),
     el("p", { class: "muted small" },
-      "Generating with this provider sends the narration text to Google's Gemini API using "
+      "Generating with this provider sends the narration text and optional Voice style to Google's Gemini API using "
       + "your own Google AI Studio key. No audio, voice samples, or other project content "
       + "leaves this machine. It uses Google's preset voices and cannot clone a recorded "
       + "profile, and its API ignores seeds, so takes are not bit-for-bit reproducible."),
@@ -485,45 +487,71 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       + "starting the dashboard — the environment variable always takes priority over a key "
       + "saved here."));
   const geminiGrid = el("div", { class: "pref-grid" },
+    geminiKeyStatus,
     field("Gemini model", geminiModel,
       "Per-take model override — blank uses the backend default. Pro sounds better on long-form; Flash is faster."),
     field("Gemini voice",
       el("div", { class: "stack" }, geminiVoiceFilter, geminiVoice, geminiVoiceCount),
       "Grouped by delivery — filter by name or vibe (e.g. “warm”, “calm”). Custom gallery names stay selectable."),
     field("Voice style", geminiStyle,
-      "Optional short direction (sent as a style prompt); blank uses the voice's default delivery."),
+      "Optional delivery direction included with the narration prompt; blank uses the voice's default delivery."),
     field("API key", el("div", { class: "row" }, geminiKeyInput, geminiSaveKey, geminiClearKey),
-      geminiKeyStatus));
+      "Keys are stored only on this machine. Saving refreshes the readiness status above."));
   const geminiHealth = () => models.gemini_tts?.health || null;
-  const geminiKeyReady = () => geminiHealth()?.configured === true;
+  const geminiReady = () => {
+    const health = geminiHealth();
+    return health?.status === "healthy" && health.configured === true;
+  };
   const updateGeminiPanel = () => {
     const health = geminiHealth();
     if (!health) {
-      geminiKeyStatus.textContent = "Not registered on this backend.";
+      geminiKeyStatus.replaceChildren(
+        badge("critical", "Gemini unavailable"),
+        el("span", {}, "This backend did not register the Gemini TTS provider."));
       geminiSaveKey.disabled = true;
       geminiClearKey.disabled = true;
       return;
     }
     if (health.status === "not_configured") {
-      geminiKeyStatus.textContent = "Disabled in the configuration (backends.gemini_tts.enabled).";
+      geminiKeyStatus.replaceChildren(
+        badge("offline", "Gemini disabled"),
+        el("span", {}, "Enable backends.gemini_tts.enabled and restart the dashboard."));
       geminiSaveKey.disabled = true;
       geminiClearKey.disabled = true;
       return;
     }
-    if (health.configured) {
-      const via = health.source === "environment"
-        ? `the ${health.api_key_env} environment variable`
-        : "a key saved on this machine";
-      geminiKeyStatus.textContent = `Ready — key from ${via}.`;
+    if (health.status === "key_invalid") {
+      const where = health.source === "environment"
+        ? `Fix ${health.api_key_env} and restart the dashboard.`
+        : "Remove or replace the saved key below.";
+      geminiKeyStatus.replaceChildren(
+        badge("critical", "API key is malformed"), el("span", {}, where));
+      geminiSaveKey.textContent = health.source === "file" ? "Replace saved key" : "Save key";
+      geminiSaveKey.disabled = health.source === "environment";
       geminiClearKey.disabled = health.source !== "file";
       return;
     }
-    geminiKeyStatus.textContent = `No key set — paste one below, or export ${health.api_key_env || "GEMINI_API_KEY"} before starting the dashboard.`;
+    if (geminiReady()) {
+      const via = health.source === "environment"
+        ? `the ${health.api_key_env} environment variable`
+        : "a key saved on this machine";
+      geminiKeyStatus.replaceChildren(
+        badge("good", "Ready to generate"),
+        el("span", {}, `Gemini TTS will use ${via}. Narration text is sent only when you generate.`));
+      geminiSaveKey.textContent = health.source === "file" ? "Replace saved key" : "Save key";
+      geminiSaveKey.disabled = health.source === "environment";
+      geminiClearKey.disabled = health.source !== "file";
+      return;
+    }
+    geminiKeyStatus.replaceChildren(
+      badge("warning", "API key needed"),
+      el("span", {}, `Paste a key below, or export ${health.api_key_env || "GEMINI_API_KEY"} and restart the dashboard.`));
+    geminiSaveKey.textContent = "Save key";
     geminiSaveKey.disabled = false;
     geminiClearKey.disabled = true;
   };
   const syncGenerateEnabled = () => {
-    generate.disabled = provider.value === "gemini_tts" && !geminiKeyReady();
+    generate.disabled = provider.value === "gemini_tts" && !geminiReady();
   };
   geminiSaveKey.onclick = async () => {
     const key = geminiKeyInput.value.trim();
@@ -757,7 +785,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
     const builtInHiggs = voice.value === higgsBuiltIn;
     if (provider.value === "gemini_tts") {
-      if (!geminiKeyReady()) {
+      if (!geminiReady()) {
         toast("critical", "Gemini API key required",
           "Add a Google AI Studio key in the Gemini panel below (or export GEMINI_API_KEY "
           + "and restart the dashboard) before generating with Gemini TTS.");
@@ -784,7 +812,10 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       const { intensity: _intensity, performance_notes: _notes, gemini_style: _style, ...requestSettings } = settings;
       const job = await generateNarration(state.config, project.id,
         { ...requestSettings, text: script.value.trim() || null });
-      toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} will run locally.`);
+      const destination = provider.value === "gemini_tts"
+        ? "will use Google's Gemini API."
+        : "will run locally.";
+      toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} ${destination}`);
       refresh();
     } catch (err) { toastError(err, "generate narration"); }
     finally { saveVoice.disabled = false; syncGenerateEnabled(); }
@@ -819,7 +850,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         el("div", { class: "row" }, recordedLabel), recordedPreview),
       field("Take name", recordedName, "Shown in the narration-take library."),
       el("div", { class: "row" }, useRecording)),
-    section("3. Generate narration with a local model",
+    section("3. Generate narration with a model",
       el("div", { class: "pref-grid" },
         field("TTS model", provider, "Worker readiness is shown in the label."),
         field("Voice", voice,
@@ -928,7 +959,9 @@ function modelOption(value, label, models) {
   const health = entry?.health;
   const ready = health?.status === "healthy";
   const needsKey = health?.status === "key_required";
+  const invalidKey = health?.status === "key_invalid";
   const suffix = ready ? "ready"
+    : invalidKey ? "invalid API key"
     : needsKey ? "needs API key"
     : health?.status === "not_configured" ? "off"
     : entry?.managed ? "starts automatically"
@@ -955,19 +988,21 @@ function modelStatusLine(provider, models) {
 }
 
 function workerControlsPanel(models, refresh) {
+  const localModels = Object.fromEntries(
+    Object.entries(models).filter(([, entry]) => entry?.health?.remote !== true));
   const provider = el("select", { class: "input" },
-    ...Object.keys(models).map((name) =>
+    ...Object.keys(localModels).map((name) =>
       el("option", { value: name }, providerLabel(name))));
-  const status = el("div", { class: "hint" }, modelStatusLine(provider.value, models));
+  const status = el("div", { class: "hint" }, modelStatusLine(provider.value, localModels));
   const unload = el("button", {
     class: "btn btn-ghost btn-sm", type: "button",
   }, "Unload model from memory");
   const refreshStatus = () => {
-    status.replaceChildren(modelStatusLine(provider.value, models));
+    status.replaceChildren(modelStatusLine(provider.value, localModels));
   };
   provider.onchange = refreshStatus;
   unload.onclick = async () => {
-    if (!models[provider.value]) {
+    if (!localModels[provider.value]) {
       toast("critical", "Unknown provider",
         `${providerLabel(provider.value)} is not available on this backend.`);
       return;

@@ -7,11 +7,12 @@ narration quality and multilingual preset voices on machines that cannot
 
 ## What is sent to Google
 
-* Only the narration text of each chunk, in a `generateContent` request.
+* The narration text of each chunk and any optional Voice style delivery direction,
+  in a `generateContent` request.
 * Your Google AI Studio API key, as the `x-goog-api-key` request header.
 
-Nothing else leaves the machine: no reference audio, voice samples, prompts,
-scripts, media, or project files. Generation happens only when *you* select
+Nothing else leaves the machine: no reference audio, voice samples, media, or
+project files. Generation happens only when *you* select
 the Gemini provider in the Voice page (or pass `provider: "gemini_tts"` to
 the API) and start a job. No telemetry, no background checks: the dashboard
 never polls Google, and provider "health" is computed locally from key
@@ -38,8 +39,9 @@ Two ways, and the environment variable always wins:
    list. A Gemini panel appears with a key field: paste the key and press
    **Save key**. The key is validated, then written to a private file
    (`~/.local/share/local-video-studio/secrets/gemini_tts_api_key.key`, mode
-   `0600`; the directory is `0700`). No endpoint ever returns the key's
-   value — status checks report only whether a key is set and where it came
+   `0600` with a `0700` directory on POSIX, or a user-only ACL on Windows).
+   No endpoint ever returns the key's value — status checks report only
+   whether a key is set and where it came
    from (`environment`, `file`, or `none`). **Remove saved key** deletes the
    file; it never touches environment variables.
 
@@ -63,8 +65,8 @@ answers narration requests with a `409` that tells you exactly what to do.
   Google models keep working; an unknown model fails the take with a clear
   `model_unavailable` error naming the identifier. The effective model is
   recorded in each chunk's provenance sidecar.
-* An optional **Voice style** field is sent as a style prompt
-  ("warm documentary narrator, measured pace").
+* An optional **Voice style** field is included in the text prompt as a delivery
+  direction ("warm documentary narrator, measured pace").
 * Chunking works like every other provider (default 30 s; keep it at or
   below that — see Limitations). Scene grouping, pauses, takes, chunk
   re-generation, and the take library all behave normally.

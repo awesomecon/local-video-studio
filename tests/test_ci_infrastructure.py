@@ -3,7 +3,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from backend.core.config import AppConfig
-from scripts.ci_core_smoke import running_app
+from scripts.ci_core_smoke import disable_backends, running_app
 from scripts.ci_test_report import sanitize
 
 
@@ -45,3 +45,16 @@ def test_native_smoke_server_reopens_isolated_project(tmp_path: Path) -> None:
         response = client.get(f"/api/projects/{project_id}")
         assert response.status_code == 200
         assert response.json()["project"]["title"] == "CI fixture"
+
+
+def test_native_smoke_disables_worker_and_cloud_backend_shapes() -> None:
+    config = AppConfig()
+
+    disable_backends(config)
+
+    for name in type(config.backends).model_fields:
+        backend = getattr(config.backends, name)
+        assert backend.enabled is False
+        if "managed" in type(backend).model_fields:
+            assert backend.managed is False
+    assert "managed" not in type(config.backends.gemini_tts).model_fields

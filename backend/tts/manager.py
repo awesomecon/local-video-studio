@@ -331,6 +331,7 @@ class TTSManager:
         backend = self.pipeline.registry.get(request.provider)
         outputs: list[Path] = []
         failures: list[str] = []
+        last_result: GenerationResult | None = None
         worker_started = self.pipeline.tts_workers.ensure_running_if_managed(request.provider)
         try:
             backend.load()
@@ -366,6 +367,7 @@ class TTSManager:
                         references=(reference,) if reference is not None else (),
                         settings=settings,
                     ))
+                    last_result = result
                     output = result.outputs[0]
                     duration = wav_duration(output)
                     metadata = {
@@ -414,6 +416,8 @@ class TTSManager:
                     self.pipeline.tts_workers.stop(request.provider)
         if failures:
             raise RuntimeError("; ".join(failures))
+        if last_result is None:
+            raise RuntimeError("Narration generation produced no audio chunks")
         if request.enhance_with_step:
             assert profile is not None
             outputs = self._enhance_with_step(
@@ -428,8 +432,11 @@ class TTSManager:
             outputs=(take,),
             metadata={
                 "backend": request.provider,
-                "model": backend.descriptor().model_name,
-                "model_version": backend.descriptor().model_version,
+                "model": str(last_result.metadata.get("model") or backend.descriptor().model_name),
+                "model_version": str(
+                    last_result.metadata.get("model_version")
+                    or backend.descriptor().model_version
+                ),
                 "workflow_version": "tts-narration-v4",
                 "seed": request.seed,
                 "prompt": text,
@@ -885,8 +892,10 @@ class TTSManager:
         }
         take_result = GenerationResult(outputs=(take,), metadata={
             "backend": request.provider,
-            "model": backend.descriptor().model_name,
-            "model_version": backend.descriptor().model_version,
+            "model": str(result.metadata.get("model") or backend.descriptor().model_name),
+            "model_version": str(
+                result.metadata.get("model_version") or backend.descriptor().model_version
+            ),
             "workflow_version": "tts-narration-v3",
             "seed": source_asset.seed,
             "prompt": source_asset.prompt,

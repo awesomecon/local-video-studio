@@ -631,7 +631,7 @@ export function ttsModels(config, opts = {}) {
 }
 
 /**
- * PUT /api/tts/gemini/key — store a Google AI Studio key in the local 0600
+ * PUT /api/tts/gemini/key — store a Google AI Studio key in a user-private local
  * secret file. The key is never returned by any endpoint; status checks come
  * from /api/tts/models (health) which only report source and configured.
  */

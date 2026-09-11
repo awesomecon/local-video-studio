@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import wave
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from backend.tts.models import NarrationRequest
 
 SAMPLE_RATE = 24000
 PCM = b"\x01\x02" * 1200  # 50 ms of L16 mono
+TEST_API_KEY = "AIzaSyntheticTestKey123"
 
 
 def audio_payload(frames: int = 1200, rate: int = SAMPLE_RATE) -> bytes:
@@ -88,7 +90,7 @@ def request_to(tmp_path: Path, *, text: str = "Hello, world.",
 
 
 def test_generate_sends_key_header_and_expected_wire_shape(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -100,16 +102,20 @@ def test_generate_sends_key_header_and_expected_wire_shape(tmp_path, monkeypatch
     backend = make_backend(tmp_path, handler)
     result = backend.generate(request_to(tmp_path, style="warm narrator", temperature=0.7))
 
-    assert "env-key" in seen["header"]
-    assert "env-key" not in seen["url"]
+    assert seen["header"] == TEST_API_KEY
+    assert TEST_API_KEY not in seen["url"]
     assert seen["url"].endswith(
         "/v1beta/models/gemini-3.1-flash-tts-preview:generateContent"
     )
     body = seen["body"]
-    assert body["contents"] == [{"parts": [{"text": "Hello, world."}]}]
+    sent_prompt = body["contents"][0]["parts"][0]["text"]
+    assert sent_prompt == (
+        "Perform text-to-speech. Read the narration exactly as written.\n\n"
+        "Delivery direction: warm narrator\n\nNarration:\nHello, world."
+    )
     assert body["generationConfig"]["responseModalities"] == ["AUDIO"]
     prebuilt = body["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
-    assert prebuilt == {"voiceName": "Kore", "stylePrompt": "warm narrator"}
+    assert prebuilt == {"voiceName": "Kore"}
     assert body["generationConfig"]["temperature"] == 0.7
 
     output = result.outputs[0]
@@ -120,6 +126,7 @@ def test_generate_sends_key_header_and_expected_wire_shape(tmp_path, monkeypatch
         assert wav.getnframes() == 1200
     assert result.metadata["workflow_version"] == "gemini-tts-v1"
     assert result.metadata["backend"] == "gemini_tts"
+    assert result.metadata["prompt"] == sent_prompt
     settings = result.metadata["settings"]
     assert settings["voice_name"] == "Kore"
     assert settings["deterministic"] is False
@@ -128,7 +135,7 @@ def test_generate_sends_key_header_and_expected_wire_shape(tmp_path, monkeypatch
 
 
 def test_default_voice_and_voice_selection(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -146,7 +153,7 @@ def test_default_voice_and_voice_selection(tmp_path, monkeypatch):
 
 
 def test_reference_audio_is_rejected_before_any_network_call(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -164,7 +171,7 @@ def test_reference_audio_is_rejected_before_any_network_call(tmp_path, monkeypat
 
 
 def test_invalid_voice_name_is_rejected_client_side(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     backend = make_backend(tmp_path, handler=lambda r: httpx.Response(200, json=generate_response()))
     with pytest.raises(BackendError) as raised:
         backend.generate(request_to(tmp_path, voice="lowercase voice"))
@@ -182,7 +189,8 @@ def test_missing_key_is_actionable_and_never_loads(tmp_path, monkeypatch):
 
     backend = make_backend(tmp_path, handler, with_store=True)
     assert backend.key_status() == {
-        "configured": False, "source": "none", "api_key_env": "GEMINI_API_KEY",
+        "configured": False, "invalid": False, "source": "none",
+        "api_key_env": "GEMINI_API_KEY",
         "secret_file": str(backend.secret_store.path_for("gemini_tts_api_key")),
     }
     health = backend.health()
@@ -206,11 +214,12 @@ def test_stored_key_roundtrip_precedence_and_clear(tmp_path, monkeypatch):
     status = backend.key_status()
     assert status["configured"] is True and status["source"] == "file"
     path = backend.secret_store.path_for("gemini_tts_api_key")
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert backend.key_status()["secret_file"] == str(path)
 
     # The environment variable always wins over the stored file.
-    monkeypatch.setenv("GEMINI_API_KEY", "env-wins")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     assert backend.key_status()["source"] == "environment"
     monkeypatch.delenv("GEMINI_API_KEY")
 
@@ -230,7 +239,7 @@ def test_set_api_key_rejects_bad_values_without_writing(tmp_path, monkeypatch):
 
 
 def test_api_error_mapping(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
 
     def make(status: int, payload: dict) -> GeminiTTSBackend:
         return make_backend(
@@ -286,8 +295,39 @@ def test_auth_error_never_leaks_the_key(tmp_path, monkeypatch):
     assert secret not in repr(backend)
 
 
+def test_malformed_environment_key_is_rejected_without_a_network_call(tmp_path, monkeypatch):
+    secret = "synthetic-secret-marker"
+    monkeypatch.setenv("GEMINI_API_KEY", f"prefix\n{secret}")
+    calls: list[str] = []
+    backend = make_backend(
+        tmp_path,
+        lambda request: calls.append(str(request.url)) or httpx.Response(200),
+    )
+
+    assert backend.health()["status"] == "key_invalid"
+    with pytest.raises(BackendError) as raised:
+        backend.generate(request_to(tmp_path))
+    assert raised.value.code == BackendErrorCode.AUTHENTICATION_FAILED
+    assert secret not in str(raised.value.as_dict())
+    assert calls == []
+
+
+def test_transport_errors_redact_the_key(tmp_path, monkeypatch):
+    secret = "synthetic-transport-key"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError(f"bad header {secret}")
+
+    backend = make_backend(tmp_path, handler)
+    with pytest.raises(BackendError) as raised:
+        backend.generate(request_to(tmp_path))
+    assert raised.value.code == BackendErrorCode.SERVER_NOT_RUNNING
+    assert secret not in str(raised.value.as_dict())
+
+
 def test_safety_block_and_empty_and_text_only_responses(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
 
     def with_response(payload: dict) -> GeminiTTSBackend:
         return make_backend(tmp_path, lambda r: httpx.Response(200, json=payload))
@@ -332,7 +372,7 @@ def test_safety_block_and_empty_and_text_only_responses(tmp_path, monkeypatch):
 
 
 def test_disabled_backend_refuses_generation(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     backend = make_backend(tmp_path, handler=lambda r: httpx.Response(200, json=generate_response()))
     backend.enabled = False
     assert backend.descriptor().device == "disabled"
@@ -363,7 +403,7 @@ def test_model_gallery_covers_curated_models() -> None:
 
 
 def test_model_override_uses_request_model_and_records_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -378,6 +418,7 @@ def test_model_override_uses_request_model_and_records_it(tmp_path, monkeypatch)
     override = backend.generate(request_to(tmp_path, model="gemini-2.5-pro-preview-tts"))
     assert seen["url"].endswith("/v1beta/models/gemini-2.5-pro-preview-tts:generateContent")
     assert override.metadata["settings"]["gemini_model"] == "gemini-2.5-pro-preview-tts"
+    assert override.metadata["model"] == "Google gemini-2.5-pro-preview-tts"
     assert override.metadata["settings"]["deterministic"] is False
 
     # Unknown-but-well-formed IDs pass through; Google answers 404 clearly.
@@ -386,7 +427,7 @@ def test_model_override_uses_request_model_and_records_it(tmp_path, monkeypatch)
 
 
 def test_invalid_model_identifier_is_rejected_client_side(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -505,7 +546,7 @@ def test_api_rejects_gemini_with_a_voice_profile(tmp_path, monkeypatch):
 def test_full_narration_flow_with_real_backend_and_fake_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     app = _app(tmp_path, monkeypatch, mock=True)
     service = app.state.service
     backend = make_backend(
@@ -559,7 +600,7 @@ def test_full_narration_flow_with_real_backend_and_fake_api(
 def test_full_narration_flow_honors_per_request_model_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.setenv("GEMINI_API_KEY", TEST_API_KEY)
     seen: list[str] = []
     app = _app(tmp_path, monkeypatch, mock=True)
     service = app.state.service
@@ -592,3 +633,7 @@ def test_full_narration_flow_honors_per_request_model_override(
                           / "0001.json").read_text(encoding="utf-8"))
     assert sidecar["status"] == "completed"
     assert sidecar["settings"]["gemini_model"] == "gemini-2.5-pro-preview-tts"
+    assert sidecar["model"] == "Google gemini-2.5-pro-preview-tts"
+    takes, active_id = service.tts.list_narration_takes(project.id)
+    take = next(item for item in takes if item.id == active_id)
+    assert take.model == "Google gemini-2.5-pro-preview-tts"

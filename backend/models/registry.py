@@ -133,7 +133,7 @@ class BackendRegistry:
         ):
             tts = backends.get(name, {})
             registry.register(TTSServiceBackend(name, tts.get("endpoint")))
-        # Remote cloud TTS (opt-in, key-gated, narration text only). Always
+        # Remote cloud TTS (opt-in, key-gated narration and delivery direction). Always
         # registered so the Voice page can show its honest readiness; it
         # generates only when the user picks it and supplies a key.
         gemini = backends.get("gemini_tts", {})

@@ -146,12 +146,13 @@ class GeminiTTSConfig(StrictModel):
     """Remote Google Gemini TTS API provider.
 
     This is the one intentionally *non-local* TTS provider: when a user
-    generates narration with it, the narration text is sent to Google's
-    Gemini API. It is therefore explicitly user-enabled (a Google AI Studio
-    API key must be present, either as ``api_key_env`` or as a key saved from
-    the Voice page) and no audio, media, or project content ever reaches
-    Google. Voice profiles and reference cloning are not supported; Gemini
-    speaks from its preset voices only.
+    generates narration with it, the narration text and any optional delivery
+    direction are sent to Google's Gemini API. It is therefore explicitly
+    user-enabled (a Google AI Studio API key must be present, either as
+    ``api_key_env`` or as a key saved from the Voice page). No audio, media
+    files, voice samples, or unrelated project data ever reaches Google.
+    Voice profiles and reference cloning are not supported; Gemini speaks
+    from its preset voices only.
     """
 
     enabled: bool = True
@@ -343,7 +344,7 @@ class AppConfig(StrictModel):
                     f"{name} endpoint must be localhost when allow_remote_backends=false"
                 )
         # ``gemini_tts`` is deliberately excluded from the loopback checks above:
-        # it is an opt-in remote cloud API (key-gated, narration text only) and
+        # it is an opt-in remote cloud API (key-gated narration and delivery direction) and
         # has no local endpoint at all. Every other provider endpoint must
         # remain localhost while ``allow_remote_backends`` is false.
         for name in (

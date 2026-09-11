@@ -1,12 +1,12 @@
 """Remote Google Gemini TTS adapter.
 
 Local Video Studio is local-first, and this is its one cloud TTS provider:
-when a user picks it and starts generating, *narration text only* is sent to
-Google's Gemini API. No reference audio, media, project files, or voice
-samples ever leave the machine, and nothing is sent unless the user supplies
+when a user picks it and starts generating, narration text and any optional
+delivery direction are sent to Google's Gemini API. No reference audio,
+media, project files, or voice samples ever leave the machine, and nothing is
+sent unless the user supplies
 their own Google AI Studio API key (environment variable, or a key saved
-from the Voice page, which is stored in a mode-0600 file in the application
-data directory).
+from the Voice page in a user-private file in the application data directory).
 
 The adapter is stateless (nothing to load or unload), deterministic-seed
 agnostic (the API does not accept seeds; requested seeds are still recorded
@@ -25,7 +25,7 @@ from typing import Any, Callable, Mapping
 
 import httpx
 
-from backend.core.secrets import LocalSecretStore, validate_api_key
+from backend.core.secrets import LocalSecretStore, SecretValidationError, validate_api_key
 from .base import (
     BackendDescriptor,
     Capability,
@@ -129,14 +129,25 @@ class GeminiTTSBackend(GeneratorBackend):
     def key_status(self) -> Mapping[str, Any]:
         """Honest, value-free key configuration report."""
 
-        if os.environ.get(self.api_key_env, "").strip():
+        value = os.environ.get(self.api_key_env, "").strip()
+        if value:
             source = "environment"
-        elif self.secret_store is not None and self.secret_store.exists(SECRET_STORE_NAME):
-            source = "file"
         else:
             source = "none"
+            if self.secret_store is not None:
+                value = self.secret_store.read(SECRET_STORE_NAME) or ""
+                if value:
+                    source = "file"
+        valid = False
+        if value:
+            try:
+                validate_api_key(value)
+                valid = True
+            except SecretValidationError:
+                pass
         return {
-            "configured": source != "none",
+            "configured": source != "none" and valid,
+            "invalid": source != "none" and not valid,
             "source": source,
             "api_key_env": self.api_key_env,
             "secret_file": (
@@ -148,12 +159,19 @@ class GeminiTTSBackend(GeneratorBackend):
 
     def _api_key(self) -> str:
         value = os.environ.get(self.api_key_env, "").strip()
-        if value:
-            return value
-        if self.secret_store is not None:
+        source = "environment"
+        if not value and self.secret_store is not None:
             value = self.secret_store.read(SECRET_STORE_NAME) or ""
+            source = "saved"
         if value:
-            return value
+            try:
+                return validate_api_key(value)
+            except SecretValidationError:
+                raise BackendError(
+                    BackendErrorCode.AUTHENTICATION_FAILED,
+                    f"The {source} Gemini API key is malformed; replace it in "
+                    f"the Voice page or {self.api_key_env} environment variable.",
+                ) from None
         raise BackendError(
             BackendErrorCode.AUTHENTICATION_FAILED,
             "Gemini TTS needs a Google AI Studio API key. Add one in the Voice "
@@ -169,7 +187,13 @@ class GeminiTTSBackend(GeneratorBackend):
             )
         # Validate before touching disk; nothing is written on failure.
         validate_api_key(value)
-        self.secret_store.write(SECRET_STORE_NAME, value)
+        try:
+            self.secret_store.write(SECRET_STORE_NAME, value)
+        except OSError:
+            raise BackendError(
+                BackendErrorCode.BACKEND_UNAVAILABLE,
+                "Could not secure the local Gemini key file; no key was saved.",
+            ) from None
 
     def clear_api_key(self) -> bool:
         if self.secret_store is None:
@@ -199,10 +223,22 @@ class GeminiTTSBackend(GeneratorBackend):
             return {
                 "status": "not_configured",
                 "backend": "gemini_tts",
+                "remote": True,
                 "detail": "Gemini TTS is disabled in the configuration.",
                 **status,
             }
         if not status["configured"]:
+            if status["invalid"]:
+                return {
+                    "status": "key_invalid",
+                    "backend": "gemini_tts",
+                    "remote": True,
+                    "detail": (
+                        "The configured Gemini API key is malformed. Replace it "
+                        f"in the Voice page or {self.api_key_env}."
+                    ),
+                    **status,
+                }
             return {
                 "status": "key_required",
                 "backend": "gemini_tts",
@@ -231,6 +267,11 @@ class GeminiTTSBackend(GeneratorBackend):
                 "state": "needs_key",
                 "detail": "Needs a Google AI Studio API key (Voice page or "
                           f"{self.api_key_env}).",
+            }
+        if status["status"] == "key_invalid":
+            return {
+                "state": "needs_key",
+                "detail": "The configured Gemini API key is malformed; replace it.",
             }
         return {"state": "off", "detail": "Disabled in the configuration."}
 
@@ -283,13 +324,15 @@ class GeminiTTSBackend(GeneratorBackend):
                 "long takes are split into chunks, so a shorter chunk limit helps.",
                 retryable=True,
                 details=exc,
+                secrets=(key,),
             ) from None
-        except httpx.NetworkError as exc:
+        except httpx.TransportError as exc:
             raise BackendError(
                 BackendErrorCode.SERVER_NOT_RUNNING,
                 "Could not reach the Gemini TTS API (network or DNS).",
                 retryable=True,
                 details=exc,
+                secrets=(key,),
             ) from None
         if response.status_code >= 400:
             raise self._api_error(response, model=model or self.model)
@@ -382,9 +425,18 @@ class GeminiTTSBackend(GeneratorBackend):
             raise BackendError(
                 BackendErrorCode.INVALID_RESPONSE, "Gemini TTS received empty narration text.",
             )
-        prebuilt: dict[str, Any] = {"voiceName": voice}
+        # Gemini's REST schema accepts only voiceName in prebuiltVoiceConfig.
+        # Style is steered through the text prompt, with a clear synthesis
+        # preamble to reduce classifier false rejections and accidental reading
+        # of the direction itself.
+        speech_prompt_parts = [
+            "Perform text-to-speech. Read the narration exactly as written.",
+        ]
         if style_prompt:
-            prebuilt["stylePrompt"] = style_prompt
+            speech_prompt_parts.append(f"Delivery direction: {style_prompt}")
+        speech_prompt_parts.append(f"Narration:\n{text}")
+        speech_prompt = "\n\n".join(speech_prompt_parts)
+        prebuilt: dict[str, Any] = {"voiceName": voice}
         generation_config: dict[str, Any] = {
             "responseModalities": ["AUDIO"],
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": prebuilt}},
@@ -392,7 +444,7 @@ class GeminiTTSBackend(GeneratorBackend):
         if temperature is not None:
             generation_config["temperature"] = float(temperature)
         body = {
-            "contents": [{"parts": [{"text": text}]}],
+            "contents": [{"parts": [{"text": speech_prompt}]}],
             "generationConfig": generation_config,
         }
 
@@ -523,11 +575,13 @@ class GeminiTTSBackend(GeneratorBackend):
             outputs=(output,),
             metadata={
                 "backend": "gemini_tts",
-                "model": descriptor.model_name,
+                "model": f"Google {model}",
                 "model_version": descriptor.model_version,
                 "workflow_version": "gemini-tts-v1",
                 "seed": request.seed,
-                "prompt": request.prompt,
+                # Record the exact text sent to Gemini; request.prompt remains
+                # available as the narration text in the chunk record.
+                "prompt": speech_prompt,
                 "settings": {
                     **settings,
                     "voice_name": voice,
