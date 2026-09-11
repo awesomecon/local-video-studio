@@ -103,5 +103,10 @@ request time in this order: the `api_key_env` environment variable (default
 
 `POST /api/projects/{project_id}/tts/generate` with `provider: "gemini_tts"` answers `409`
 before queueing when the provider is disabled or no key is configured, and `422` when a voice
-profile is combined with the provider (Gemini cannot clone). While generation runs, only
-narration text and the key (as a header) leave the machine.
+profile is combined with the provider (Gemini cannot clone). An optional `gemini_model`
+request field overrides the configured model for that take (any well-formed Gemini TTS model
+identifier; unknown IDs fail that take with a clear `model_unavailable` error). While generation
+runs, only narration text and the key (as a header) leave the machine.
+
+`GET /api/tts/models` includes a `gemini_models` gallery (`[{ id, description }]`) and the
+`default_model` on the `gemini_tts` entry; the Voice page builds its model picker from it.

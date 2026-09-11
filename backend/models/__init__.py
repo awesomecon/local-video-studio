@@ -49,6 +49,7 @@ from .lane_resolver import (
     resolve_lane_target,
 )
 from .gemini_tts import (
+    GEMINI_TTS_MODELS,
     GEMINI_VOICES,
     GeminiTTSBackend,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "DETERMINISTIC_HANDLERS",
     "FluxBackend",
     "FasterWhisperBackend",
+    "GEMINI_TTS_MODELS",
     "GEMINI_VOICES",
     "GeminiTTSBackend",
     "GenerationRequest",

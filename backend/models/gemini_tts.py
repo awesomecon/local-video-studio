@@ -78,6 +78,19 @@ GEMINI_VOICES: tuple[tuple[str, str], ...] = (
 )
 KNOWN_GEMINI_VOICE_NAMES: frozenset[str] = frozenset(name for name, _ in GEMINI_VOICES)
 _VOICE_NAME_SHAPE = re.compile(r"^[A-Z][A-Za-z]{2,31}$")
+
+# Curated model gallery (checked 2026-09). The default is the latest
+# expressive low-latency model; Pro trades latency for quality on long-form
+# narration. Well-formed identifiers outside this list are still accepted per
+# request (forward compat, same philosophy as voices); Google reports unknown
+# models with a clear 404 that maps to MODEL_UNAVAILABLE.
+GEMINI_TTS_MODELS: tuple[tuple[str, str], ...] = (
+    ("gemini-3.1-flash-tts-preview", "Latest — expressive, low-latency"),
+    ("gemini-2.5-flash-preview-tts", "Previous Flash — low-latency fallback"),
+    ("gemini-2.5-pro-preview-tts", "Pro — higher quality, slower"),
+)
+KNOWN_GEMINI_TTS_MODEL_IDS: frozenset[str] = frozenset(id for id, _ in GEMINI_TTS_MODELS)
+_MODEL_ID_SHAPE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _RATE_RE = re.compile(r"rate\s*=\s*(\d{2,6})")
 
 
@@ -253,7 +266,8 @@ class GeminiTTSBackend(GeneratorBackend):
 
     # -------------------------------------------------------------- request
 
-    def _request(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> httpx.Response:
+    def _request(self, method: str, path: str, *, json: dict[str, Any] | None = None,
+                   model: str | None = None) -> httpx.Response:
         key = self._api_key()
         url = f"{self.base_url}{path}"
         try:
@@ -278,10 +292,10 @@ class GeminiTTSBackend(GeneratorBackend):
                 details=exc,
             ) from None
         if response.status_code >= 400:
-            raise self._api_error(response)
+            raise self._api_error(response, model=model or self.model)
         return response
 
-    def _api_error(self, response: httpx.Response) -> BackendError:
+    def _api_error(self, response: httpx.Response, *, model: str | None = None) -> BackendError:
         detail = ""
         error_status = ""
         try:
@@ -312,8 +326,8 @@ class GeminiTTSBackend(GeneratorBackend):
         if response.status_code == 404:
             return BackendError(
                 BackendErrorCode.MODEL_UNAVAILABLE,
-                f"Gemini TTS model {self.model!r} was not found; check the model "
-                "identifier in the configuration.",
+                f"Gemini TTS model {model!r} was not found; check the model "
+                "identifier in the configuration or the per-request override.",
             )
         if response.status_code >= 500:
             return BackendError(
@@ -352,6 +366,16 @@ class GeminiTTSBackend(GeneratorBackend):
                 BackendErrorCode.INVALID_RESPONSE,
                 "Gemini TTS temperature must be between 0.0 and 2.0.",
             )
+        # Per-request model override (NarrationRequest.gemini_model); falls
+        # back to the configured backend default. Well-formed unknown IDs pass
+        # through so future Google models keep working; a 404 maps to a clear
+        # MODEL_UNAVAILABLE error naming the offending identifier.
+        model = str(settings.get("gemini_model") or self.model)
+        if not _MODEL_ID_SHAPE.fullmatch(model):
+            raise BackendError(
+                BackendErrorCode.INVALID_RESPONSE,
+                f"Gemini TTS model {model!r} is not a valid model identifier.",
+            )
 
         text = request.prompt.strip()
         if not text:
@@ -378,8 +402,9 @@ class GeminiTTSBackend(GeneratorBackend):
 
         response = self._request(
             "POST",
-            f"/models/{self.model}:generateContent",
+            f"/models/{model}:generateContent",
             json=body,
+            model=model,
         )
         try:
             data = response.json()
@@ -506,6 +531,7 @@ class GeminiTTSBackend(GeneratorBackend):
                 "settings": {
                     **settings,
                     "voice_name": voice,
+                    "gemini_model": model,
                     "style_prompt": style_prompt or None,
                     "deterministic": False,
                     "metrics": metrics,

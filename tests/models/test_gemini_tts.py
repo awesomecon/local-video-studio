@@ -20,7 +20,7 @@ from backend.core import load_config
 from backend.core.secrets import LocalSecretStore, SecretValidationError
 from backend.models.base import GenerationRequest, GenerationResult
 from backend.models.errors import BackendError, BackendErrorCode
-from backend.models.gemini_tts import GEMINI_VOICES, GeminiTTSBackend
+from backend.models.gemini_tts import GEMINI_TTS_MODELS, GEMINI_VOICES, GeminiTTSBackend
 from backend.api.main import create_app
 from backend.schemas import ProjectCreate, Scene
 from backend.tts.models import NarrationRequest
@@ -71,12 +71,13 @@ def make_backend(tmp_path: Path, handler, *, with_store: bool = True) -> GeminiT
 
 def request_to(tmp_path: Path, *, text: str = "Hello, world.",
                voice: str | None = None, style: str | None = None,
-               temperature: float | None = None,
+               temperature: float | None = None, model: str | None = None,
                references: tuple[Path, ...] = ()) -> GenerationRequest:
     settings = {
         "filename": "speech.wav",
         "voice_name": voice,
         "voice_instruction": style or "",
+        "gemini_model": model,
     }
     if temperature is not None:
         settings["temperature"] = temperature
@@ -351,6 +352,55 @@ def test_voice_gallery_covers_documented_presets() -> None:
     assert len(names) == len(set(names))
 
 
+def test_model_gallery_covers_curated_models() -> None:
+    ids = [model_id for model_id, _ in GEMINI_TTS_MODELS]
+    assert ids == [
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-flash-preview-tts",
+        "gemini-2.5-pro-preview-tts",
+    ]
+    assert len(ids) == len(set(ids))
+
+
+def test_model_override_uses_request_model_and_records_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json=generate_response())
+
+    backend = make_backend(tmp_path, handler)
+    default = backend.generate(request_to(tmp_path))
+    assert seen["url"].endswith("/v1beta/models/gemini-3.1-flash-tts-preview:generateContent")
+    assert default.metadata["settings"]["gemini_model"] == "gemini-3.1-flash-tts-preview"
+
+    override = backend.generate(request_to(tmp_path, model="gemini-2.5-pro-preview-tts"))
+    assert seen["url"].endswith("/v1beta/models/gemini-2.5-pro-preview-tts:generateContent")
+    assert override.metadata["settings"]["gemini_model"] == "gemini-2.5-pro-preview-tts"
+    assert override.metadata["settings"]["deterministic"] is False
+
+    # Unknown-but-well-formed IDs pass through; Google answers 404 clearly.
+    backend.generate(request_to(tmp_path, model="gemini-9.9-future-tts"))
+    assert seen["url"].endswith("/v1beta/models/gemini-9.9-future-tts:generateContent")
+
+
+def test_invalid_model_identifier_is_rejected_client_side(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=generate_response())
+
+    backend = make_backend(tmp_path, handler)
+    with pytest.raises(BackendError) as raised:
+        backend.generate(request_to(tmp_path, model="not a model!!"))
+    assert raised.value.code == BackendErrorCode.INVALID_RESPONSE
+    assert "not a valid model identifier" in str(raised.value)
+    assert calls == []
+
+
 # --------------------------------------------------------------------- API
 
 def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mock: bool):
@@ -403,6 +453,21 @@ def test_api_models_endpoint_lists_gemini_with_honest_health(tmp_path, monkeypat
         assert entry["health"]["status"] == "key_required"
         assert entry["readiness"]["state"] == "needs_key"
         assert entry["managed"] is False
+
+
+def test_api_models_entry_advertises_gemini_model_gallery(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    app = _app(tmp_path, monkeypatch, mock=True)
+    client = TestClient(app)
+    with client:
+        payload = client.get("/api/tts/models").json()
+        entry = payload["models"]["gemini_tts"]
+        assert [item["id"] for item in entry["gemini_models"]] == [
+            "gemini-3.1-flash-tts-preview",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-pro-preview-tts",
+        ]
+        assert entry["default_model"] == "gemini-3.1-flash-tts-preview"
 
 
 def test_api_rejects_gemini_narration_without_a_key(tmp_path, monkeypatch):
@@ -489,3 +554,41 @@ def test_full_narration_flow_with_real_backend_and_fake_api(
     # Deterministic audio keeps the take joinable; provenance stays honest.
     assert (project_root / take.filepath).is_file()
     assert take.filepath.as_posix() == "narration/takes/gemini_tts/gemini-flow.wav"
+
+
+def test_full_narration_flow_honors_per_request_model_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    seen: list[str] = []
+    app = _app(tmp_path, monkeypatch, mock=True)
+    service = app.state.service
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json=generate_response(frames=2400))
+
+    service.registry.register(
+        make_backend(tmp_path, handler), name="gemini_tts", replace=True,
+    )
+
+    project = service.create_project(ProjectCreate(
+        title="Gemini model", topic="t", target_duration=2,
+    ))
+    scene = Scene(project_id=project.id, index=0, duration=1, narration="One line.")
+    service.database.save_scene(scene)
+    service.store.save_scene(project.slug, scene)
+
+    service.tts.generate(
+        project.id,
+        NarrationRequest(provider="gemini_tts", voice_profile_id=None, chunk_seconds=5,
+                         gemini_model="gemini-2.5-pro-preview-tts"),
+        job_id="gemini-model",
+    )
+
+    assert seen and all("gemini-2.5-pro-preview-tts" in url for url in seen)
+    project_root = tmp_path / "projects" / project.slug
+    sidecar = json.loads((project_root / "audio" / "gemini" / "gemini-model"
+                          / "0001.json").read_text(encoding="utf-8"))
+    assert sidecar["status"] == "completed"
+    assert sidecar["settings"]["gemini_model"] == "gemini-2.5-pro-preview-tts"

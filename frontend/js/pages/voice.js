@@ -77,6 +77,16 @@ const GEMINI_VOICE_GROUPS = [
 ];
 const GEMINI_VOICE_OPTIONS = GEMINI_VOICE_GROUPS.flatMap((group) => group.voices);
 
+/** Curated Gemini TTS models (mirrors GEMINI_TTS_MODELS in backend/models/gemini_tts.py).
+ * The picker prefers the backend-advertised list (models.gemini_tts.gemini_models)
+ * and falls back to this when talking to an older backend. */
+const GEMINI_MODEL_FALLBACK = [
+  ["gemini-3.1-flash-tts-preview", "Latest — expressive, low-latency"],
+  ["gemini-2.5-flash-preview-tts", "Previous Flash — low-latency fallback"],
+  ["gemini-2.5-pro-preview-tts", "Pro — higher quality, slower"],
+];
+const GEMINI_MODEL_DEFAULT = "gemini-3.1-flash-tts-preview";
+
 export function renderVoice(_route) {
   const screen = el("div", { class: "screen" },
     el("div", { class: "screen-head" }, el("h1", {}, "Voice")));
@@ -432,6 +442,28 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     geminiVoice.value = "Kore";
   }
   applyGeminiVoiceFilter();
+  // Per-request model picker. Options come from the backend gallery when
+  // available so the backend stays the source of truth; a saved custom model
+  // is retained like custom voices are.
+  const geminiModelChoices = (models.gemini_tts?.gemini_models?.length
+    ? models.gemini_tts.gemini_models.map((item) => [item.id, item.description])
+    : GEMINI_MODEL_FALLBACK);
+  const geminiModelDefault = models.gemini_tts?.default_model || GEMINI_MODEL_DEFAULT;
+  const geminiModel = el("select", { class: "input" },
+    el("option", { value: "" }, `Backend default (${geminiModelDefault})`),
+    ...geminiModelChoices.map(([id, desc]) => el("option", { value: id }, `${id} — ${desc}`)));
+  const storedGeminiModel = current.gemini_model || "";
+  if (!storedGeminiModel) {
+    geminiModel.value = "";
+  } else if (geminiModelChoices.some(([id]) => id === storedGeminiModel)) {
+    geminiModel.value = storedGeminiModel;
+  } else if (/^[A-Za-z0-9._-]{1,128}$/.test(storedGeminiModel)) {
+    const customModel = el("option", { value: storedGeminiModel }, `${storedGeminiModel} — custom (saved)`);
+    geminiModel.append(customModel);
+    geminiModel.value = storedGeminiModel;
+  } else {
+    geminiModel.value = "";
+  }
   const geminiStyle = el("input", { type: "text", class: "input", maxlength: "500",
     value: current.gemini_style || "",
     placeholder: "e.g. warm documentary narrator, measured pace (optional)" });
@@ -453,6 +485,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       + "starting the dashboard — the environment variable always takes priority over a key "
       + "saved here."));
   const geminiGrid = el("div", { class: "pref-grid" },
+    field("Gemini model", geminiModel,
+      "Per-take model override — blank uses the backend default. Pro sounds better on long-form; Flash is faster."),
     field("Gemini voice",
       el("div", { class: "stack" }, geminiVoiceFilter, geminiVoice, geminiVoiceCount),
       "Grouped by delivery — filter by name or vibe (e.g. “warm”, “calm”). Custom gallery names stay selectable."),
@@ -679,7 +713,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       step_instruction: instruction.value.trim(),
       speaker: builtInQwen ? voice.value.slice(qwenBuiltInPrefix.length) : "Ryan",
       voice_instruction: builtInQwen ? voiceInstruction.value.trim()
-        : (provider.value === "breeze_tts_2" ? breezeDirection.value.trim() : ""),
+        : (provider.value === "breeze_tts_2" ? breezeDirection.value.trim()
+          : (provider.value === "gemini_tts" ? geminiStyle.value.trim() : "")),
       guidance_scale: null, inference_timesteps: null, num_steps: null, speed: null,
       breeze_mode: "eager",
       use_performance_tags: performance.useTags.checked
@@ -692,6 +727,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       // direction travels in the provider-specific fields below.
       settings.gemini_voice = geminiVoice.value;
       settings.gemini_style = geminiStyle.value.trim();
+      settings.gemini_model = geminiModel.value || null;
     }
     if (provider.value === "breeze_tts_2") {
       settings.breeze_mode = breezeEngine.value;

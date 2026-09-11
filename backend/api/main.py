@@ -25,7 +25,7 @@ from backend.editorial import (
     EditPlan, EditorialTemplate, MotionPrimitive, compile_edit_plan_html,
 )
 from backend.models import LocalLLMBackend
-from backend.models.gemini_tts import GeminiTTSBackend
+from backend.models.gemini_tts import GEMINI_TTS_MODELS, GeminiTTSBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
 from backend.pipeline import PipelineService
@@ -746,6 +746,14 @@ def create_app(
             readiness = getattr(backend, "readiness", None)
             if callable(readiness):
                 entry["readiness"] = readiness()
+            if name == "gemini_tts" and isinstance(backend, GeminiTTSBackend):
+                # Curated model gallery: the Voice page builds its model picker
+                # from this so the backend stays the source of truth.
+                entry["gemini_models"] = [
+                    {"id": model_id, "description": desc}
+                    for model_id, desc in GEMINI_TTS_MODELS
+                ]
+                entry["default_model"] = backend.model
             models[name] = entry
         return {"models": models}
 

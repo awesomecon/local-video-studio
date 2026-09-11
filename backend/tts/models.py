@@ -87,6 +87,11 @@ class NarrationRequest(BaseModel):
     # speaks preset voices only and cannot clone a reference audio; it also
     # requires a user-supplied API key, so it works like a built-in voice.
     gemini_voice: str | None = Field(default=None, max_length=32, pattern=r"^[A-Z][A-Za-z]{2,31}$")
+    # Google Gemini TTS model override (ignored by the other providers). None
+    # means "use the backend default" (backends.gemini_tts.model). Well-formed
+    # identifiers outside the curated gallery are passed through; Google
+    # reports unknown models with a clear error.
+    gemini_model: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9._-]{1,128}$")
     # Apply this provider's delivery-tag script to matching scene segments
     # for Fish S2 Pro and Higgs TTS 3. Other providers receive clean text.
     use_performance_tags: bool = False

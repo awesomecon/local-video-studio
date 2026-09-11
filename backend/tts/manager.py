@@ -357,6 +357,7 @@ class TTSManager:
                     "speed": request.speed,
                     "breeze_mode": request.breeze_mode,
                     "voice_name": request.gemini_voice,
+                    "gemini_model": request.gemini_model,
                 }
                 try:
                     result = backend.generate(GenerationRequest(
@@ -815,6 +816,7 @@ class TTSManager:
                     "speed": request.speed,
                     "breeze_mode": request.breeze_mode,
                     "voice_name": request.gemini_voice,
+                    "gemini_model": request.gemini_model,
                 },
             ))
         finally:

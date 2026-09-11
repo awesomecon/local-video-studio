@@ -126,6 +126,36 @@ def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() ->
     assert "Math.min(3600" in recorder
 
 
+def test_gemini_model_picker_is_backend_driven_with_fallback() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The picker prefers the backend-advertised gallery, with a hardcoded
+    # fallback for older backends; all three curated models are present.
+    assert "GEMINI_MODEL_FALLBACK" in source
+    assert "models.gemini_tts?.gemini_models" in source
+    assert "gemini-3.1-flash-tts-preview" in source
+    assert "gemini-2.5-flash-preview-tts" in source
+    assert "gemini-2.5-pro-preview-tts" in source
+    assert 'field("Gemini model", geminiModel,' in source
+    assert "settings.gemini_model = geminiModel.value || null;" in source
+
+
+def test_gemini_style_prompt_reaches_the_backend_as_voice_instruction() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The style field is sent as voice_instruction (the backend's stylePrompt
+    # input); without this mapping the prompt would be saved but never spoken.
+    assert '(provider.value === "gemini_tts" ? geminiStyle.value.trim() : "")' in source
+
+
+def test_frontend_model_fallback_matches_backend_gallery() -> None:
+    from backend.models.gemini_tts import GEMINI_TTS_MODELS
+
+    source = VOICE_JS.read_text(encoding="utf-8")
+    for model_id, _ in GEMINI_TTS_MODELS:
+        assert model_id in source
+
+
 def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
