@@ -1,0 +1,65 @@
+name: Feature request
+description: Suggest a focused workflow, backend, usability, or platform improvement
+title: "[Feature]: "
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user outcome first. For large architecture changes, please wait for agreement before starting implementation.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Core workflow / project management
+        - Browser UI / accessibility
+        - Model backend
+        - Voice / audio
+        - Timeline / rendering
+        - Platform support / packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What is difficult or impossible today, and who encounters it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the behavior rather than only a particular implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: approach
+    attributes:
+      label: Possible approach
+      description: Optional. Include alternatives or tradeoffs if you have considered them.
+
+  - type: textarea
+    id: backend
+    attributes:
+      label: Backend or dependency details
+      description: For model integrations, include license, approximate weight size, runtime/API, VRAM needs, and whether processing remains local.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Project constraints
+      options:
+        - label: This can preserve mock mode without downloading model weights in tests.
+          required: true
+        - label: This can preserve localhost-safe defaults and no telemetry.
+          required: true
+        - label: I searched existing issues for a similar request.
+          required: true
