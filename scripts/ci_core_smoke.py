@@ -30,6 +30,18 @@ def write_report(name: str, payload: dict) -> None:
     (REPORTS / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def disable_backends(config: object) -> None:
+    """Disable every backend without assuming it owns a local worker."""
+
+    for name in type(config.backends).model_fields:
+        backend = getattr(config.backends, name)
+        # Cloud/API backends do not have local worker lifecycle fields. Keep
+        # the smoke setup capability-aware as new backend shapes are added.
+        if "managed" in type(backend).model_fields:
+            backend.managed = False
+        backend.enabled = False
+
+
 def prerequisites() -> dict:
     from backend.rendering.binaries import discover_binaries
     from playwright.sync_api import sync_playwright
@@ -184,10 +196,7 @@ def smoke(completed: list[str]) -> None:
         for name in type(config.paths).model_fields:
             if name != "minimum_free_disk_gb":
                 setattr(config.paths, name, root / name)
-        for name in type(config.backends).model_fields:
-            backend = getattr(config.backends, name)
-            backend.managed = False
-            backend.enabled = False
+        disable_backends(config)
         config_path = root / "config.json"
         config_path.write_text(config.model_dump_json(), encoding="utf-8")
         with running_app(config_path) as client:

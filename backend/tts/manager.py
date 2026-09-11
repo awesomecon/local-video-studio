@@ -41,12 +41,15 @@ _PROVIDER_DIR = {
     "qwen_tts": "qwen", "step_audio_editx": "step", "chatterbox": "chatterbox",
     "fish_s2_pro": "fish", "voxcpm2": "voxcpm", "omnivoice": "omnivoice",
     "index_tts_2_5": "index", "breeze_tts_2": "breeze", "higgs_tts_3": "higgs",
+    "gemini_tts": "gemini",
 }
 _DEFAULT_CHUNK = {
     "qwen_tts": 60.0, "step_audio_editx": 20.0, "chatterbox": 45.0,
     "fish_s2_pro": 30.0, "voxcpm2": 30.0, "omnivoice": 30.0, "index_tts_2_5": 30.0,
     # Provisional until the 15/30/45 s chunk benchmark lands (see handoff plan).
     "breeze_tts_2": 30.0, "higgs_tts_3": 30.0,
+    # Gemini TTS output is bounded per call; keep narration lines short.
+    "gemini_tts": 30.0,
 }
 
 
@@ -278,7 +281,7 @@ class TTSManager:
             self.get_voice_profile(project_id, request.voice_profile_id)
             if request.voice_profile_id else None
         )
-        if profile is None and request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3"}:
+        if profile is None and request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts"}:
             raise ValueError(f"{request.provider} requires an authorized reference voice")
         if profile is None and request.enhance_with_step:
             raise ValueError("Step enhancement requires an authorized reference voice")
@@ -328,6 +331,7 @@ class TTSManager:
         backend = self.pipeline.registry.get(request.provider)
         outputs: list[Path] = []
         failures: list[str] = []
+        last_result: GenerationResult | None = None
         worker_started = self.pipeline.tts_workers.ensure_running_if_managed(request.provider)
         try:
             backend.load()
@@ -353,6 +357,8 @@ class TTSManager:
                     "num_steps": request.num_steps,
                     "speed": request.speed,
                     "breeze_mode": request.breeze_mode,
+                    "voice_name": request.gemini_voice,
+                    "gemini_model": request.gemini_model,
                 }
                 try:
                     result = backend.generate(GenerationRequest(
@@ -361,6 +367,7 @@ class TTSManager:
                         references=(reference,) if reference is not None else (),
                         settings=settings,
                     ))
+                    last_result = result
                     output = result.outputs[0]
                     duration = wav_duration(output)
                     metadata = {
@@ -409,6 +416,8 @@ class TTSManager:
                     self.pipeline.tts_workers.stop(request.provider)
         if failures:
             raise RuntimeError("; ".join(failures))
+        if last_result is None:
+            raise RuntimeError("Narration generation produced no audio chunks")
         if request.enhance_with_step:
             assert profile is not None
             outputs = self._enhance_with_step(
@@ -423,8 +432,11 @@ class TTSManager:
             outputs=(take,),
             metadata={
                 "backend": request.provider,
-                "model": backend.descriptor().model_name,
-                "model_version": backend.descriptor().model_version,
+                "model": str(last_result.metadata.get("model") or backend.descriptor().model_name),
+                "model_version": str(
+                    last_result.metadata.get("model_version")
+                    or backend.descriptor().model_version
+                ),
                 "workflow_version": "tts-narration-v4",
                 "seed": request.seed,
                 "prompt": text,
@@ -810,6 +822,8 @@ class TTSManager:
                     "num_steps": request.num_steps,
                     "speed": request.speed,
                     "breeze_mode": request.breeze_mode,
+                    "voice_name": request.gemini_voice,
+                    "gemini_model": request.gemini_model,
                 },
             ))
         finally:
@@ -878,8 +892,10 @@ class TTSManager:
         }
         take_result = GenerationResult(outputs=(take,), metadata={
             "backend": request.provider,
-            "model": backend.descriptor().model_name,
-            "model_version": backend.descriptor().model_version,
+            "model": str(result.metadata.get("model") or backend.descriptor().model_name),
+            "model_version": str(
+                result.metadata.get("model_version") or backend.descriptor().model_version
+            ),
             "workflow_version": "tts-narration-v3",
             "seed": source_asset.seed,
             "prompt": source_asset.prompt,

@@ -15,7 +15,7 @@ from backend.schemas import utc_now
 TTSProviderName = Literal[
     "qwen_tts", "step_audio_editx", "chatterbox",
     "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2",
-    "higgs_tts_3",
+    "higgs_tts_3", "gemini_tts",
 ]
 QwenSpeaker = Literal[
     "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee",
@@ -83,6 +83,15 @@ class NarrationRequest(BaseModel):
     # Breeze TTS 2 execution engine (ignored by the other providers):
     # "eager" ≈7.7 GiB VRAM, "fast" ≈14.4 GiB and needs ~20 GiB free.
     breeze_mode: Literal["eager", "fast"] = "eager"
+    # Google Gemini TTS preset voice (ignored by the other providers). Gemini
+    # speaks preset voices only and cannot clone a reference audio; it also
+    # requires a user-supplied API key, so it works like a built-in voice.
+    gemini_voice: str | None = Field(default=None, max_length=32, pattern=r"^[A-Z][A-Za-z]{2,31}$")
+    # Google Gemini TTS model override (ignored by the other providers). None
+    # means "use the backend default" (backends.gemini_tts.model). Well-formed
+    # identifiers outside the curated gallery are passed through; Google
+    # reports unknown models with a clear error.
+    gemini_model: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9._-]{1,128}$")
     # Apply this provider's delivery-tag script to matching scene segments
     # for Fish S2 Pro and Higgs TTS 3. Other providers receive clean text.
     use_performance_tags: bool = False

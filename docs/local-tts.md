@@ -4,6 +4,11 @@ Local Video Studio keeps dependency-heavy speech models in isolated Python envir
 the shared ComfyUI service). The dashboard talks to one loopback worker per provider; it does not
 import model packages into the application environment.
 
+One provider is not local: the optional **Gemini TTS** cloud provider sends narration text to
+Google's API when the user picks it and supplies their own key. See
+[Gemini TTS (remote provider)](gemini-tts.md) for the full privacy contract, setup, and
+limitations.
+
 Providers, by runtime:
 
 | Provider | Runtime | Port(s) |

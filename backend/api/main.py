@@ -18,13 +18,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.core import AppConfig, inspect_environment, load_config
+from backend.core import AppConfig, SecretValidationError, inspect_environment, load_config
 from backend.core.h3_policy import h3_policy_payload
 from backend.core.ports import select_application_port
 from backend.editorial import (
     EditPlan, EditorialTemplate, MotionPrimitive, compile_edit_plan_html,
 )
 from backend.models import LocalLLMBackend
+from backend.models.gemini_tts import GEMINI_TTS_MODELS, GeminiTTSBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
 from backend.pipeline import PipelineService
@@ -414,9 +415,14 @@ class LLMSelectionRequest(BaseModel):
     project_id: str | None = None
 
 
+class GeminiKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key: str = Field(min_length=1, max_length=512)
+
+
 _COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "wan_comfyui", "ace_step_comfyui"})
 _TTS_BACKENDS = frozenset({
-    "qwen_tts", "step_audio_editx", "chatterbox", "higgs_tts_3",
+    "qwen_tts", "step_audio_editx", "chatterbox", "higgs_tts_3", "gemini_tts",
 })
 
 
@@ -463,14 +469,44 @@ def _model_runtime_status(
             ),
             "actions": ["release"],
         }
+    if name == "gemini_tts":
+        backend_config = settings.backends.gemini_tts
+        backend = service.registry.get("gemini_tts")
+        key_status = (
+            backend.key_status() if isinstance(backend, GeminiTTSBackend)
+            else {"configured": False, "source": "none", "api_key_env": backend_config.api_key_env}
+        )
+        if not backend_config.enabled:
+            state, detail = "disabled", "Disabled in the configuration."
+        elif key_status.get("configured"):
+            state, detail = "ready", (
+                "Ready. Generated narration text and any delivery direction are sent "
+                "to Google's Gemini API on demand, using the user's own key "
+                f"({backend_config.api_key_env})."
+            )
+        else:
+            state = "needs_key"
+            detail = (
+                "The configured Gemini API key is malformed; replace it."
+                if key_status.get("invalid")
+                else "Needs a Google AI Studio API key (Voice page, or "
+                     f"{backend_config.api_key_env})."
+            )
+        return {
+            "state": state,
+            "ownership": "remote-cloud-api",
+            "detail": detail,
+            "actions": [],
+        }
     if name in _TTS_BACKENDS:
         backend_config = getattr(settings.backends, name)
+        managed = bool(getattr(backend_config, "managed", False))
         return {
             "state": "on_demand" if backend_config.enabled else "disabled",
-            "ownership": "studio-managed-service" if backend_config.managed else "external-local-service",
+            "ownership": "studio-managed-service" if managed else "external-local-service",
             "detail": (
                 "Starts for narration and releases after the job."
-                if backend_config.managed
+                if managed
                 else "Configured as a local service; Studio does not infer its loaded model."
             ),
             "actions": [],
@@ -701,7 +737,7 @@ def create_app(
         names = (
             "qwen_tts", "step_audio_editx", "chatterbox",
             "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
-            "breeze_tts_2", "higgs_tts_3",
+            "breeze_tts_2", "higgs_tts_3", "gemini_tts",
         )
         models: dict[str, Any] = {}
         for name in names:
@@ -709,11 +745,19 @@ def create_app(
             entry: dict[str, Any] = {
                 **jsonable_encoder(asdict(backend.descriptor())),
                 "health": backend.health(),
-                "managed": getattr(settings.backends, name).managed,
+                "managed": bool(getattr(getattr(settings.backends, name, None), "managed", False)),
             }
             readiness = getattr(backend, "readiness", None)
             if callable(readiness):
                 entry["readiness"] = readiness()
+            if name == "gemini_tts" and isinstance(backend, GeminiTTSBackend):
+                # Curated model gallery: the Voice page builds its model picker
+                # from this so the backend stays the source of truth.
+                entry["gemini_models"] = [
+                    {"id": model_id, "description": desc}
+                    for model_id, desc in GEMINI_TTS_MODELS
+                ]
+                entry["default_model"] = backend.model
             models[name] = entry
         return {"models": models}
 
@@ -731,6 +775,47 @@ def create_app(
             return service.unload_tts_provider(provider)
         except BackendError as exc:
             raise HTTPException(status_code=503, detail=exc.as_dict()) from None
+
+    def _gemini_backend() -> GeminiTTSBackend:
+        backend = service.registry.get("gemini_tts")
+        if not isinstance(backend, GeminiTTSBackend):
+            raise HTTPException(status_code=503, detail="Gemini TTS is not registered on this backend.")
+        return backend
+
+    @application.get("/api/tts/gemini/key")
+    def gemini_key_status() -> dict[str, Any]:
+        """Report key availability without ever returning the key itself."""
+
+        backend = _gemini_backend()
+        return {
+            **backend.key_status(),
+            "enabled": settings.backends.gemini_tts.enabled,
+            "detail": backend.health().get("detail", ""),
+        }
+
+    @application.put("/api/tts/gemini/key", status_code=status.HTTP_204_NO_CONTENT)
+    def gemini_key_save(request: GeminiKeyRequest) -> None:
+        """Store a Google AI Studio key in a user-private local secret file.
+
+        The key is validated before anything is written, is never echoed back
+        by any endpoint, and never leaves the machine except as the
+        ``x-goog-api-key`` header on Gemini TTS requests the user starts.
+        An environment variable, when set, always takes precedence.
+        """
+
+        backend = _gemini_backend()
+        try:
+            backend.set_api_key(request.api_key)
+        except SecretValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except BackendError as exc:
+            raise HTTPException(status_code=503, detail=exc.as_dict()) from None
+
+    @application.delete("/api/tts/gemini/key", status_code=status.HTTP_204_NO_CONTENT)
+    def gemini_key_clear() -> None:
+        """Delete the locally stored key; environment variables are untouched."""
+
+        _gemini_backend().clear_api_key()
 
     @application.get("/api/captions/models")
     def captions_models() -> dict[str, Any]:
@@ -1316,14 +1401,42 @@ def create_app(
         try:
             if request.enhance_with_step and request.provider != "qwen_tts":
                 raise ValueError("Step enhancement is supported after Qwen generation")
+            if request.provider == "gemini_tts" and request.voice_profile_id:
+                raise ValueError(
+                    "Gemini TTS speaks its preset voices only and cannot clone a "
+                    "voice profile; clear the profile and pick a Gemini voice."
+                )
             if request.voice_profile_id:
                 service.tts.get_voice_profile(project_id, request.voice_profile_id)
-            elif request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3"}:
+            elif request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts"}:
                 raise ValueError(f"{request.provider} requires an authorized reference voice")
             elif request.enhance_with_step:
                 raise ValueError("Step enhancement requires an authorized reference voice")
             else:
                 service._project(project_id)
+            # Fail fast, before queueing a job, when the remote provider is not
+            # usable. Mock mode and test stand-ins are exempt: their backends
+            # are replaced in-process and never touch Google.
+            if request.provider == "gemini_tts":
+                backend = service.registry.get("gemini_tts")
+                if isinstance(backend, GeminiTTSBackend) and not service.mock_mode:
+                    if not settings.backends.gemini_tts.enabled:
+                        raise PipelineError(
+                            "Gemini TTS is disabled in the configuration; enable "
+                            "backends.gemini_tts to use it."
+                        )
+                    key = backend.key_status()
+                    if not key["configured"]:
+                        if key.get("invalid"):
+                            raise PipelineError(
+                                "The configured Gemini API key is malformed. Replace it "
+                                f"in the Gemini panel or {backend.api_key_env}."
+                            )
+                        raise PipelineError(
+                            "Gemini TTS needs a Google AI Studio API key. Add one in "
+                            f"the Gemini panel on this page, or set {backend.api_key_env} "
+                            "in the environment."
+                        )
             # Validate the script source before returning a queued job. Otherwise
             # an unplanned project fails later with a raw missing plan.json error.
             service.tts.resolve_narration_text(project_id, request.text)

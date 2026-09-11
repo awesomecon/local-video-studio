@@ -155,6 +155,21 @@ backends:
     python_path: "~/ai/services/sglang-omni/.venv/bin/python"
     model_path: "~/ai/models/tts/higgs/bosonai-higgs-tts-3-4b"
     startup_timeout_seconds: 120
+  # Remote Google Gemini TTS (the one cloud provider; see docs/gemini-tts.md).
+  # Always registered, but generates only when you pick it in the Voice page
+  # and a Google AI Studio key is available: the GEMINI_API_KEY environment
+  # variable, or a key saved from the Voice page (user-private file; the
+  # environment variable always wins). Narration text and an optional delivery
+  # direction are sent to Google —
+  # no audio, voice samples, or other project content. It speaks Google's
+  # preset voices only and cannot clone a recorded profile.
+  gemini_tts:
+    enabled: true
+    model: gemini-3.1-flash-tts-preview
+    voice: Kore
+    api_key_env: GEMINI_API_KEY
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    timeout_seconds: 180
 
 render:
   fps: 24

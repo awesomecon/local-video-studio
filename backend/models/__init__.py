@@ -48,6 +48,11 @@ from .lane_resolver import (
     describe_lane_targets,
     resolve_lane_target,
 )
+from .gemini_tts import (
+    GEMINI_TTS_MODELS,
+    GEMINI_VOICES,
+    GeminiTTSBackend,
+)
 from .local_llm import LocalLLMBackend
 from .ideogram_prompt import (
     IdeogramComposition,
@@ -94,6 +99,9 @@ __all__ = [
     "DETERMINISTIC_HANDLERS",
     "FluxBackend",
     "FasterWhisperBackend",
+    "GEMINI_TTS_MODELS",
+    "GEMINI_VOICES",
+    "GeminiTTSBackend",
     "GenerationRequest",
     "GenerationResult",
     "GeneratorBackend",

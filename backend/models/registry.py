@@ -7,6 +7,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from backend.core.resources import resource_path
+from backend.core.secrets import LocalSecretStore
 
 from .ace_step_comfyui import ACEStepComfyUIBackend
 from .adapters import (
@@ -22,6 +23,7 @@ from .adapters import (
 from .base import BackendDescriptor, Capability, GeneratorBackend
 from .comfyui import ComfyUIBackend
 from .faster_whisper import FasterWhisperBackend
+from .gemini_tts import GeminiTTSBackend
 from .local_llm import LocalLLMBackend
 from .mock import MockGeneratorBackend, MockLLMBackend
 from .tts_comfyui import FishS2ProBackend, IndexTTS25Backend, VoxCPM2Backend
@@ -89,6 +91,7 @@ class BackendRegistry:
         config: Mapping[str, Any],
         *,
         mock_mode: bool = False,
+        secret_store: LocalSecretStore | None = None,
     ) -> BackendRegistry:
         registry = cls()
         llm = config.get("llm", {})
@@ -130,6 +133,19 @@ class BackendRegistry:
         ):
             tts = backends.get(name, {})
             registry.register(TTSServiceBackend(name, tts.get("endpoint")))
+        # Remote cloud TTS (opt-in, key-gated narration and delivery direction). Always
+        # registered so the Voice page can show its honest readiness; it
+        # generates only when the user picks it and supplies a key.
+        gemini = backends.get("gemini_tts", {})
+        registry.register(GeminiTTSBackend(
+            model=str(gemini.get("model", "gemini-3.1-flash-tts-preview")),
+            voice=str(gemini.get("voice", "Kore")),
+            api_key_env=str(gemini.get("api_key_env", "GEMINI_API_KEY")),
+            base_url=str(gemini.get("base_url", "https://generativelanguage.googleapis.com/v1beta")),
+            timeout_seconds=float(gemini.get("timeout_seconds", 180)),
+            enabled=bool(gemini.get("enabled", True)),
+            secret_store=secret_store,
+        ), name="gemini_tts")
         tts_workflows_dir = resource_path("workflows", "comfyui", "tts")
         registry.register(FishS2ProBackend(
             endpoint=comfy_endpoint,

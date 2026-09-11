@@ -106,3 +106,47 @@ def test_secret_environment_overrides_are_rejected_without_echo() -> None:
     with pytest.raises(ConfigurationError) as raised:
         load_config(environ={"LOCAL_VIDEO_STUDIO__LLM__API_KEY": "synthetic-secret-value"})
     assert "synthetic-secret-value" not in str(raised.value)
+
+
+def test_gemini_tts_defaults_are_on_but_inert_without_a_key() -> None:
+    config = load_config(environ={})
+    gemini = config.backends.gemini_tts
+    assert gemini.enabled is True
+    assert gemini.model == "gemini-3.1-flash-tts-preview"
+    assert gemini.voice == "Kore"
+    assert gemini.api_key_env == "GEMINI_API_KEY"
+    assert gemini.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert gemini.timeout_seconds == 180
+    # The provider is intentionally remote; it must not trip the loopback
+    # policy that guards every local service endpoint.
+    assert config.network.bind_address == "127.0.0.1"
+
+
+def test_gemini_tts_environment_overrides() -> None:
+    config = load_config(environ={
+        "LOCAL_VIDEO_STUDIO__backends__gemini_tts__model": "gemini-2.5-pro-preview-tts",
+        "LOCAL_VIDEO_STUDIO__backends__gemini_tts__voice": "Charon",
+        "LOCAL_VIDEO_STUDIO__backends__gemini_tts__enabled": "false",
+    })
+    assert config.backends.gemini_tts.model == "gemini-2.5-pro-preview-tts"
+    assert config.backends.gemini_tts.voice == "Charon"
+    assert config.backends.gemini_tts.enabled is False
+
+
+def test_gemini_tts_rejects_insecure_and_malformed_settings() -> None:
+    with pytest.raises(ConfigurationError, match="gemini_tts.base_url"):
+        load_config(environ={
+            "LOCAL_VIDEO_STUDIO__backends__gemini_tts__base_url":
+                "http://gemini-relay.example.com/v1beta",
+        })
+    # A loopback HTTPS proxy (user-managed) stays allowed.
+    load_config(environ={
+        "LOCAL_VIDEO_STUDIO__backends__gemini_tts__base_url":
+            "https://127.0.0.1:9443/v1beta",
+    })
+    with pytest.raises(ValueError, match="environment-variable name"):
+        AppConfig(backends={"gemini_tts": {"api_key_env": "bad-name!"}})
+    with pytest.raises(ValueError, match="model must be a Gemini model identifier"):
+        AppConfig(backends={"gemini_tts": {"model": "not/a/model"}})
+    with pytest.raises(ValueError, match="preset voice name"):
+        AppConfig(backends={"gemini_tts": {"voice": "lowercase"}})

@@ -72,6 +72,19 @@
 .field > label { font-size: var(--text-sm); color: var(--text-2); font-weight: 550; }
 .field .hint { font-size: var(--text-xs); color: var(--text-3); }
 .field .error-text { font-size: var(--text-xs); color: var(--critical); }
+.gemini-key-status {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
 .field input[type="text"],
 .field input[type="number"],
 .field input[type="url"],

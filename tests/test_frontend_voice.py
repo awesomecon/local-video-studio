@@ -17,7 +17,7 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
     assert 'const breezeGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("3. Generate narration with a local model"')
+    panel_start = source.index('section("3. Generate narration with a model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "breezeGrid," in source[panel_start:panel_end]
 
@@ -40,9 +40,9 @@ def test_scene_chunk_combining_is_saved_and_sent() -> None:
 def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
-    # The panel is built and attached to the local-model narration section.
+    # The panel is built and attached to the narration-generation section.
     assert "performancePanel(project, current, tags, provider, script, refresh)" in source
-    panel_start = source.index('section("3. Generate narration with a local model"')
+    panel_start = source.index('section("3. Generate narration with a model"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]
 
@@ -66,7 +66,7 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
     # settings and are stripped from the NarrationRequest body.
     assert "&& PERFORMANCE_TAG_PROVIDERS.has(provider.value)" in source
     assert "provider: provider.value" in source
-    assert "intensity: _intensity, performance_notes: _notes, ...requestSettings" in source
+    assert "intensity: _intensity, performance_notes: _notes, gemini_style: _style, ...requestSettings" in source
     assert "generatePerformanceTags" in source
     assert "savePerformanceTags" in source
     assert "clearPerformanceTags" in source
@@ -124,3 +124,67 @@ def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() ->
     assert "/tts/narrations/import" in api
     assert 'voiceover ? "Record your complete voiceover"' in recorder
     assert "Math.min(3600" in recorder
+
+
+def test_gemini_model_picker_is_backend_driven_with_fallback() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The picker prefers the backend-advertised gallery, with a hardcoded
+    # fallback for older backends; all three curated models are present.
+    assert "GEMINI_MODEL_FALLBACK" in source
+    assert "models.gemini_tts?.gemini_models" in source
+    assert "gemini-3.1-flash-tts-preview" in source
+    assert "gemini-2.5-flash-preview-tts" in source
+    assert "gemini-2.5-pro-preview-tts" in source
+    assert 'field("Gemini model", geminiModel,' in source
+    assert "settings.gemini_model = geminiModel.value || null;" in source
+
+
+def test_gemini_style_prompt_reaches_the_backend_as_voice_instruction() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The style field is sent as voice_instruction; the backend incorporates it
+    # into the text prompt because prebuiltVoiceConfig accepts voiceName only.
+    assert '(provider.value === "gemini_tts" ? geminiStyle.value.trim() : "")' in source
+
+
+def test_frontend_model_fallback_matches_backend_gallery() -> None:
+    from backend.models.gemini_tts import GEMINI_TTS_MODELS
+
+    source = VOICE_JS.read_text(encoding="utf-8")
+    for model_id, _ in GEMINI_TTS_MODELS:
+        assert model_id in source
+
+
+def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The provider is offered in the model list and labelled as remote.
+    assert 'modelOption("gemini_tts", "Gemini TTS (Google, cloud)", models)' in source
+    assert "gemini_tts: 30" in source
+    assert "Gemini TTS (Google)" in source
+    # Key-required state is surfaced in the option labels.
+    assert 'needsKey ? "needs API key"' in source
+
+    # The panel is built and attached to the narration-generation section.
+    assert 'const geminiGrid = el("div", { class: "pref-grid" }' in source
+    panel_start = source.index('section("3. Generate narration with a model"')
+    panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
+    panel = source[panel_start:panel_end]
+    assert "geminiGrid," in panel
+    assert "geminiNote," in panel
+
+    # The profile selector is suspended for Gemini and the generate button
+    # stays disabled until a key is present.
+    assert "voice.disabled = gemini;" in source
+    assert 'provider.value === "gemini_tts" && !geminiReady()' in source
+    assert 'badge("good", "Ready to generate")' in source
+    assert 'badge("warning", "API key needed")' in source
+    assert 'badge("offline", "Gemini disabled")' in source
+    assert 'entry?.health?.remote !== true' in source
+    assert "Gemini API key required" in source
+    # Saving/removing the key talks to the dedicated endpoints.
+    api_js = VOICE_JS.parent.parent / "api.js"
+    api_source = api_js.read_text(encoding="utf-8")
+    assert "export function saveGeminiKey(config" in api_source
+    assert "export function clearGeminiKey(config" in api_source

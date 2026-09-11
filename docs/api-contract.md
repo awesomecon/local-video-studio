@@ -18,6 +18,9 @@ Core endpoints:
 - `POST /api/projects/{project_id}/render`
 - `POST /api/projects/{project_id}/tts/narrations/import?name=...` (PCM WAV body; stores and
   activates an immutable user-recorded voiceover take)
+- `GET /api/tts/gemini/key` (key availability only: `configured`, `source`, never the value)
+- `PUT /api/tts/gemini/key` (stores the key in a user-private local secret file; `204`)
+- `DELETE /api/tts/gemini/key` (deletes the stored key; `204`)
 - `POST /api/scenes/{scene_id}/generate`
 - `POST /api/scenes/{scene_id}/regenerate`
 - `POST /api/scenes/{scene_id}/approve`
@@ -82,3 +85,31 @@ All reads, edits, regeneration, and deletion affect only that provider's script.
   script, `422` validation failure.
 - `DELETE /api/projects/{project_id}/tts/performance-tags`
   Removes the stored script. Returns `{ deleted: true }`. `404` for an unknown project.
+
+## Gemini TTS key management
+
+`gemini_tts` is the remote TTS provider (see `docs/gemini-tts.md`). Its key is resolved at
+request time in this order: the `api_key_env` environment variable (default
+`GEMINI_API_KEY`), then a file saved via `PUT /api/tts/gemini/key`.
+
+- `GET /api/tts/gemini/key` returns `{ configured, invalid,
+  source: "environment"|"file"|"none", api_key_env, secret_file, enabled, detail }`. It never
+  returns the key or a fragment of it.
+- `PUT /api/tts/gemini/key` accepts `{ "api_key": "..." }` and writes a user-private file under
+  the application data directory (`0600` on POSIX, user-only ACL on Windows). Invalid keys (empty,
+  whitespace, or control characters) are
+  rejected with `422` and nothing is written. Successful saves return `204` without echoing the
+  value.
+- `DELETE /api/tts/gemini/key` removes the file (environment variables are untouched) and
+  returns `204`.
+
+`POST /api/projects/{project_id}/tts/generate` with `provider: "gemini_tts"` answers `409`
+before queueing when the provider is disabled or no key is configured, and `422` when a voice
+profile is combined with the provider (Gemini cannot clone). An optional `gemini_model`
+request field overrides the configured model for that take (any well-formed Gemini TTS model
+identifier; unknown IDs fail that take with a clear `model_unavailable` error). While generation
+runs, only narration text, the optional delivery direction, and the key (as a
+header) leave the machine.
+
+`GET /api/tts/models` includes a `gemini_models` gallery (`[{ id, description }]`) and the
+`default_model` on the `gemini_tts` entry; the Voice page builds its model picker from it.
