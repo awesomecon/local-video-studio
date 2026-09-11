@@ -84,7 +84,7 @@ answers narration requests with a `409` that tells you exactly what to do.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Register the provider. `false` hides generation behind a config error. |
-| `model` | `gemini-2.5-flash-preview-tts` | Any Gemini TTS model identifier you have access to (e.g. `gemini-2.5-pro-preview-tts`). |
+| `model` | `gemini-3.1-flash-tts-preview` | Latest low-latency expressive TTS model. Any Gemini TTS model identifier you have access to (e.g. `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts`). |
 | `voice` | `Kore` | Default preset voice when the Voice page leaves the voice unset. |
 | `api_key_env` | `GEMINI_API_KEY` | Environment variable checked first for the key. |
 | `base_url` | `https://generativelanguage.googleapis.com/v1beta` | Must be HTTPS (a loopback HTTP proxy is the only exception). |

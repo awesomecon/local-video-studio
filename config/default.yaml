@@ -164,7 +164,7 @@ backends:
   # preset voices only and cannot clone a recorded profile.
   gemini_tts:
     enabled: true
-    model: gemini-2.5-flash-preview-tts
+    model: gemini-3.1-flash-tts-preview
     voice: Kore
     api_key_env: GEMINI_API_KEY
     base_url: "https://generativelanguage.googleapis.com/v1beta"

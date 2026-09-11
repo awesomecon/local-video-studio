@@ -18,5 +18,5 @@ backends:
   # prefer. Do not put the API key here — use the GEMINI_API_KEY environment
   # variable or save a key from the Voice page.
   gemini_tts:
-    model: "gemini-2.5-flash-preview-tts"
+    model: "gemini-3.1-flash-tts-preview"
     voice: "Kore"

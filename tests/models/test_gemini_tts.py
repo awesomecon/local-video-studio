@@ -102,7 +102,7 @@ def test_generate_sends_key_header_and_expected_wire_shape(tmp_path, monkeypatch
     assert "env-key" in seen["header"]
     assert "env-key" not in seen["url"]
     assert seen["url"].endswith(
-        "/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+        "/v1beta/models/gemini-3.1-flash-tts-preview:generateContent"
     )
     body = seen["body"]
     assert body["contents"] == [{"parts": [{"text": "Hello, world."}]}]

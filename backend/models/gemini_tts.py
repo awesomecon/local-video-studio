@@ -17,12 +17,11 @@ public REST surface through ``httpx`` — no new dependencies.
 from __future__ import annotations
 
 import base64
-import logging
 import os
 import re
 import wave
+from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
 
 import httpx
 
@@ -36,11 +35,9 @@ from .base import (
 )
 from .errors import BackendError, BackendErrorCode, redact_secrets
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_API_KEY_ENV = "GEMINI_API_KEY"
-DEFAULT_MODEL = "gemini-2.5-flash-preview-tts"
+DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
 DEFAULT_VOICE = "Kore"
 SECRET_STORE_NAME = "gemini_tts_api_key"
 
@@ -107,9 +104,6 @@ class GeminiTTSBackend(GeneratorBackend):
         self.enabled = enabled
         self.secret_store = secret_store
         self._client_factory = client_factory
-        # A generated key, if any, is kept in the local store only; this
-        # attribute is never populated and never appears in logs or errors.
-        self._active_keys: set[str] = set()
 
     def __repr__(self) -> str:
         return (
@@ -521,10 +515,8 @@ class GeminiTTSBackend(GeneratorBackend):
         )
 
 
-def _write_pcm_wav(path, pcm: bytes, sample_rate: int) -> None:
-    import wave as _wave
-
-    with _wave.open(str(path), "wb") as output:
+def _write_pcm_wav(path: Path | str, pcm: bytes, sample_rate: int) -> None:
+    with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
         output.setframerate(sample_rate)

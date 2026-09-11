@@ -16,38 +16,66 @@ import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
 const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
 
-/** Preset voices for the remote Gemini TTS provider (see docs/gemini-tts.md). */
-const GEMINI_VOICE_OPTIONS = [
-  ["Puck", "upbeat, engaging"],
-  ["Charon", "informative, composed"],
-  ["Kore", "firm, steady"],
-  ["Fenrir", "excitable, high energy"],
-  ["Leda", "youthful, bright"],
-  ["Orus", "firm, assertive"],
-  ["Aoede", "breezy, lighthearted"],
-  ["Callirrhoe", "airy, gentle"],
-  ["Autonoe", "clear, neutral"],
-  ["Enceladus", "breathy, intimate"],
-  ["Iapetus", "friendly, conversational"],
-  ["Umbriel", "neutral, balanced"],
-  ["Algieba", "smooth, assured"],
-  ["Despina", "soft, calm"],
-  ["Erinome", "gentle, soothing"],
-  ["Algenib", "easy-going, relaxed"],
-  ["Rasalgethi", "clear, articulate"],
-  ["Laomedeia", "bright, melodic"],
-  ["Achernar", "soft, mellow"],
-  ["Alnilam", "easy-going, natural"],
-  ["Schedar", "even, measured"],
-  ["Gacrux", "refined, precise"],
-  ["Pulcherrima", "warm, inviting"],
-  ["Achird", "friendly, approachable"],
-  ["Zubenelgenubi", "discreet, low"],
-  ["Vindemiatrix", "gentle, delicate"],
-  ["Sadachbia", "lively, animated"],
-  ["Sadaltager", "polished, smooth"],
-  ["Sulafat", "warm, expressive"],
+/** Preset voices for the remote Gemini TTS provider (see docs/gemini-tts.md).
+ * Grouped by delivery so 30 options stay scannable; the flat list below stays
+ * as the validation source of truth. */
+const GEMINI_VOICE_GROUPS = [
+  {
+    label: "Steady & clear",
+    voices: [
+      ["Kore", "firm, steady"],
+      ["Autonoe", "clear, neutral"],
+      ["Umbriel", "neutral, balanced"],
+      ["Rasalgethi", "clear, articulate"],
+      ["Gacrux", "refined, precise"],
+      ["Algieba", "smooth, assured"],
+    ],
+  },
+  {
+    label: "Warm & friendly",
+    voices: [
+      ["Pulcherrima", "warm, inviting"],
+      ["Sulafat", "warm, expressive"],
+      ["Achird", "friendly, approachable"],
+      ["Iapetus", "friendly, conversational"],
+      ["Alnilam", "easy-going, natural"],
+      ["Algenib", "easy-going, relaxed"],
+    ],
+  },
+  {
+    label: "Calm & gentle",
+    voices: [
+      ["Despina", "soft, calm"],
+      ["Erinome", "gentle, soothing"],
+      ["Vindemiatrix", "gentle, delicate"],
+      ["Callirrhoe", "airy, gentle"],
+      ["Achernar", "soft, mellow"],
+      ["Enceladus", "breathy, intimate"],
+    ],
+  },
+  {
+    label: "Bright & lively",
+    voices: [
+      ["Puck", "upbeat, engaging"],
+      ["Leda", "youthful, bright"],
+      ["Laomedeia", "bright, melodic"],
+      ["Fenrir", "excitable, high energy"],
+      ["Sadachbia", "lively, animated"],
+      ["Aoede", "breezy, lighthearted"],
+    ],
+  },
+  {
+    label: "Deep & measured",
+    voices: [
+      ["Charon", "informative, composed"],
+      ["Orus", "firm, assertive"],
+      ["Schedar", "even, measured"],
+      ["Zubenelgenubi", "discreet, low"],
+      ["Sadaltager", "polished, smooth"],
+    ],
+  },
 ];
+const GEMINI_VOICE_OPTIONS = GEMINI_VOICE_GROUPS.flatMap((group) => group.voices);
 
 export function renderVoice(_route) {
   const screen = el("div", { class: "screen" },
@@ -355,13 +383,55 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   // environment or from a 0600 file saved via this panel; only narration
   // text ever leaves this machine, and only when generating with this
   // provider. See docs/gemini-tts.md.
+  const geminiVoiceFilter = el("input", {
+    type: "search", class: "input",
+    placeholder: "Filter voices… e.g. warm, calm, Puck",
+    "aria-label": "Filter Gemini voices",
+  });
+  const geminiVoiceCount = el("div", { class: "hint" });
+  const geminiVoiceGroups = GEMINI_VOICE_GROUPS.map((group) => {
+    const options = group.voices.map(([name, desc]) =>
+      el("option", { value: name }, `${name} — ${desc}`));
+    const element = el("optgroup", { label: group.label }, ...options);
+    return { ...group, options, element };
+  });
   const geminiVoice = el("select", { class: "input" },
-    ...GEMINI_VOICE_OPTIONS.map(([name, desc]) =>
-      el("option", { value: name }, `${name} — ${desc}`)));
-  geminiVoice.value = current.gemini_voice || "Kore";
-  if (![...geminiVoice.options].some((option) => option.value === geminiVoice.value)) {
+    ...geminiVoiceGroups.map((group) => group.element));
+  const applyGeminiVoiceFilter = () => {
+    const query = geminiVoiceFilter.value.trim().toLowerCase();
+    let visible = 0;
+    for (const group of geminiVoiceGroups) {
+      let groupVisible = 0;
+      for (const option of group.options) {
+        const haystack = `${option.value} ${option.textContent}`.toLowerCase();
+        const show = !query || haystack.includes(query);
+        option.hidden = !show;
+        if (show) groupVisible += 1;
+      }
+      group.element.hidden = groupVisible === 0;
+      visible += groupVisible;
+    }
+    const total = GEMINI_VOICE_OPTIONS.length;
+    geminiVoiceCount.textContent = query
+      ? `Showing ${visible} of ${total} voices for “${geminiVoiceFilter.value.trim()}” — clear to see all.`
+      : `${total} preset voices grouped by delivery — type above to filter.`;
+  };
+  geminiVoiceFilter.oninput = applyGeminiVoiceFilter;
+  const knownGeminiVoice = new Set(GEMINI_VOICE_OPTIONS.map(([name]) => name));
+  const storedGeminiVoice = current.gemini_voice || "Kore";
+  if (knownGeminiVoice.has(storedGeminiVoice)) {
+    geminiVoice.value = storedGeminiVoice;
+  } else if (/^[A-Z][A-Za-z]{2,31}$/.test(storedGeminiVoice)) {
+    // Google evolves the gallery: keep a saved custom voice selectable.
+    const custom = el("option", { value: storedGeminiVoice }, `${storedGeminiVoice} — custom (saved)`);
+    const customGroup = el("optgroup", { label: "Custom" }, custom);
+    geminiVoice.prepend(customGroup);
+    geminiVoiceGroups.unshift({ label: "Custom", voices: [[storedGeminiVoice, "custom (saved)"]], options: [custom], element: customGroup });
+    geminiVoice.value = storedGeminiVoice;
+  } else {
     geminiVoice.value = "Kore";
   }
+  applyGeminiVoiceFilter();
   const geminiStyle = el("input", { type: "text", class: "input", maxlength: "500",
     value: current.gemini_style || "",
     placeholder: "e.g. warm documentary narrator, measured pace (optional)" });
@@ -383,8 +453,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       + "starting the dashboard — the environment variable always takes priority over a key "
       + "saved here."));
   const geminiGrid = el("div", { class: "pref-grid" },
-    field("Gemini voice", geminiVoice,
-      "One of Google's preset voices; the gallery changes over time, so an extra voice may appear in the API."),
+    field("Gemini voice",
+      el("div", { class: "stack" }, geminiVoiceFilter, geminiVoice, geminiVoiceCount),
+      "Grouped by delivery — filter by name or vibe (e.g. “warm”, “calm”). Custom gallery names stay selectable."),
     field("Voice style", geminiStyle,
       "Optional short direction (sent as a style prompt); blank uses the voice's default delivery."),
     field("API key", el("div", { class: "row" }, geminiKeyInput, geminiSaveKey, geminiClearKey),

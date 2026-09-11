@@ -112,7 +112,7 @@ def test_gemini_tts_defaults_are_on_but_inert_without_a_key() -> None:
     config = load_config(environ={})
     gemini = config.backends.gemini_tts
     assert gemini.enabled is True
-    assert gemini.model == "gemini-2.5-flash-preview-tts"
+    assert gemini.model == "gemini-3.1-flash-tts-preview"
     assert gemini.voice == "Kore"
     assert gemini.api_key_env == "GEMINI_API_KEY"
     assert gemini.base_url == "https://generativelanguage.googleapis.com/v1beta"

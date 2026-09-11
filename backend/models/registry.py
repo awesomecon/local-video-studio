@@ -138,7 +138,7 @@ class BackendRegistry:
         # generates only when the user picks it and supplies a key.
         gemini = backends.get("gemini_tts", {})
         registry.register(GeminiTTSBackend(
-            model=str(gemini.get("model", "gemini-2.5-flash-preview-tts")),
+            model=str(gemini.get("model", "gemini-3.1-flash-tts-preview")),
             voice=str(gemini.get("voice", "Kore")),
             api_key_env=str(gemini.get("api_key_env", "GEMINI_API_KEY")),
             base_url=str(gemini.get("base_url", "https://generativelanguage.googleapis.com/v1beta")),

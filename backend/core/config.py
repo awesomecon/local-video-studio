@@ -155,7 +155,7 @@ class GeminiTTSConfig(StrictModel):
     """
 
     enabled: bool = True
-    model: str = "gemini-2.5-flash-preview-tts"
+    model: str = "gemini-3.1-flash-tts-preview"
     voice: str = "Kore"
     api_key_env: str = "GEMINI_API_KEY"
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
