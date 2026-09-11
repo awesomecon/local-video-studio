@@ -93,7 +93,10 @@ Never store API keys in YAML. Port 1234 is reserved for an externally managed Op
 local LLM, and the application never starts or stops that service.
 
 Local Video Studio binds to loopback by default, does not enable telemetry, and never downloads
-model weights automatically. See [installation](docs/installation.md),
+model weights automatically. The one exception to local-only processing is the optional
+[Gemini TTS](docs/gemini-tts.md) cloud provider: narration text is sent to Google's API only
+when you select that provider and start a generation with your own Google AI Studio key.
+See [installation](docs/installation.md),
 [architecture](docs/architecture.md), [local LLM](docs/local-llm.md),
 [model backends](docs/models.md), [multi-shot scenes](docs/shots.md), and
 [rendering](docs/rendering.md).

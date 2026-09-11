@@ -9,11 +9,45 @@ import {
   regenerateNarrationChunk, regeneratePerformanceSegment,
   savePerformanceTags,
   ttsModels, setNarrationTakeGain, unloadTtsProvider, uploadVoiceProfile,
+  clearGeminiKey, saveGeminiKey,
 } from "../api.js";
 import { loadingState, errorPanel, badge, icon, toast, toastError, confirm, field as sharedField } from "../ui.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
 const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
+
+/** Preset voices for the remote Gemini TTS provider (see docs/gemini-tts.md). */
+const GEMINI_VOICE_OPTIONS = [
+  ["Puck", "upbeat, engaging"],
+  ["Charon", "informative, composed"],
+  ["Kore", "firm, steady"],
+  ["Fenrir", "excitable, high energy"],
+  ["Leda", "youthful, bright"],
+  ["Orus", "firm, assertive"],
+  ["Aoede", "breezy, lighthearted"],
+  ["Callirrhoe", "airy, gentle"],
+  ["Autonoe", "clear, neutral"],
+  ["Enceladus", "breathy, intimate"],
+  ["Iapetus", "friendly, conversational"],
+  ["Umbriel", "neutral, balanced"],
+  ["Algieba", "smooth, assured"],
+  ["Despina", "soft, calm"],
+  ["Erinome", "gentle, soothing"],
+  ["Algenib", "easy-going, relaxed"],
+  ["Rasalgethi", "clear, articulate"],
+  ["Laomedeia", "bright, melodic"],
+  ["Achernar", "soft, mellow"],
+  ["Alnilam", "easy-going, natural"],
+  ["Schedar", "even, measured"],
+  ["Gacrux", "refined, precise"],
+  ["Pulcherrima", "warm, inviting"],
+  ["Achird", "friendly, approachable"],
+  ["Zubenelgenubi", "discreet, low"],
+  ["Vindemiatrix", "gentle, delicate"],
+  ["Sadachbia", "lively, animated"],
+  ["Sadaltager", "polished, smooth"],
+  ["Sulafat", "warm, expressive"],
+];
 
 export function renderVoice(_route) {
   const screen = el("div", { class: "screen" },
@@ -191,7 +225,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     modelOption("omnivoice", "OmniVoice", models),
     modelOption("fish_s2_pro", "Fish Audio S2 Pro", models),
     modelOption("breeze_tts_2", "Breeze TTS 2 (≈3.5B)", models),
-    modelOption("higgs_tts_3", "Higgs TTS 3 4B", models));
+    modelOption("higgs_tts_3", "Higgs TTS 3 4B", models),
+    modelOption("gemini_tts", "Gemini TTS (Google, cloud)", models));
   provider.value = current.provider || "qwen_tts";
   const chatterboxBuiltIn = "__chatterbox_builtin__";
   const qwenBuiltInPrefix = "__qwen_builtin__:";
@@ -233,7 +268,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const chunkDefaults = {
     qwen_tts: 60, step_audio_editx: 20, chatterbox: 45, fish_s2_pro: 30,
     voxcpm2: 30, omnivoice: 30, index_tts_2_5: 30, breeze_tts_2: 30,
-    higgs_tts_3: 30,
+    higgs_tts_3: 30, gemini_tts: 30,
   };
   const chunkingExplanation = el("div", {
     class: "chunking-explainer", role: "note", "aria-live": "polite",
@@ -315,6 +350,108 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       "Add tokens such as <|emotion:amusement|>, <|style:whispering|>, or "
       + "<|prosody:long_pause|> directly in the script. Published creator content must "
       + "prominently credit Boson AI's Higgs Audio under the model license."));
+  // Remote Gemini TTS (cloud provider): preset voices only, no reference
+  // cloning, and the user's own Google AI Studio key. The key comes from the
+  // environment or from a 0600 file saved via this panel; only narration
+  // text ever leaves this machine, and only when generating with this
+  // provider. See docs/gemini-tts.md.
+  const geminiVoice = el("select", { class: "input" },
+    ...GEMINI_VOICE_OPTIONS.map(([name, desc]) =>
+      el("option", { value: name }, `${name} — ${desc}`)));
+  geminiVoice.value = current.gemini_voice || "Kore";
+  if (![...geminiVoice.options].some((option) => option.value === geminiVoice.value)) {
+    geminiVoice.value = "Kore";
+  }
+  const geminiStyle = el("input", { type: "text", class: "input", maxlength: "500",
+    value: current.gemini_style || "",
+    placeholder: "e.g. warm documentary narrator, measured pace (optional)" });
+  const geminiKeyStatus = el("span", { class: "muted small" }, "Checking key status…");
+  const geminiKeyInput = el("input", { type: "password", class: "input",
+    autocomplete: "off", spellcheck: "false",
+    placeholder: "Paste a Google AI Studio API key — stored only on this machine" });
+  const geminiSaveKey = el("button", { class: "btn", type: "button" }, "Save key");
+  const geminiClearKey = el("button", { class: "btn btn-ghost", type: "button" }, "Remove saved key");
+  const geminiNote = el("div", { class: "callout" },
+    el("strong", {}, "Gemini TTS is a remote Google service"),
+    el("p", { class: "muted small" },
+      "Generating with this provider sends the narration text to Google's Gemini API using "
+      + "your own Google AI Studio key. No audio, voice samples, or other project content "
+      + "leaves this machine. It uses Google's preset voices and cannot clone a recorded "
+      + "profile, and its API ignores seeds, so takes are not bit-for-bit reproducible."),
+    el("div", { class: "hint", style: { marginTop: "4px" } },
+      "Get a key from aistudio.google.com (“Get API key”), or export GEMINI_API_KEY before "
+      + "starting the dashboard — the environment variable always takes priority over a key "
+      + "saved here."));
+  const geminiGrid = el("div", { class: "pref-grid" },
+    field("Gemini voice", geminiVoice,
+      "One of Google's preset voices; the gallery changes over time, so an extra voice may appear in the API."),
+    field("Voice style", geminiStyle,
+      "Optional short direction (sent as a style prompt); blank uses the voice's default delivery."),
+    field("API key", el("div", { class: "row" }, geminiKeyInput, geminiSaveKey, geminiClearKey),
+      geminiKeyStatus));
+  const geminiHealth = () => models.gemini_tts?.health || null;
+  const geminiKeyReady = () => geminiHealth()?.configured === true;
+  const updateGeminiPanel = () => {
+    const health = geminiHealth();
+    if (!health) {
+      geminiKeyStatus.textContent = "Not registered on this backend.";
+      geminiSaveKey.disabled = true;
+      geminiClearKey.disabled = true;
+      return;
+    }
+    if (health.status === "not_configured") {
+      geminiKeyStatus.textContent = "Disabled in the configuration (backends.gemini_tts.enabled).";
+      geminiSaveKey.disabled = true;
+      geminiClearKey.disabled = true;
+      return;
+    }
+    if (health.configured) {
+      const via = health.source === "environment"
+        ? `the ${health.api_key_env} environment variable`
+        : "a key saved on this machine";
+      geminiKeyStatus.textContent = `Ready — key from ${via}.`;
+      geminiClearKey.disabled = health.source !== "file";
+      return;
+    }
+    geminiKeyStatus.textContent = `No key set — paste one below, or export ${health.api_key_env || "GEMINI_API_KEY"} before starting the dashboard.`;
+    geminiSaveKey.disabled = false;
+    geminiClearKey.disabled = true;
+  };
+  const syncGenerateEnabled = () => {
+    generate.disabled = provider.value === "gemini_tts" && !geminiKeyReady();
+  };
+  geminiSaveKey.onclick = async () => {
+    const key = geminiKeyInput.value.trim();
+    if (!key) {
+      toast("critical", "API key required",
+        "Paste your Google AI Studio key first, then save it.");
+      return;
+    }
+    geminiSaveKey.disabled = true;
+    try {
+      await saveGeminiKey(state.config, key);
+      geminiKeyInput.value = "";
+      toast("good", "Gemini API key saved",
+        "It is stored in a private file on this machine; the environment variable still wins.");
+      await refresh();
+    } catch (err) { toastError(err, "save Gemini API key"); }
+    finally { geminiSaveKey.disabled = false; }
+  };
+  geminiClearKey.onclick = async () => {
+    const ok = await confirm({
+      title: "Remove saved Gemini key",
+      message: "Delete the Google AI Studio key saved on this machine? An environment variable, if set, is not affected.",
+      confirmLabel: "Remove",
+    });
+    if (!ok) return;
+    geminiClearKey.disabled = true;
+    try {
+      await clearGeminiKey(state.config);
+      toast("good", "Saved Gemini key removed");
+      await refresh();
+    } catch (err) { toastError(err, "remove Gemini API key"); }
+    finally { geminiClearKey.disabled = false; }
+  };
   const voxGrid = el("div", { class: "pref-grid" },
     field("CFG scale", cfgValue,
       "VoxCPM2 cfg_value: higher follows the text more strictly, lower sounds more natural."),
@@ -400,6 +537,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     const chatterbox = provider.value === "chatterbox";
     const qwen = provider.value === "qwen_tts";
     const higgs = provider.value === "higgs_tts_3";
+    const gemini = provider.value === "gemini_tts";
     const cloneOnly = cloneProviders.includes(provider.value);
     builtInOption.disabled = !chatterbox;
     higgsBuiltInOption.disabled = !higgs;
@@ -416,11 +554,16 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         voice.value.startsWith(qwenBuiltInPrefix))) {
       voice.value = higgsBuiltIn;
     }
-    if ((!chatterbox && !qwen && !higgs) &&
+    if (gemini) {
+      // Gemini speaks its preset voices; the profile selector does not apply.
+      voice.value = "";
+    }
+    if ((!chatterbox && !qwen && !higgs && !gemini) &&
         (voice.value === chatterboxBuiltIn || voice.value === higgsBuiltIn ||
           voice.value.startsWith(qwenBuiltInPrefix))) {
       voice.value = voices[0]?.id || "";
     }
+    voice.disabled = gemini;
     const referenceFreeQwen = qwen && voice.value.startsWith(qwenBuiltInPrefix);
     enhance.disabled = !qwen || referenceFreeQwen;
     if (enhance.disabled) enhance.checked = false;
@@ -429,14 +572,22 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     omniGrid.hidden = provider.value !== "omnivoice";
     breezeGrid.hidden = provider.value !== "breeze_tts_2";
     higgsNote.hidden = !higgs;
+    geminiGrid.hidden = !gemini;
+    geminiNote.hidden = !gemini;
+    if (gemini) updateGeminiPanel();
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
     // Show the selected provider's saved tags and preserve other editors.
     performance.syncProvider(provider.value);
     updateChunkingExplanation();
+    syncGenerateEnabled();
   };
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
+  // Buttons are declared before the first sync so the sync handler can gate
+  // the Generate button (e.g. Gemini TTS without a key) without a TDZ error.
+  const saveVoice = el("button", { class: "btn", type: "button" }, "Save voice settings");
+  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
   syncProviderControls();
   const voiceSettings = () => {
     const seedValue = Number(seed.value);
@@ -445,7 +596,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       return null;
     }
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
-    const builtIn = voice.value === chatterboxBuiltIn || builtInQwen || voice.value === higgsBuiltIn;
+    const builtIn = voice.value === chatterboxBuiltIn || builtInQwen || voice.value === higgsBuiltIn
+      || provider.value === "gemini_tts";
     const settings = {
       provider: provider.value, voice_profile_id: builtIn ? null : (voice.value || null),
       language: language.value,
@@ -464,6 +616,12 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       intensity: performance.intensity.value,
       performance_notes: performance.notes.value.trim(),
     };
+    if (provider.value === "gemini_tts") {
+      // Gemini uses its preset voices, never a cloned profile; its style
+      // direction travels in the provider-specific fields below.
+      settings.gemini_voice = geminiVoice.value;
+      settings.gemini_style = geminiStyle.value.trim();
+    }
     if (provider.value === "breeze_tts_2") {
       settings.breeze_mode = breezeEngine.value;
       settings.guidance_scale = breezeCfg.value ? Number(breezeCfg.value) : null;
@@ -477,8 +635,6 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     }
     return settings;
   };
-  const saveVoice = el("button", { class: "btn", type: "button" }, "Save voice settings");
-  const generate = el("button", { class: "btn btn-primary", type: "button" }, "Generate narration");
   saveVoice.onclick = async () => {
     const settings = voiceSettings();
     if (!settings) return;
@@ -487,13 +643,20 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       await editProject(state.config, project.id, { settings: { voice: settings } });
       toast("good", "Voice settings saved", "You can now delete any profile no project selects.");
     } catch (err) { toastError(err, "save voice settings"); }
-    finally { saveVoice.disabled = generate.disabled = false; }
+    finally { saveVoice.disabled = false; syncGenerateEnabled(); }
   };
   generate.onclick = async () => {
     const builtInChatterbox = voice.value === chatterboxBuiltIn;
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
     const builtInHiggs = voice.value === higgsBuiltIn;
-    if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
+    if (provider.value === "gemini_tts") {
+      if (!geminiKeyReady()) {
+        toast("critical", "Gemini API key required",
+          "Add a Google AI Studio key in the Gemini panel below (or export GEMINI_API_KEY "
+          + "and restart the dashboard) before generating with Gemini TTS.");
+        return;
+      }
+    } else if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
         (builtInQwen && provider.value !== "qwen_tts") ||
         (builtInHiggs && provider.value !== "higgs_tts_3")) {
       toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
@@ -509,15 +672,15 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     saveVoice.disabled = generate.disabled = true;
     try {
       await editProject(state.config, project.id, { settings: { voice: settings } });
-      // intensity / performance_notes are persisted settings, not NarrationRequest
-      // fields, so they are stripped from the generation body.
-      const { intensity: _intensity, performance_notes: _notes, ...requestSettings } = settings;
+      // intensity / performance_notes / gemini_style are persisted settings, not
+      // NarrationRequest fields, so they are stripped from the generation body.
+      const { intensity: _intensity, performance_notes: _notes, gemini_style: _style, ...requestSettings } = settings;
       const job = await generateNarration(state.config, project.id,
         { ...requestSettings, text: script.value.trim() || null });
       toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} will run locally.`);
       refresh();
     } catch (err) { toastError(err, "generate narration"); }
-    finally { saveVoice.disabled = generate.disabled = false; }
+    finally { saveVoice.disabled = false; syncGenerateEnabled(); }
   };
 
   return el("div", { class: "stack" },
@@ -555,7 +718,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         field("Voice", voice,
           cloneProviders.includes(provider.value)
             ? "This model clones an authorized saved profile."
-            : "Qwen, Chatterbox, and Higgs include reference-free voices."),
+            : "Qwen, Chatterbox, Higgs, and Gemini include reference-free voices."),
         field("How should planned scenes be sent?", sceneGrouping,
           "Choose whether each scene starts a request or neighboring scenes share one."),
         field("Maximum text per TTS request", chunk,
@@ -573,6 +736,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           : "This project has no planned narration yet. Enter text here or run planning from Script.")),
       breezeGrid,
       higgsNote,
+      geminiNote,
+      geminiGrid,
       voxGrid,
       omniGrid,
       enhanceRow,
@@ -652,8 +817,15 @@ function fmtBytes(bytes) {
 }
 
 function modelOption(value, label, models) {
-  const ready = models[value]?.health?.status === "healthy";
-  const suffix = ready ? "ready" : models[value]?.managed ? "starts automatically" : "offline";
+  const entry = models[value];
+  const health = entry?.health;
+  const ready = health?.status === "healthy";
+  const needsKey = health?.status === "key_required";
+  const suffix = ready ? "ready"
+    : needsKey ? "needs API key"
+    : health?.status === "not_configured" ? "off"
+    : entry?.managed ? "starts automatically"
+    : "offline";
   return el("option", { value },
     `${label} — ${suffix}`);
 }
@@ -1151,6 +1323,7 @@ function providerLabel(provider) {
     index_tts_2_5: "IndexTTS 2.5",
     breeze_tts_2: "Breeze TTS 2",
     higgs_tts_3: "Higgs TTS 3 4B",
+    gemini_tts: "Gemini TTS (Google)",
     recorded_voiceover: "Recorded voiceover",
   })[provider] || String(provider || "Unknown model");
 }

@@ -142,6 +142,62 @@ class LLMConfig(StrictModel):
         return value.rstrip("/")
 
 
+class GeminiTTSConfig(StrictModel):
+    """Remote Google Gemini TTS API provider.
+
+    This is the one intentionally *non-local* TTS provider: when a user
+    generates narration with it, the narration text is sent to Google's
+    Gemini API. It is therefore explicitly user-enabled (a Google AI Studio
+    API key must be present, either as ``api_key_env`` or as a key saved from
+    the Voice page) and no audio, media, or project content ever reaches
+    Google. Voice profiles and reference cloning are not supported; Gemini
+    speaks from its preset voices only.
+    """
+
+    enabled: bool = True
+    model: str = "gemini-2.5-flash-preview-tts"
+    voice: str = "Kore"
+    api_key_env: str = "GEMINI_API_KEY"
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    timeout_seconds: float = Field(default=180, gt=0, le=900)
+
+    @field_validator("api_key_env")
+    @classmethod
+    def validate_secret_reference(cls, value: str) -> str:
+        if not _ENV_NAME.fullmatch(value):
+            raise ValueError("api_key_env must be an environment-variable name")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+            raise ValueError("model must be a Gemini model identifier")
+        return value
+
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Z][A-Za-z]{2,31}", value):
+            raise ValueError("voice must be a Gemini preset voice name such as 'Kore'")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("base_url must be an HTTP(S) URL")
+        # A cloud API key must only ever travel over TLS unless the URL is an
+        # explicit loopback proxy the user configured themselves.
+        if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname or ""):
+            raise ValueError(
+                "base_url must use https for remote Gemini endpoints; a plain-http "
+                "loopback proxy is the only exception"
+            )
+        return value.rstrip("/")
+
+
 class BackendServiceConfig(StrictModel):
     enabled: bool = False
     endpoint: str | None = None
@@ -201,6 +257,11 @@ class BackendsConfig(StrictModel):
     # child process. This keeps the serving stack and its Torch pin outside the
     # application environment.
     higgs_tts_3: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
+    # Remote Google Gemini TTS API. Unlike the providers above it is not a
+    # local service: narration text is sent to Google only when a user picks
+    # the provider and generates with their own API key. It is always
+    # registered but inert until a key is configured. See docs/gemini-tts.md.
+    gemini_tts: GeminiTTSConfig = Field(default_factory=GeminiTTSConfig)
 
 
 class RenderConfig(StrictModel):
@@ -281,6 +342,10 @@ class AppConfig(StrictModel):
                 raise ValueError(
                     f"{name} endpoint must be localhost when allow_remote_backends=false"
                 )
+        # ``gemini_tts`` is deliberately excluded from the loopback checks above:
+        # it is an opt-in remote cloud API (key-gated, narration text only) and
+        # has no local endpoint at all. Every other provider endpoint must
+        # remain localhost while ``allow_remote_backends`` is false.
         for name in (
             "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
             "breeze_tts_2", "higgs_tts_3",

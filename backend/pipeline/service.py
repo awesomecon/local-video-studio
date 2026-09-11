@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from backend.captions import CaptionWord, build_caption_cues, restore_authored_punctuation
-from backend.core import AppConfig
+from backend.core import AppConfig, LocalSecretStore
 from backend.core.resources import resource_path
 from backend.director import DirectorEngine
 from backend.director.image_routing import (
@@ -214,11 +214,12 @@ class PipelineService:
         / "comfyui"
         / "ideogram4-thumbnail-local.workflow.json"
     )
-    # All voice-cloning providers reachable through the dashboard.
+    # All voice-cloning providers reachable through the dashboard, plus the
+    # remote Gemini TTS provider (preset voices only; no local worker).
     _TTS_PROVIDER_NAMES: tuple[str, ...] = (
         "qwen_tts", "step_audio_editx", "chatterbox",
         "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
-        "breeze_tts_2", "higgs_tts_3",
+        "breeze_tts_2", "higgs_tts_3", "gemini_tts",
     )
     # Providers that ship with an isolated worker process supervised by
     # TTSWorkerSupervisor. ComfyUI-backed providers (fish/voxcpm/index) are
@@ -254,7 +255,13 @@ class PipelineService:
         self._job_control_lock = threading.RLock()
         self._stopping = False
         self.jobs = PersistentJobQueue(self.database, control_lock=self._job_control_lock)
-        self.registry = BackendRegistry.from_config(config.model_dump(mode="python"), mock_mode=self.mock_mode)
+        self.registry = BackendRegistry.from_config(
+            config.model_dump(mode="python"), mock_mode=self.mock_mode,
+            # One 0600 file per provider key under the app-data dir; keys are
+            # never written into projects, logs, or diagnostics. Environment
+            # variables always take precedence over stored values.
+            secret_store=LocalSecretStore(config.paths.app_data / "secrets"),
+        )
         self.generation_cache = self._build_generation_cache(config)
         self._snapshot_provider = snapshot_provider or query_nvidia_smi
         self.director = DirectorEngine(

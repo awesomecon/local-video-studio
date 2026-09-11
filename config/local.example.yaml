@@ -14,3 +14,9 @@ backends:
   higgs_tts_3:
     python_path: "/path/to/services/sglang-omni/.venv/bin/python"
     model_path: "/path/to/large-data-volume/models/tts/higgs/bosonai-higgs-tts-3-4b"
+  # Remote Gemini TTS: point at a different model or default voice if you
+  # prefer. Do not put the API key here — use the GEMINI_API_KEY environment
+  # variable or save a key from the Voice page.
+  gemini_tts:
+    model: "gemini-2.5-flash-preview-tts"
+    voice: "Kore"

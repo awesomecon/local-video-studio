@@ -630,6 +630,22 @@ export function ttsModels(config, opts = {}) {
   return request(config, "/api/tts/models", { timeoutMs: 15000, ...opts });
 }
 
+/**
+ * PUT /api/tts/gemini/key — store a Google AI Studio key in the local 0600
+ * secret file. The key is never returned by any endpoint; status checks come
+ * from /api/tts/models (health) which only report source and configured.
+ */
+export function saveGeminiKey(config, apiKey, opts = {}) {
+  return request(config, "/api/tts/gemini/key", {
+    method: "PUT", body: { api_key: apiKey }, timeoutMs: 15000, ...opts,
+  });
+}
+
+/** DELETE /api/tts/gemini/key — remove the locally stored key only. */
+export function clearGeminiKey(config, opts = {}) {
+  return request(config, "/api/tts/gemini/key", { method: "DELETE", timeoutMs: 15000, ...opts });
+}
+
 /** POST /api/tts/{provider}/unload — release a TTS provider's loaded weights. */
 export function unloadTtsProvider(config, provider, opts = {}) {
   return request(config, `/api/tts/${encodeURIComponent(provider)}/unload`, {

@@ -18,6 +18,9 @@ Core endpoints:
 - `POST /api/projects/{project_id}/render`
 - `POST /api/projects/{project_id}/tts/narrations/import?name=...` (PCM WAV body; stores and
   activates an immutable user-recorded voiceover take)
+- `GET /api/tts/gemini/key` (key availability only: `configured`, `source`, never the value)
+- `PUT /api/tts/gemini/key` (stores the key in a local 0600 secret file; `204`)
+- `DELETE /api/tts/gemini/key` (deletes the stored key; `204`)
 - `POST /api/scenes/{scene_id}/generate`
 - `POST /api/scenes/{scene_id}/regenerate`
 - `POST /api/scenes/{scene_id}/approve`
@@ -82,3 +85,23 @@ All reads, edits, regeneration, and deletion affect only that provider's script.
   script, `422` validation failure.
 - `DELETE /api/projects/{project_id}/tts/performance-tags`
   Removes the stored script. Returns `{ deleted: true }`. `404` for an unknown project.
+
+## Gemini TTS key management
+
+`gemini_tts` is the remote TTS provider (see `docs/gemini-tts.md`). Its key is resolved at
+request time in this order: the `api_key_env` environment variable (default
+`GEMINI_API_KEY`), then a file saved via `PUT /api/tts/gemini/key`.
+
+- `GET /api/tts/gemini/key` returns `{ configured, source: "environment"|"file"|"none",
+  api_key_env, secret_file, enabled, detail }`. It never returns the key or a fragment of it.
+- `PUT /api/tts/gemini/key` accepts `{ "api_key": "..." }` and writes a mode-`0600` file under
+  the application data directory. Invalid keys (empty, whitespace, or control characters) are
+  rejected with `422` and nothing is written. Successful saves return `204` without echoing the
+  value.
+- `DELETE /api/tts/gemini/key` removes the file (environment variables are untouched) and
+  returns `204`.
+
+`POST /api/projects/{project_id}/tts/generate` with `provider: "gemini_tts"` answers `409`
+before queueing when the provider is disabled or no key is configured, and `422` when a voice
+profile is combined with the provider (Gemini cannot clone). While generation runs, only
+narration text and the key (as a header) leave the machine.
