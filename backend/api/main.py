@@ -553,7 +553,7 @@ def create_app(
         finally:
             service.shutdown()
 
-    application = FastAPI(title="Local Video Studio", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(title="Local Video Studio", version="0.2.0", lifespan=lifespan)
     application.state.settings = settings
     application.state.service = service
 
