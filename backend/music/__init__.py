@@ -9,9 +9,32 @@ The package provides three cooperating pieces:
   bass, melody, percussion) instead of a sine tone.
 - :mod:`stitch` joins per-movement audio files into the single
   ``music/background.wav`` consumed by the timeline and renderer.
+- :mod:`score` defines the Score Studio cue plan (timed pullbacks, silences,
+  impacts) over the generated soundtrack, its validation, and its atomic
+  persistence as ``music/score-plan.json``.
 """
 
 from .planner import MovementPlan, energy_for_mood, plan_hash, plan_movements
+from .score import (
+    EFFECTS_DIRECTORY,
+    SCORE_PLAN_FILENAME,
+    SCORE_PLAN_VERSION,
+    SCORED_OUTPUT_FILENAME,
+    ScoreAction,
+    ScoreCue,
+    ScoreCueSource,
+    ScorePlan,
+    ScorePlanConflict,
+    empty_score_plan,
+    hash_audio_file,
+    load_score_plan,
+    resolve_cue_effect_path,
+    save_score_plan,
+    score_plan_hash,
+    score_plan_path,
+    scored_background_path,
+    validate_score_plan_effects,
+)
 from .synth import (
     SAMPLE_RATE,
     apply_edge_fades,
@@ -24,14 +47,32 @@ from .synth import (
 
 __all__ = [
     "SAMPLE_RATE",
+    "EFFECTS_DIRECTORY",
     "MovementPlan",
+    "SCORE_PLAN_FILENAME",
+    "SCORE_PLAN_VERSION",
+    "SCORED_OUTPUT_FILENAME",
+    "ScoreAction",
+    "ScoreCue",
+    "ScoreCueSource",
+    "ScorePlan",
+    "ScorePlanConflict",
     "apply_edge_fades",
     "compose_movement",
     "compose_movement_frames",
+    "empty_score_plan",
     "energy_for_mood",
+    "hash_audio_file",
+    "load_score_plan",
     "plan_hash",
     "plan_movements",
     "read_wav_frames",
+    "resolve_cue_effect_path",
+    "save_score_plan",
+    "score_plan_hash",
+    "score_plan_path",
+    "scored_background_path",
     "stitch_dips",
+    "validate_score_plan_effects",
     "write_wav",
 ]
