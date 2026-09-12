@@ -366,3 +366,332 @@ def test_locked_flag_round_trips() -> None:
     restored = ScorePlan.model_validate_json(plan.model_dump_json())
     assert restored.cues[0].locked is True
     assert restored.cues[0].source == "auto"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic score renderer (Phase 2)
+# ---------------------------------------------------------------------------
+
+import math
+import wave as _wave
+from array import array as _array
+
+from backend.music.score import (
+    SCORED_SAMPLE_RATE,
+    ScoreCue as _ScoreCue,
+    ScorePlan as _ScorePlan,
+    ScoreRenderError,
+    compile_music_envelope,
+    load_score_mix_manifest,
+    render_scored_background,
+    score_mix_manifest_path,
+)
+
+
+def _write_wav(path: Path, frames: list[int], *, channels: int, rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _wave.open(str(path), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(_array("h", frames).tobytes())
+
+
+def _tone_frames(seconds: float, hz: float, rate: int, amp: int, channels: int = 2) -> list[int]:
+    frames: list[int] = []
+    for index in range(int(seconds * rate)):
+        value = int(amp * math.sin(2 * math.pi * hz * index / rate))
+        frames.extend([value] * channels)
+    return frames
+
+
+def _read_pcm(path: Path) -> tuple[_array, int]:
+    with _wave.open(str(path), "rb") as handle:
+        rate = handle.getframerate()
+        return _array("h", handle.readframes(handle.getnframes())), rate
+
+
+def _rms(samples: _array, start_seconds: float, end_seconds: float) -> float:
+    start = int(start_seconds * SCORED_SAMPLE_RATE)
+    end = min(int(end_seconds * SCORED_SAMPLE_RATE), len(samples) // 2)
+    segment = samples[start * 2:end * 2]
+    if not segment:
+        return 0.0
+    return math.sqrt(sum(value * value for value in segment) / len(segment))
+
+
+def _stereo_background(path: Path, *, seconds: float, hz: float = 440.0) -> None:
+    """48 kHz stereo tone; exercises the renderer's direct-read path."""
+    _write_wav(path, _tone_frames(seconds, hz, SCORED_SAMPLE_RATE, 12000), channels=2, rate=SCORED_SAMPLE_RATE)
+
+
+def _mono_background(path: Path, *, seconds: float, hz: float = 440.0) -> None:
+    """24 kHz mono tone; forces the FFmpeg normalization path."""
+    _write_wav(path, _tone_frames(seconds, hz, 24000, 12000, channels=1), channels=1, rate=24000)
+
+
+@pytest.fixture()
+def music_root(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    (root / "music").mkdir(parents=True)
+    return root
+
+
+def test_scored_output_is_48k_stereo_pcm_at_exact_length(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=3.2)
+    plan = _ScorePlan(
+        duration_seconds=3.2,
+        cues=[_ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-10)],
+    )
+    manifest = render_scored_background(music_root, plan)
+    samples, rate = _read_pcm(music_root / "music" / "scored-background.wav")
+    assert rate == 48000
+    assert len(samples) % 2 == 0
+    assert len(samples) // 2 == round(3.2 * SCORED_SAMPLE_RATE)
+    assert manifest["sample_rate"] == 48000
+    assert manifest["channels"] == 2
+    assert manifest["loudness_normalization"] is False
+
+
+def test_silence_step_is_sample_accurate(music_root: Path) -> None:
+    _mono_background(music_root / "music" / "background.wav", seconds=3.0, hz=600.0)
+    plan = _ScorePlan(
+        duration_seconds=3.0,
+        cues=[_ScoreCue(time_seconds=1.5, action="silence", transition_seconds=0.0)],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    cut = int(1.5 * SCORED_SAMPLE_RATE)
+    before = max(abs(v) for v in samples[(cut - 96) * 2: cut * 2])
+    after = max(abs(v) for v in samples[cut * 2:(cut + 960) * 2])
+    assert before > 500, "bed must be audible before the silence cue"
+    assert after == 0, "silence must hold from the exact cue sample"
+
+
+def test_silence_ramp_reaches_floor_at_transition_end(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=3.0, hz=600.0)
+    plan = _ScorePlan(
+        duration_seconds=3.0,
+        cues=[_ScoreCue(time_seconds=1.0, action="silence", transition_seconds=0.3)],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    assert _rms(samples, 0.2, 0.8) > 500
+    # Just inside the ramp it is still (partially) audible; well past it, silent.
+    assert max(abs(v) for v in samples[int(1.2 * SCORED_SAMPLE_RATE) * 2:int(1.3 * SCORED_SAMPLE_RATE) * 2]) > 0
+    assert max(abs(v) for v in samples[int(1.35 * SCORED_SAMPLE_RATE) * 2:]) == 0
+
+
+def test_pullback_applies_exact_gain_change(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0)
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[_ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-20, transition_seconds=0.25)],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    before = _rms(samples, 0.1, 0.8)
+    after = _rms(samples, 1.5, 3.9)
+    change_db = 20 * math.log10(after / before)
+    assert abs(change_db - (-20.0)) < 1.0
+
+
+def test_restore_recovers_full_level(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0)
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-20, transition_seconds=0.2),
+            _ScoreCue(time_seconds=2.5, action="restore", transition_seconds=0.2),
+        ],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    base = _rms(samples, 0.1, 0.8)
+    recovered = _rms(samples, 3.0, 3.9)
+    assert abs(recovered - base) / base < 0.05
+
+
+def test_lowpass_region_attenuates_high_frequencies(music_root: Path) -> None:
+    # A 4 kHz tone sits well above the 1000 Hz pullback filter.
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0, hz=4000.0)
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-6, transition_seconds=0.2, lowpass_hz=1000),
+            _ScoreCue(time_seconds=2.5, action="restore", transition_seconds=0.2),
+        ],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    before = _rms(samples, 0.1, 0.8)
+    during = _rms(samples, 1.5, 2.3)
+    after = _rms(samples, 2.9, 3.9)
+    assert before > 500
+    assert during < before * 0.2, "low-passed pullback must kill the 4 kHz tone"
+    assert after > before * 0.6, "restore returns the unfiltered tone"
+
+
+def test_effect_is_audible_at_its_cue_time(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0, hz=200.0)
+    effects = music_root / "music" / "effects"
+    effects.mkdir(parents=True, exist_ok=True)
+    _write_wav(
+        effects / "hit.wav",
+        _tone_frames(0.15, 3000.0, SCORED_SAMPLE_RATE, 20000, channels=2),
+        channels=2,
+        rate=SCORED_SAMPLE_RATE,
+    )
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=2.0, action="impact", effect_path="music/effects/hit.wav"),
+        ],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    quiet = _rms(samples, 1.2, 1.8)
+    hit = _rms(samples, 2.0, 2.15)
+    assert hit > quiet * 1.5, "impact must be clearly audible at its cue time"
+    # The impact starts exactly at the cue: no energy before it.
+    before_cut = _rms(samples, 1.95, 1.999)
+    assert before_cut < quiet * 1.5
+
+
+def test_effect_survives_a_silenced_bed(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0)
+    effects = music_root / "music" / "effects"
+    effects.mkdir(parents=True, exist_ok=True)
+    _write_wav(
+        effects / "sting.wav",
+        _tone_frames(0.2, 1500.0, SCORED_SAMPLE_RATE, 20000, channels=2),
+        channels=2,
+        rate=SCORED_SAMPLE_RATE,
+    )
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="silence", transition_seconds=0.0),
+            _ScoreCue(time_seconds=1.2, action="impact", effect_path="music/effects/sting.wav"),
+        ],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    bed = max(abs(v) for v in samples[int(1.05 * SCORED_SAMPLE_RATE) * 2:int(1.18 * SCORED_SAMPLE_RATE) * 2])
+    sting = max(abs(v) for v in samples[int(1.25 * SCORED_SAMPLE_RATE) * 2:int(1.45 * SCORED_SAMPLE_RATE) * 2])
+    assert bed == 0, "bed must be silent after the silence cue"
+    assert sting > 5000, "the sting plays through the silence"
+
+
+def test_output_is_padded_to_plan_duration(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=2.0)
+    plan = _ScorePlan(duration_seconds=3.0, cues=[_ScoreCue(time_seconds=0.5, action="build")])
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    assert len(samples) // 2 == round(3.0 * SCORED_SAMPLE_RATE)
+    tail = samples[int(2.5 * SCORED_SAMPLE_RATE) * 2:]
+    assert max(abs(v) for v in tail) == 0, "padding is silence"
+
+
+def test_output_is_trimmed_to_plan_duration(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=3.0)
+    plan = _ScorePlan(duration_seconds=2.0, cues=[_ScoreCue(time_seconds=0.5, action="build")])
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    assert len(samples) // 2 == round(2.0 * SCORED_SAMPLE_RATE)
+
+
+def test_zero_cue_plan_reproduces_the_master_bytes(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=2.5)
+    plan = _ScorePlan(duration_seconds=2.5)
+    manifest = render_scored_background(music_root, plan)
+    master = (music_root / "music" / "background.wav").read_bytes()
+    scored = (music_root / "music" / "scored-background.wav").read_bytes()
+    assert master == scored
+    assert manifest["plan"]["cue_count"] == 0
+
+
+def test_manifest_records_inputs_plan_and_output_hashes(music_root: Path) -> None:
+    background = music_root / "music" / "background.wav"
+    _stereo_background(background, seconds=2.0)
+    from backend.music import hash_audio_file
+
+    plan = _ScorePlan(
+        duration_seconds=2.0,
+        source_music_hash=hash_audio_file(background),
+        cues=[_ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-12)],
+    )
+    from backend.music import save_score_plan, score_plan_hash
+
+    save_score_plan(music_root, plan, expected_revision=0)
+    manifest = render_scored_background(music_root, plan)
+    assert manifest["source"]["sha256"] == hash_audio_file(background)
+    assert manifest["plan"]["plan_hash"] == score_plan_hash(plan)
+    output = music_root / "music" / "scored-background.wav"
+    assert manifest["output"]["sha256"] == hash_audio_file(output)
+    assert manifest["output"]["duration_seconds"] == 2.0
+    assert manifest["loudness_normalization"] is False
+    on_disk = load_score_mix_manifest(music_root)
+    assert on_disk is not None and on_disk["plan"]["plan_hash"] == score_plan_hash(plan)
+    assert score_mix_manifest_path(music_root) == music_root / "music" / "score-mix-manifest.json"
+
+
+def test_source_master_is_never_modified(music_root: Path) -> None:
+    background = music_root / "music" / "background.wav"
+    _stereo_background(background, seconds=2.0)
+    before = background.read_bytes()
+    plan = _ScorePlan(
+        duration_seconds=2.0,
+        cues=[_ScoreCue(time_seconds=0.8, action="silence", transition_seconds=0.1)],
+    )
+    render_scored_background(music_root, plan)
+    assert background.read_bytes() == before
+
+
+def test_render_requires_background(music_root: Path) -> None:
+    plan = _ScorePlan(duration_seconds=1.0)
+    with pytest.raises(ScoreRenderError, match="background.wav"):
+        render_scored_background(music_root, plan)
+
+
+def test_render_rejects_missing_effect_file(music_root: Path) -> None:
+    _stereo_background(music_root / "music" / "background.wav", seconds=2.0)
+    plan = _ScorePlan(
+        duration_seconds=2.0,
+        cues=[_ScoreCue(time_seconds=1.0, action="impact", effect_path="music/effects/ghost.wav")],
+    )
+    with pytest.raises(ValueError, match="effect file not found"):
+        render_scored_background(music_root, plan)
+
+
+def test_compile_envelope_tracks_level_changes(music_root: Path) -> None:
+    plan = _ScorePlan(
+        duration_seconds=10.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-10, transition_seconds=0.5),
+            _ScoreCue(time_seconds=3.0, action="restore", transition_seconds=0.5),
+            _ScoreCue(time_seconds=5.0, action="silence", transition_seconds=0.0),
+        ],
+    )
+    segments, regions = compile_music_envelope(plan)
+    assert [(seg.from_db, seg.to_db) for seg in segments] == [
+        (0.0, -10.0),
+        (-10.0, 0.0),
+        (0.0, -120.0),
+    ]
+    assert segments[0].start_sample == int(1.0 * SCORED_SAMPLE_RATE)
+    assert regions == []
+
+    plan_filtered = _ScorePlan(
+        duration_seconds=10.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-10, transition_seconds=0.2, lowpass_hz=2000),
+            _ScoreCue(time_seconds=4.0, action="restore", transition_seconds=0.2),
+        ],
+    )
+    _, filtered_regions = compile_music_envelope(plan_filtered)
+    assert len(filtered_regions) == 1
+    region = filtered_regions[0]
+    assert region.cutoff_hz == 2000.0
+    assert region.start_sample == int(1.0 * SCORED_SAMPLE_RATE)
+    assert region.end_sample == int(4.0 * SCORED_SAMPLE_RATE)

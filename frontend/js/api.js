@@ -1285,14 +1285,15 @@ export function renderProject(config, id, body = {}, opts = {}) {
 /**
  * POST /api/projects/{id}/render/stages/{stage} — re-run a single
  * deterministic render stage. Only the FFmpeg/chromium output stages are
- * addressable: "timeline", "render_preview", "quality_control",
+ * addressable: "score_mix", "timeline", "render_preview", "quality_control",
  * "render_final", "thumbnails", and "editorial_visual" for Editorial Mode
  * projects. It never contacts the LLM, runs TTS, or generates replacement
- * media. 404 for an unknown stage or project, 400 for an inapplicable
+ * media (score_mix re-mixes the existing soundtrack with the saved cues).
+ * 404 for an unknown stage or project, 400 for an inapplicable
  * editorial_visual, 409 while a render/pipeline/stage job is in flight.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} projectId
- * @param {"timeline"|"render_preview"|"quality_control"|"render_final"|"thumbnails"|"editorial_visual"} stage
+ * @param {"score_mix"|"timeline"|"render_preview"|"quality_control"|"render_final"|"thumbnails"|"editorial_visual"} stage
  * @param {{force?: boolean, signal?: AbortSignal}} [opts]
  * @returns {Promise<GenerationJob>} the queued stage-re-run job
  */

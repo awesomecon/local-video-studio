@@ -7,18 +7,27 @@ bundled `imageio-ffmpeg` executable (see `docs/troubleshooting.md`).
 ## Pipeline order
 
 ```text
-timeline → render_preview → quality_control → render_final → thumbnails
+score_mix → timeline → render_preview → quality_control → render_final → thumbnails
 ```
 
-(Upstream stages — plan, script, narration, visuals, music, captions — feed the timeline; the
-render stages themselves never invoke LLM, TTS, or generation backends.)
+(Upstream stages — plan, script, narration, visuals, music, captions — feed the render chain; the
+render stages themselves never invoke LLM, TTS, or generation backends. `score_mix` compiles the
+project's cue plan over the generated soundtrack before the timeline is assembled.)
+
+- `score_mix` reads `music/background.wav` (the generated master — it is never modified) plus
+  `music/score-plan.json`, and writes `music/scored-background.wav` (48 kHz stereo PCM) and a
+  `music/score-mix-manifest.json` recording input/output hashes, the plan hash, and the FFmpeg
+  version. Cues are sample-accurate and never loudness-normalized afterward, so intentional
+  pullbacks and silences survive. With no score plan the stage passes through and the timeline
+  reads `background.wav` exactly as before; a cue change rebuilds `score_mix` and every downstream
+  stage, but never the music generation itself.
 
 - `POST /api/projects/{id}/render` queues only the deterministic render stages from existing
   narration and current scene visuals. `{"force": true}` re-runs the render stages without
   regenerating content.
 - `POST /api/projects/{id}/render/stages/{stage}` re-runs a single deterministic stage
-  (`timeline`, `render_preview`, `quality_control`, `render_final`, `thumbnails`; plus
-  `editorial_visual` for Editorial Mode projects) as its own `render_stage` job, leaving the
+  (`score_mix`, `timeline`, `render_preview`, `quality_control`, `render_final`, `thumbnails`;
+  plus `editorial_visual` for Editorial Mode projects) as its own `render_stage` job, leaving the
   other stages untouched.
 - Every stage is restartable: completion and outputs persist, and a restart resumes from the
   first incomplete stage.

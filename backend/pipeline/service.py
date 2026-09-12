@@ -60,7 +60,20 @@ from backend.models.ideogram_prompt import (
 )
 from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
 from backend.graphics import GraphicScreenGenerator, GraphicScreenManifest, GraphicScreenRenderer
-from backend.music import MovementPlan, plan_hash as music_plan_hash, plan_movements
+from backend.music import (
+    MovementPlan,
+    SCORE_MIX_WORKFLOW_VERSION,
+    ScorePlan,
+    hash_audio_file,
+    load_score_mix_manifest,
+    load_score_plan,
+    plan_hash as music_plan_hash,
+    plan_movements,
+    render_scored_background,
+    score_mix_manifest_path,
+    score_plan_hash,
+    scored_background_path,
+)
 from backend.music import stitch as music_stitch
 from backend.core.h3_policy import (
     H3Quality, H3PolicyError, CONTINUATION_WORKFLOW_VERSION,
@@ -2068,6 +2081,7 @@ class PipelineService:
                     "visuals",
                     "narration",
                     "music",
+                    "score_mix",
                     "subtitles",
                     "timeline",
                     "render_preview",
@@ -2080,6 +2094,7 @@ class PipelineService:
         if dimension_fields.intersection(changed_fields):
             invalidated.update(
                 {
+                    "score_mix",
                     "timeline",
                     "render_preview",
                     "quality_control",
@@ -2105,6 +2120,7 @@ class PipelineService:
             invalidated.update(
                 {
                     "music",
+                    "score_mix",
                     "timeline",
                     "render_preview",
                     "quality_control",
@@ -2120,6 +2136,7 @@ class PipelineService:
                     "visuals",
                     "narration",
                     "music",
+                    "score_mix",
                     "subtitles",
                     "timeline",
                     "render_preview",
@@ -2445,6 +2462,7 @@ class PipelineService:
             self._ensure_visuals(project, force=force)
             self._check_parent_job(parent_job_id)
             self._ensure_music(project, force=force)
+            self._ensure_score_mix(project, force=force)
             self._ensure_subtitles(project, force=force)
             self._check_parent_job(parent_job_id)
             if project.video_mode is VideoMode.EDITORIAL:
@@ -2483,13 +2501,31 @@ class PipelineService:
     # The deterministic render chain, in execution order. Only these stages are
     # addressable by the single-stage re-run endpoint (never LLM/TTS/visuals).
     # ``editorial_visual`` is only valid for Editorial Mode projects.
+    # ``score_mix`` compiles the cue plan into scored-background.wav from the
+    # untouched background.wav (a cue change never regenerates the music).
     RENDER_STAGE_NAMES = (
         "editorial_visual",
+        "score_mix",
         "timeline",
         "render_preview",
         "quality_control",
         "render_final",
         "thumbnails",
+    )
+
+    #: Stages rebuilt when only the score plan changes. The generated
+    #: soundtrack (and therefore the ``music`` stage) is never touched: cues
+    #: are applied afterward to a copy, so ACE-Step is never re-run for them.
+    SCORE_PLAN_DOWNSTREAM_STAGES = frozenset(
+        {
+            "score_mix",
+            "timeline",
+            "render_preview",
+            "quality_control",
+            "render_final",
+            "thumbnails",
+            "metadata",
+        }
     )
 
     def _inflight_deterministic_render(self, project_id: str) -> GenerationJob | None:
@@ -2526,6 +2562,7 @@ class PipelineService:
                 "force": force,
                 "current_stage": "queued",
                 "stages": (["editorial_visual"] if project.video_mode is VideoMode.EDITORIAL else []) + [
+                    "score_mix",
                     "timeline",
                     "render_preview",
                     "quality_control",
@@ -2677,6 +2714,7 @@ class PipelineService:
             self.validate_render_inputs(project_id)
             if force:
                 invalidated = {
+                        "score_mix",
                         "timeline",
                         "render_preview",
                         "quality_control",
@@ -2696,6 +2734,10 @@ class PipelineService:
                 )
                 self._ensure_editorial_visual(project, force=force)
                 self._check_parent_job(parent_job_id)
+
+            self._update_parent_job(parent_job_id, progress=0.14, current_stage="score_mix")
+            self._ensure_score_mix(project, force=force)
+            self._check_parent_job(parent_job_id)
 
             self._update_parent_job(parent_job_id, progress=0.15, current_stage="timeline")
             self._ensure_timeline(project, force=force)
@@ -2829,6 +2871,7 @@ class PipelineService:
         """
         runners = {
             "editorial_visual": self._ensure_editorial_visual,
+            "score_mix": self._ensure_score_mix,
             "timeline": self._ensure_timeline,
             "render_preview": self._ensure_preview,
             "quality_control": self._ensure_qc,
@@ -7391,7 +7434,7 @@ class PipelineService:
             stored = self._get_last_music_attempt(project)
             if stored and stored.parameters.get("fingerprint") == current_fingerprint:
                 return output
-            self._invalidate_stages(project, {"music"})
+            self._invalidate_stages(project, {"music", "score_mix"})
 
         # Pre-created so the operation can attribute attempt records to the
         # real stage job; _execute_stage enqueues it.
@@ -8082,6 +8125,107 @@ class PipelineService:
                     self.jobs.fail(job.id, redact_secrets(exc))
                 raise
 
+    def _project_music_source(self, project: Project) -> Path | None:
+        """Soundtrack the timeline should consume.
+
+        A scored mix replaces the generated master only once it exists on
+        disk; unscored projects (and projects without music) keep reading
+        ``music/background.wav`` exactly as before.
+        """
+        root = self.store.project_path(project)
+        scored = scored_background_path(root)
+        if scored.is_file() and scored.stat().st_size > 0:
+            return scored
+        background = root / "music" / "background.wav"
+        return background if background.is_file() else None
+
+    def _ensure_score_mix(self, project: Project, *, force: bool) -> Path | None:
+        """Compile the score plan over the untouched master into scored audio.
+
+        ``background.wav`` is never modified. Projects without a score plan
+        pass through as-is (the master is reused, no stage record written);
+        a zero-cue plan still produces the scored file so downstream stages
+        read one stable path. The mix rebuilds when the soundtrack or the
+        plan changed since it ran; otherwise the cached output is reused.
+        """
+        root = self.store.project_path(project)
+        background = root / "music" / "background.wav"
+        if not background.is_file():
+            return None
+        plan = load_score_plan(root)
+        if plan is None:
+            return background
+        scored = scored_background_path(root)
+        if not force and self._stage_complete(project, "score_mix") and scored.is_file():
+            manifest = load_score_mix_manifest(root)
+            if manifest is not None and self._score_mix_is_current(project, root, plan, manifest):
+                return scored
+            # The mix (or the plan feeding it) changed: everything that
+            # consumes the mix is stale, but the music generation itself is
+            # never re-run for cue changes.
+            self._invalidate_stages(project, self.SCORE_PLAN_DOWNSTREAM_STAGES)
+
+        def operation() -> tuple[Path, list[Path]]:
+            if scored.is_file():
+                self._archive_output(project, scored)
+            render_scored_background(root, plan, binaries=self.renderer.binaries)
+            self._record_asset(
+                project,
+                None,
+                scored,
+                AssetType.MUSIC,
+                GenerationResult(
+                    outputs=(scored,),
+                    metadata={
+                        "backend": "ffmpeg",
+                        "model": "ffmpeg",
+                        "model_version": self.renderer.binaries.source,
+                        "workflow_version": SCORE_MIX_WORKFLOW_VERSION,
+                        "seed": 0,
+                        "settings": {
+                            "plan_hash": score_plan_hash(plan),
+                            "revision": plan.revision,
+                            "cue_count": len(plan.cues),
+                            "source_music_hash": (
+                                (load_score_mix_manifest(root) or {})
+                                .get("source", {})
+                                .get("sha256")
+                            ),
+                            "loudness_normalization": False,
+                        },
+                    },
+                    peak_vram_gb=0,
+                ),
+                role="scored_background",
+            )
+            return scored, [scored, score_mix_manifest_path(root)]
+
+        return self._execute_stage(
+            project, "score_mix", operation, backend="ffmpeg",
+        )[0]
+
+    @staticmethod
+    def _score_mix_is_current(
+        project: Project, root: Path, plan: ScorePlan, manifest: dict[str, Any],
+    ) -> bool:
+        """True when the recorded mix matches the current master and plan."""
+        source = manifest.get("source") or {}
+        try:
+            if source.get("sha256") != hash_audio_file(root / "music" / "background.wav"):
+                return False
+        except OSError:
+            return False
+        plan_block = manifest.get("plan") or {}
+        if plan_block.get("plan_hash") != score_plan_hash(plan):
+            return False
+        output = manifest.get("output") or {}
+        try:
+            if output.get("sha256") != hash_audio_file(scored_background_path(root)):
+                return False
+        except OSError:
+            return False
+        return True
+
     def _ensure_subtitles(self, project: Project, *, force: bool) -> list[SubtitleCue]:
         root = self.store.project_path(project) / "subtitles"
         srt = root / "captions.srt"
@@ -8245,7 +8389,18 @@ class PipelineService:
     def _ensure_timeline(self, project: Project, *, force: bool) -> Timeline:
         destination = self.store.project_path(project) / "timeline.json"
         if not force and self._stage_complete(project, "timeline"):
-            return self._build_timeline(project)
+            if self._timeline_music_is_current(project):
+                return self._build_timeline(project)
+            # A score plan appearing or disappearing switches the music
+            # source (scored-background.wav <-> background.wav), so the
+            # stored timeline and everything built on it must be rebuilt even
+            # though the timeline's own inputs (scenes, narration, captions)
+            # did not change.
+            self._invalidate_stages(
+                project,
+                {"timeline", "render_preview", "quality_control",
+                 "render_final", "thumbnails", "metadata"},
+            )
 
         def operation() -> tuple[Timeline, list[Path]]:
             timeline = self._build_timeline(project)
@@ -8259,6 +8414,41 @@ class PipelineService:
             return timeline, [destination]
 
         return self._execute_stage(project, "timeline", operation, backend="ffmpeg")[0]
+
+    def _timeline_music_is_current(self, project: Project) -> bool:
+        """True when the stored timeline's music track matches the live source.
+
+        Compares only the music source path: the scored mix's *content*
+        changes are already covered by the ``score_mix`` stage's hash check,
+        which rebuilds (and re-invalidates) before the timeline reads it.
+        """
+        root = self.store.project_path(project)
+        destination = root / "timeline.json"
+        if not destination.is_file():
+            return True
+        try:
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        if not isinstance(payload, dict):
+            return True
+        tracks = [
+            track for track in payload.get("audio_tracks", [])
+            if isinstance(track, dict) and track.get("kind") == "music"
+        ]
+        expected = self._project_music_source(project)
+        if expected is None:
+            return not tracks
+        if not tracks:
+            return False
+        for track in tracks:
+            try:
+                stored = resolve_asset_path(root, track.get("path", ""))
+            except ValueError:
+                return False
+            if stored.resolve() != expected.resolve():
+                return False
+        return True
 
     @staticmethod
     def _timeline_relative_path(root: Path, value: str, *, scope: str) -> str:
@@ -8798,7 +8988,7 @@ class PipelineService:
                     ),
                 )
             )
-        music = root / "music" / "background.wav"
+        music = self._project_music_source(project)
         narration_gain_db = self.tts.active_narration_gain(project.id)
         timeline = build_timeline(
             timings,
@@ -8807,7 +8997,7 @@ class PipelineService:
             fps=project.fps,
             narration_path=narration,
             narration_gain_db=narration_gain_db,
-            music_path=music if music.is_file() else None,
+            music_path=music if music is not None and music.is_file() else None,
             subtitles=self._subtitle_cues(project),
         )
         timeline.metadata.update(
@@ -8836,7 +9026,7 @@ class PipelineService:
                 "Editorial visual master is missing; render the Editorial composition first."
             )
         narration = root / "narration" / "master.wav"
-        music = root / "music" / "background.wav"
+        music = self._project_music_source(project)
         timeline = build_timeline(
             [SceneTiming(
                 scene_id="editorial-master",
@@ -8849,7 +9039,7 @@ class PipelineService:
             fps=project.fps,
             narration_path=narration,
             narration_gain_db=self.tts.active_narration_gain(project.id),
-            music_path=music if music.is_file() else None,
+            music_path=music if music is not None and music.is_file() else None,
             subtitles=(
                 self._subtitle_cues(project)
                 if plan.captions_enabled

@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import subprocess
 import tempfile
+import wave
+from array import array
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +33,8 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from backend.rendering.binaries import FFmpegBinaries, require_ffmpeg
+from backend.rendering.process import run_media_process
 from backend.schemas.models import DomainModel, new_id, utc_now
 from backend.schemas.paths import portable_relative_path, resolve_project_path
 
@@ -350,3 +357,470 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Deterministic score renderer
+#
+# ACE-Step composes the music; exact cues are applied here, afterwards. The
+# mix is sample-accurate (gain steps land on the exact sample of the cue time)
+# so a silence cue is silent from its requested moment and an impact is
+# audible exactly when the narration demands it. FFmpeg normalizes the
+# background and effect files to 48 kHz stereo PCM before the mix; the mix
+# itself and the output write are pure, dependency-free DSP. No
+# loudness-normalization is ever applied after cue automation: the generated
+# soundtrack is already normalized upstream, and re-normalizing would
+# partially undo intentional pullbacks and silences.
+# ---------------------------------------------------------------------------
+
+SCORED_SAMPLE_RATE = 48_000
+SCORED_CHANNELS = 2
+SCORE_MIX_MANIFEST_FILENAME = "score-mix-manifest.json"
+SCORE_MIX_WORKFLOW_VERSION = "score-mix-v1"
+
+#: Practical digital silence floor at 16-bit depth (1e-6 * 32767 < 1 LSB).
+SILENCE_FLOOR_DB = -120.0
+DEFAULT_PULL_BACK_DB = -6.0
+DEFAULT_BUILD_DB = 3.0
+_LOWPASS_WARMUP_SECONDS = 0.02
+
+
+class ScoreRenderError(ValueError):
+    """The score plan cannot be applied to the soundtrack."""
+
+
+@dataclass(frozen=True, slots=True)
+class _GainSegment:
+    start_sample: int
+    end_sample: int
+    from_db: float
+    to_db: float
+
+
+@dataclass(frozen=True, slots=True)
+class _LowpassRegion:
+    start_sample: int
+    end_sample: int
+    cutoff_hz: float
+    engage_samples: int
+    release_samples: int
+
+
+def _seconds_to_samples(seconds: float) -> int:
+    return int(round(seconds * SCORED_SAMPLE_RATE))
+
+
+def _db_to_gain(db: float) -> float:
+    return 10.0 ** (db / 20.0)
+
+
+def _clamp16(value: int) -> int:
+    if value > 32767:
+        return 32767
+    if value < -32768:
+        return -32768
+    return value
+
+
+def compile_music_envelope(plan: ScorePlan) -> tuple[list[_GainSegment], list[_LowpassRegion]]:
+    """Compile cues into a piecewise gain envelope and low-pass regions.
+
+    Automation cues (build/pull_back/silence/restore) each move the music
+    level from the level the previous cue left behind to their target,
+    linearly in dB over the cue's transition window. Pullbacks that carry a
+    ``lowpass_hz`` additionally engage a low-pass filter for the wet region
+    that runs until the next automation cue releases it. Effect cues do not
+    touch the envelope.
+    """
+    total = _seconds_to_samples(plan.duration_seconds)
+    automation = [cue for cue in plan.cues if cue.action in MUSIC_AUTOMATION_ACTIONS]
+    segments: list[_GainSegment] = []
+    regions: list[_LowpassRegion] = []
+    level = 0.0
+    open_region: _LowpassRegion | None = None
+
+    def close_region(at_sample: int, release_samples: int) -> None:
+        nonlocal open_region
+        if open_region is not None:
+            regions.append(
+                _LowpassRegion(
+                    open_region.start_sample, at_sample, open_region.cutoff_hz,
+                    open_region.engage_samples, release_samples,
+                )
+            )
+            open_region = None
+
+    for cue in automation:
+        start = _seconds_to_samples(cue.time_seconds)
+        transition = _seconds_to_samples(cue.transition_seconds)
+        if cue.action is ScoreAction.BUILD:
+            target = cue.gain_db if cue.gain_db is not None else DEFAULT_BUILD_DB
+        elif cue.action is ScoreAction.PULL_BACK:
+            target = cue.gain_db if cue.gain_db is not None else DEFAULT_PULL_BACK_DB
+        elif cue.action is ScoreAction.SILENCE:
+            target = SILENCE_FLOOR_DB
+        else:  # restore
+            target = 0.0
+        target = min(GAIN_DB_MAX, max(SILENCE_FLOOR_DB, target))
+        new_wet = cue.action is ScoreAction.PULL_BACK and cue.lowpass_hz is not None
+        if open_region is not None:
+            # A new automation state ends the running filter stretch: the old
+            # cutoff releases over this cue's transition (zero transition
+            # means a hard release).
+            close_region(start, transition)
+        if new_wet:
+            open_region = _LowpassRegion(start, total, cue.lowpass_hz, transition, 0)
+        segments.append(_GainSegment(start, start + max(transition, 1), level, target))
+        level = target
+    close_region(total, 0)
+    return segments, regions
+
+
+def _biquad_lowpass_coeffs(cutoff_hz: float, sample_rate: float) -> tuple[float, ...]:
+    """Second-order Butterworth low-pass (RBJ cookbook), Q = 1/sqrt(2)."""
+    q = 0.7071067811865476
+    w0 = 2.0 * math.pi * min(max(cutoff_hz, 1.0), sample_rate / 2.0 - 1.0) / sample_rate
+    cos_w = math.cos(w0)
+    sin_w = math.sin(w0)
+    alpha = sin_w / (2.0 * q)
+    a0 = 1.0 + alpha
+    b0 = (1.0 - cos_w) / 2.0 / a0
+    b1 = (1.0 - cos_w) / a0
+    b2 = b0
+    a1 = (-2.0 * cos_w) / a0
+    a2 = (1.0 - alpha) / a0
+    return b0, b1, b2, a1, a2
+
+
+def _filter_mono(values: array, coeffs: tuple[float, ...]) -> array:
+    b0, b1, b2, a1, a2 = coeffs
+    out = array("d")
+    out.extend(values)
+    x1 = x2 = y1 = y2 = 0.0
+    for index in range(len(out)):
+        x = out[index]
+        y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        out[index] = y
+        x2, x1 = x1, x
+        y2, y1 = y1, y
+    return out
+
+
+def _apply_gain_segments(samples: array, segments: list[_GainSegment], length: int) -> None:
+    """Apply the piecewise dB envelope sample-accurately (interleaved stereo)."""
+    if not segments:
+        return
+    channels = SCORED_CHANNELS
+    cursor = 0
+
+    def scale(start: int, end: int, gain: float) -> None:
+        if gain == 1.0:
+            return
+        for index in range(start, end):
+            for channel in range(channels):
+                position = index * channels + channel
+                samples[position] = _clamp16(int(round(samples[position] * gain)))
+
+    for segment in segments:
+        start = min(max(segment.start_sample, 0), length)
+        end = min(segment.end_sample, length)
+        if cursor < start:
+            scale(cursor, start, _db_to_gain(segment.from_db))
+            cursor = start
+        if end > start and segment.to_db != segment.from_db:
+            step_db = (segment.to_db - segment.from_db) / (end - start)
+            db = segment.from_db
+            for index in range(start, end):
+                gain = _db_to_gain(db)
+                for channel in range(channels):
+                    position = index * channels + channel
+                    samples[position] = _clamp16(int(round(samples[position] * gain)))
+                db += step_db
+            cursor = end
+        elif end > start:
+            scale(start, end, _db_to_gain(segment.to_db))
+            cursor = end
+    if cursor < length:
+        scale(cursor, length, _db_to_gain(segments[-1].to_db))
+
+
+def _apply_lowpass_regions(samples: array, regions: list[_LowpassRegion], length: int) -> None:
+    """Crossfade the dry music into a low-passed wet signal per region.
+
+    The filter warms up on a short tail of preceding samples so the engage
+    ramp starts from steady-state instead of a biquad transient.
+    """
+    if not regions:
+        return
+    channels = SCORED_CHANNELS
+    for region in regions:
+        start = min(max(region.start_sample, 0), length)
+        end = min(region.end_sample, length)
+        if end <= start:
+            continue
+        release = min(max(region.release_samples, 0), end - start)
+        engage = min(max(region.engage_samples, 0), end - start)
+        warm = min(max(1, _seconds_to_samples(_LOWPASS_WARMUP_SECONDS)), start)
+        warm_start = start - warm
+        # Split interleaved channels for the region plus warm-up, filter each
+        # channel, then crossfade dry/wet per sample.
+        dry_channels: list[array] = []
+        wet_channels: list[array] = []
+        coeffs = _biquad_lowpass_coeffs(region.cutoff_hz, SCORED_SAMPLE_RATE)
+        for channel in range(channels):
+            dry = samples[channel::channels]
+            segment = dry[warm_start:end]
+            dry_channels.append(array("h", segment))
+            wet_channels.append(_filter_mono(array("d", segment), coeffs))
+        for i in range(end - start):
+            absolute = start + i
+            if i < engage:
+                weight = i / engage
+            elif release > 0 and absolute >= end - release:
+                weight = max(0.0, (end - 1 - absolute) / release)
+            else:
+                weight = 1.0
+            for channel in range(channels):
+                position = absolute * channels + channel
+                mixed = (
+                    dry_channels[channel][i] * (1.0 - weight)
+                    + wet_channels[channel][i] * weight
+                )
+                samples[position] = _clamp16(int(round(mixed)))
+
+
+def score_mix_manifest_path(project_root: Path) -> Path:
+    return project_root / "music" / SCORE_MIX_MANIFEST_FILENAME
+
+
+def load_score_mix_manifest(project_root: Path) -> dict[str, Any] | None:
+    """Read the score-mix manifest, or ``None`` when the stage never ran."""
+    path = score_mix_manifest_path(project_root)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _ffmpeg_version_text(binaries: FFmpegBinaries | None) -> str | None:
+    """First line of ``ffmpeg -version`` (e.g. ``ffmpeg version 6.1 ...``)."""
+    try:
+        ffmpeg = require_ffmpeg(binaries)
+    except Exception:
+        return None
+    try:
+        result = subprocess.run(
+            [str(ffmpeg), "-version"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=15.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = (result.stdout or b"").decode("utf-8", "replace").splitlines()
+    return lines[0].strip() if lines else None
+
+
+def _read_stereo_pcm(
+    path: Path, binaries: FFmpegBinaries | None,
+) -> array:
+    """Read a file as interleaved 48 kHz stereo int16 samples.
+
+    Files already in that exact format are read directly; anything else is
+    normalized by FFmpeg into a temporary WAV next to the source.
+    """
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if (
+                handle.getframerate() == SCORED_SAMPLE_RATE
+                and handle.getnchannels() == SCORED_CHANNELS
+                and handle.getsampwidth() == 2
+            ):
+                return array("h", handle.readframes(handle.getnframes()))
+    except (wave.Error, EOFError, OSError):
+        pass
+    if not path.is_file():
+        raise ScoreRenderError(f"audio source is missing: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.scored-", suffix=".wav", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        argv = [
+            str(require_ffmpeg(binaries)),
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(path),
+            "-af", (
+                f"aformat=sample_fmts=s16:sample_rates={SCORED_SAMPLE_RATE}"
+                ":channel_layouts=stereo"
+            ),
+            "-ar", str(SCORED_SAMPLE_RATE),
+            "-ac", str(SCORED_CHANNELS),
+            "-c:a", "pcm_s16le",
+            str(temporary),
+        ]
+        run_media_process(argv, timeout=300.0)
+        with wave.open(str(temporary), "rb") as handle:
+            if (
+                handle.getframerate() != SCORED_SAMPLE_RATE
+                or handle.getnchannels() != SCORED_CHANNELS
+            ):
+                raise ScoreRenderError(
+                    f"FFmpeg produced an unexpected format for {path.name}"
+                )
+            return array("h", handle.readframes(handle.getnframes()))
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _mix_effects(
+    samples: array,
+    cues: list[ScoreCue],
+    decoded: dict[str, array],
+    length: int,
+) -> None:
+    """Add each effect cue's asset at its cue time (music-automation
+    independent: an impact stays audible through a silenced bed)."""
+    for cue in cues:
+        if cue.action not in EFFECT_ACTIONS or cue.effect_path is None:
+            continue
+        data = decoded.get(cue.effect_path)
+        if data is None:
+            raise ScoreRenderError(
+                f"cue {cue.id} references unreadable effect {cue.effect_path}"
+            )
+        gain = (
+            _db_to_gain(cue.effect_gain_db)
+            if cue.effect_gain_db is not None
+            else 1.0
+        )
+        offset = min(_seconds_to_samples(cue.time_seconds), length)
+        channels = SCORED_CHANNELS
+        for frame in range(len(data) // channels):
+            index = offset + frame
+            if index >= length:
+                break
+            for channel in range(channels):
+                position = index * channels + channel
+                samples[position] = _clamp16(
+                    samples[position] + int(round(data[frame * channels + channel] * gain))
+                )
+
+
+def _write_pcm_atomic(path: Path, samples: array) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".wav", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with wave.open(str(temporary), "wb") as handle:
+            handle.setnchannels(SCORED_CHANNELS)
+            handle.setsampwidth(2)
+            handle.setframerate(SCORED_SAMPLE_RATE)
+            handle.writeframes(samples.tobytes())
+        with open(temporary, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def render_scored_background(
+    project_root: Path,
+    plan: ScorePlan,
+    *,
+    binaries: FFmpegBinaries | None = None,
+) -> dict[str, Any]:
+    """Apply the score plan to ``music/background.wav`` deterministically.
+
+    The source master is never modified: the result lands in
+    ``music/scored-background.wav`` (48 kHz stereo PCM) and the manifest in
+    ``music/score-mix-manifest.json`` records every input hash, the FFmpeg
+    version, the cue-plan hash, and the output hash. Cue automation is
+    sample-accurate and is never re-normalized afterward.
+
+    Returns the written manifest. Raises :class:`ScoreRenderError` when the
+    soundtrack or an effect reference is unusable.
+    """
+    music_root = project_root / "music"
+    background = music_root / "background.wav"
+    if not background.is_file():
+        raise ScoreRenderError(
+            "music/background.wav is missing; generate the soundtrack before scoring it"
+        )
+    validate_score_plan_effects(project_root, plan)
+
+    output = scored_background_path(project_root)
+    length = _seconds_to_samples(plan.duration_seconds)
+    samples = _read_stereo_pcm(background, binaries)
+
+    # Trim or pad the bed to the narration-driven score length first so every
+    # later operation works on exactly the right number of samples.
+    frames = len(samples) // SCORED_CHANNELS
+    if frames > length:
+        samples = array("h", samples[: length * SCORED_CHANNELS])
+    elif frames < length:
+        samples.extend(array("h", bytes(2 * SCORED_CHANNELS * (length - frames))))
+
+    segments, regions = compile_music_envelope(plan)
+    _apply_lowpass_regions(samples, regions, length)
+    _apply_gain_segments(samples, segments, length)
+
+    decoded: dict[str, array] = {}
+    for cue in plan.cues:
+        if (
+            cue.action in EFFECT_ACTIONS
+            and cue.effect_path is not None
+            and cue.effect_path not in decoded
+        ):
+            effect_path = resolve_cue_effect_path(project_root, cue)
+            decoded[cue.effect_path] = _read_stereo_pcm(effect_path, binaries)
+    _mix_effects(samples, plan.cues, decoded, length)
+
+    _write_pcm_atomic(output, samples)
+
+    relative = lambda path: str(Path(path).relative_to(project_root))  # noqa: E731
+    manifest: dict[str, Any] = {
+        "version": 1,
+        "workflow_version": SCORE_MIX_WORKFLOW_VERSION,
+        "sample_rate": SCORED_SAMPLE_RATE,
+        "channels": SCORED_CHANNELS,
+        "loudness_normalization": False,
+        "ffmpeg_version": _ffmpeg_version_text(binaries),
+        "source": {
+            "path": relative(background),
+            "sha256": hash_audio_file(background),
+            "plan_duration_seconds": plan.duration_seconds,
+        },
+        "plan": {
+            "path": relative(score_plan_path(project_root)),
+            "plan_hash": score_plan_hash(plan),
+            "revision": plan.revision,
+            "cue_count": len(plan.cues),
+        },
+        "effects": [
+            {
+                "cue_id": cue.id,
+                "path": relative(resolve_cue_effect_path(project_root, cue)),
+                "sha256": hash_audio_file(resolve_cue_effect_path(project_root, cue)),
+            }
+            for cue in plan.cues
+            if cue.action in EFFECT_ACTIONS and cue.effect_path is not None
+        ],
+        "output": {
+            "path": relative(output),
+            "sha256": hash_audio_file(output),
+            "duration_seconds": length / SCORED_SAMPLE_RATE,
+        },
+        "generated_at": utc_now().isoformat(),
+    }
+    _atomic_write_json(score_mix_manifest_path(project_root), manifest)
+    return manifest

@@ -147,6 +147,7 @@ export const STAGE_LABELS = {
   scene_visual: "Scene visual",
   visual_batch: "Visual batch",
   music: "Music",
+  score_mix: "Score mix",
   subtitles: "Subtitles",
   timeline: "Timeline",
   render_preview: "Preview render",

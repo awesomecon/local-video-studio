@@ -61,6 +61,7 @@ const CURRENT_STAGE_LABELS = {
   validating_inputs: "Validating inputs",
   editorial_visual: "Rendering Editorial canvas",
   timeline: "Building timeline",
+  score_mix: "Scoring music",
   render_preview: "Rendering preview",
   quality_control: "Quality check",
   render_final: "Rendering final video",

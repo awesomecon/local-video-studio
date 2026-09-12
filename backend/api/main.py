@@ -1828,11 +1828,13 @@ def create_app(
     ) -> dict[str, Any]:
         """Re-run a single deterministic render stage (never LLM/TTS/visuals).
 
-        ``stage`` is one of ``timeline``, ``render_preview``, ``quality_control``,
-        ``render_final``, ``thumbnails`` (plus ``editorial_visual`` for Editorial
-        Mode projects). 404 for an unknown stage or project, 400 for an
-        inapplicable ``editorial_visual``, 409 while a render/pipeline/stage
-        job is in flight.
+        ``stage`` is one of ``score_mix``, ``timeline``, ``render_preview``,
+        ``quality_control``, ``render_final``, ``thumbnails`` (plus
+        ``editorial_visual`` for Editorial Mode projects). ``score_mix``
+        re-mixes the existing soundtrack with the saved cue plan; it never
+        regenerates the ACE-Step master. 404 for an unknown stage or
+        project, 400 for an inapplicable ``editorial_visual``, 409 while a
+        render/pipeline/stage job is in flight.
         """
         try:
             job = service.queue_render_stage(project_id, stage, force=request.force)
