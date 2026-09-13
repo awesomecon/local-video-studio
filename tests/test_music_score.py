@@ -697,6 +697,146 @@ def test_compile_envelope_tracks_level_changes(music_root: Path) -> None:
     assert region.end_sample == int(4.0 * SCORED_SAMPLE_RATE)
 
 
+def test_build_and_pullback_gains_are_relative_to_running_level() -> None:
+    """Build/pull_back shift the bed; restore/silence set an absolute state."""
+    plan = _ScorePlan(
+        duration_seconds=10.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-10, transition_seconds=0.5),
+            # A +4 dB build from -10 dB lands at -6 dB, not +4 dB.
+            _ScoreCue(time_seconds=3.0, action="build", gain_db=4, transition_seconds=0.5),
+        ],
+    )
+    segments, _ = compile_music_envelope(plan)
+    assert [(seg.from_db, seg.to_db) for seg in segments] == [
+        (0.0, -10.0),
+        (-10.0, -6.0),
+    ]
+
+    stacked = _ScorePlan(
+        duration_seconds=10.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="build", transition_seconds=0.2),
+            # Opening hook leaves +3 dB; a +2 dB build stacks to +5 dB.
+            _ScoreCue(time_seconds=3.0, action="build", gain_db=2, transition_seconds=0.2),
+        ],
+    )
+    stacked_segments, _ = compile_music_envelope(stacked)
+    assert [(seg.from_db, seg.to_db) for seg in stacked_segments] == [
+        (0.0, 3.0),
+        (3.0, 5.0),
+    ]
+
+
+def test_restore_accepts_an_explicit_absolute_target() -> None:
+    plan = _ScorePlan(
+        duration_seconds=10.0,
+        cues=[
+            _ScoreCue(time_seconds=1.0, action="pull_back", gain_db=-10, transition_seconds=0.2),
+            _ScoreCue(time_seconds=3.0, action="restore", gain_db=-2, transition_seconds=0.2),
+        ],
+    )
+    segments, _ = compile_music_envelope(plan)
+    assert [(seg.from_db, seg.to_db) for seg in segments] == [
+        (0.0, -10.0),
+        (-10.0, -2.0),
+    ]
+
+
+def test_overlapping_transition_is_interrupted_not_double_gained() -> None:
+    """A cue landing mid-ramp settles the running ramp at the cue time."""
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=0.5, action="silence", transition_seconds=0.5),
+            _ScoreCue(time_seconds=0.7, action="restore", transition_seconds=0.2),
+        ],
+    )
+    segments, _ = compile_music_envelope(plan)
+    assert len(segments) == 2
+    first, second = segments
+    # The first ramp is truncated at the second cue's time; no sample is
+    # ramped twice and the envelope stays continuous.
+    assert first.start_sample == int(0.5 * SCORED_SAMPLE_RATE)
+    assert first.end_sample == int(0.7 * SCORED_SAMPLE_RATE)
+    assert second.start_sample == first.end_sample
+    assert second.end_sample == int(0.9 * SCORED_SAMPLE_RATE)
+    assert second.from_db == first.to_db
+    # Interrupted 0.2s into a 0.5s ramp toward -120 dB: 0 + (-120) * 0.4.
+    assert first.from_db == 0.0
+    assert first.to_db == pytest.approx(-48.0)
+    assert second.to_db == 0.0
+
+
+def test_overlapping_restore_is_audible_before_first_ramp_would_end(
+    music_root: Path,
+) -> None:
+    """Audio proof: the bed restores from 0.7 s, not from 1.0 s."""
+    _stereo_background(music_root / "music" / "background.wav", seconds=4.0)
+    plan = _ScorePlan(
+        duration_seconds=4.0,
+        cues=[
+            _ScoreCue(time_seconds=0.5, action="silence", transition_seconds=0.5),
+            _ScoreCue(time_seconds=0.7, action="restore", transition_seconds=0.2),
+        ],
+    )
+    render_scored_background(music_root, plan)
+    samples, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    restoring = max(
+        abs(v)
+        for v in samples[int(0.78 * SCORED_SAMPLE_RATE) * 2:int(0.82 * SCORED_SAMPLE_RATE) * 2]
+    )
+    assert restoring > 200, "the restore ramp must already be audible at 0.8 s"
+    recovered = _rms(samples, 1.2, 1.8)
+    assert recovered > 500
+
+
+def test_lowpass_region_is_time_aligned(music_root: Path) -> None:
+    """The wet filter reads each region sample's own position (no 20 ms shift)."""
+    from backend.music.score import (
+        _apply_lowpass_regions,
+        _biquad_lowpass_coeffs,
+        _filter_mono,
+        _LowpassRegion,
+        _seconds_to_samples,
+    )
+
+    length = int(2.0 * SCORED_SAMPLE_RATE)
+    # A per-frame ramp makes a 960-sample (20 ms) misalignment obvious.
+    samples = _array("h", [0]) * (length * 2)
+    for index in range(length):
+        value = (index % 2000) - 1000
+        samples[index * 2] = value
+        samples[index * 2 + 1] = value
+    original = _array("h", samples)
+
+    start = _seconds_to_samples(0.5)
+    end = _seconds_to_samples(1.5)
+    engage = _seconds_to_samples(0.2)
+    region = _LowpassRegion(start, end, 3200.0, engage, 0)
+    _apply_lowpass_regions(samples, [region], length)
+
+    # At the region head the crossfade weight is 0, so the output must equal
+    # the dry sample at the region start (a shifted read would return the
+    # content from 20 ms earlier).
+    assert samples[start * 2] == original[start * 2]
+    assert samples[start * 2 + 1] == original[start * 2 + 1]
+
+    # Mid-region (fully wet) must match the correctly-aligned filtered
+    # reference to rounding precision, not the warm-shifted one.
+    warm = _seconds_to_samples(0.02)
+    coeffs = _biquad_lowpass_coeffs(3200.0, SCORED_SAMPLE_RATE)
+    for channel in range(2):
+        dry = original[channel::2]
+        wet = _filter_mono(_array("d", dry[start - warm:end]), coeffs)
+        mid = start + _seconds_to_samples(0.5)
+        expected = int(round(wet[(mid - start) + warm]))
+        actual = samples[mid * 2 + channel]
+        assert abs(actual - expected) <= 1
+        shifted = int(round(wet[mid - start]))
+        assert abs(shifted - expected) > 10, "test signal must expose a shift"
+
+
 # ---------------------------------------------------------------------------
 # Score preview (Phase 3) and deterministic auto-score
 # ---------------------------------------------------------------------------

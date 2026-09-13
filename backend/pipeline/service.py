@@ -2146,6 +2146,7 @@ class PipelineService:
                     "render_preview",
                     "quality_control",
                     "render_final",
+                    "thumbnails",
                     "metadata",
                 }
             )

@@ -249,6 +249,8 @@ def test_music_settings_invalidate_mix_but_not_visuals(tmp_path: Path) -> None:
     assert "music" in invalidated
     assert "score_mix" in invalidated
     assert "render_preview" in invalidated
+    # Like every sibling invalidation map, a music change reaches thumbnails.
+    assert "thumbnails" in invalidated
     assert "visuals" not in invalidated
     assert "narration" not in invalidated
     assert "plan" not in invalidated

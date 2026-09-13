@@ -258,15 +258,17 @@ export function createScoreTimeline(container, options) {
     svg.setAttribute("width", "100%");
     svg.setAttribute("height", "100%");
     svg.replaceChildren();
-    const GAIN_TARGET = { silence: -60, restore: 0, pull_back: -6 };
+    const GAIN_TARGET = { silence: -60, restore: 0 };
     const automations = cues
-      .filter((c) => c.action in GAIN_TARGET || c.action === "build")
+      .filter((c) => c.action in GAIN_TARGET || c.action === "build" || c.action === "pull_back")
       .sort((a, b) => a.time_seconds - b.time_seconds);
     const pts = [[0, envY(0)]];
     let db = 0;
     for (const cue of automations) {
-      const target = cue.action === "build"
-        ? Math.min(12, db + (cue.gain_db != null ? cue.gain_db : 3))
+      // Backend (compile_music_envelope): build/pull_back are relative moves
+      // from the running level; silence/restore are absolute states.
+      const target = (cue.action === "build" || cue.action === "pull_back")
+        ? Math.min(12, db + (cue.gain_db != null ? cue.gain_db : (cue.action === "build" ? 3 : -6)))
         : (cue.gain_db != null ? cue.gain_db : GAIN_TARGET[cue.action]);
       const t0 = Math.min(cue.time_seconds, duration);
       const tr = Math.min(Math.max(0.05, cue.transition_seconds != null ? cue.transition_seconds : 0.25), duration - t0);

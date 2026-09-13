@@ -148,6 +148,21 @@ def test_navigation_destroys_the_previous_timeline() -> None:
     assert "timeline.destroy()" in page
 
 
+def test_timeline_envelope_matches_backend_gain_semantics() -> None:
+    """The automation lane must agree with compile_music_envelope.
+
+    Backend: build/pull_back are relative moves from the running level;
+    silence/restore are absolute states. A pull_back drawn as an absolute
+    target would diverge from the render by the running level (e.g. +3 dB
+    of opening hook), so the timeline must accumulate pull_back like build.
+    """
+    src = _js("music/timeline.js")
+    assert 'cue.action === "pull_back"' in src
+    # pull_back shares build's relative accumulation branch.
+    assert 'cue.action === "build" || cue.action === "pull_back"' in src
+    assert "db + (cue.gain_db" in src
+
+
 # ---------------------------------------------------------------- cues
 
 

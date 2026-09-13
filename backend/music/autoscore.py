@@ -303,8 +303,8 @@ AUTO_SCORE_JSON_SCHEMA: dict[str, Any] = {
 }
 
 _ACTION_GUIDANCE = {
-    ScoreAction.BUILD: "lift the bed in level/energy from its time onward",
-    ScoreAction.PULL_BACK: "sit the bed down so the narration leads (optionally with a low-pass filter via lowpass_hz)",
+    ScoreAction.BUILD: "lift the bed in level/energy by gain_db dB relative to its current level from its time onward (blank = +3 dB)",
+    ScoreAction.PULL_BACK: "sit the bed down by gain_db dB relative to its current level so the narration leads (blank = -6 dB; optionally with a low-pass filter via lowpass_hz)",
     ScoreAction.SILENCE: "drop the bed to silence from its time",
     ScoreAction.RESTORE: "bring the bed back up to full level",
     ScoreAction.IMPACT: "punch in a one-shot hit/impact asset at this exact time",
