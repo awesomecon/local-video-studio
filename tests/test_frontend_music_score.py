@@ -80,6 +80,18 @@ def test_page_reuses_the_shared_design_system() -> None:
     assert "badge(" in page
 
 
+def test_soundtrack_history_shows_generation_metadata_and_audio() -> None:
+    page = _js("pages/music.js")
+    assert "soundtrack_history" in page
+    assert "Generation history" in page
+    assert "fmtDate(item.created_at)" in page
+    assert "item.model" in page
+    assert "settings.bpm" in page
+    assert "settings.key_scale" in page
+    assert "item.seed" in page
+    assert 'el("audio"' in page
+
+
 def test_score_styles_use_the_existing_tokens() -> None:
     css = _css("components.css")
     assert ".score-layout" in css

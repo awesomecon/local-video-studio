@@ -138,6 +138,7 @@ def test_studio_snapshot_shape(tmp_path: Path) -> None:
     assert body["soundtrack"] is not None
     assert body["soundtrack"]["hash"]
     assert body["soundtrack"]["url"].endswith("/music/media/background.wav")
+    assert body["soundtrack_history"] == []
     # No score yet: scored/preview absent, plan null, revision 0, no effects.
     assert body["scored"] is None
     assert body["preview"] is None
@@ -152,6 +153,31 @@ def test_studio_snapshot_shape(tmp_path: Path) -> None:
     assert isinstance(body["captions"], list)
     assert isinstance(body["stages"], dict)
     assert isinstance(body["jobs"], list)
+
+
+def test_studio_snapshot_lists_playable_soundtrack_history(tmp_path: Path) -> None:
+    app, client = _app(tmp_path)
+    project_id = _create_project(client)
+    service = _service(app)
+    project = service._project(project_id)
+
+    service._ensure_music(project, force=True)
+    service._ensure_music(project, force=True)
+
+    body = client.get(f"/api/projects/{project_id}/music/studio").json()
+    history = body["soundtrack_history"]
+    assert len(history) == 2
+    assert history[0]["current"] is True
+    assert history[1]["current"] is False
+    assert all(item["available"] for item in history)
+    assert all(item["created_at"] for item in history)
+    assert all(item["url"].endswith(f"/assets/{item['asset_id']}/file") for item in history)
+    assert history[0]["settings"]["bpm"] == 90
+    assert history[0]["duration_seconds"] == pytest.approx(4.0, abs=0.1)
+
+    older = client.get(history[1]["url"])
+    assert older.status_code == 200
+    assert older.content.startswith(b"RIFF")
 
 
 def test_studio_snapshot_reports_ace_capabilities(tmp_path: Path) -> None:

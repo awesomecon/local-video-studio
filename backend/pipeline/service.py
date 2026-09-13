@@ -7344,7 +7344,7 @@ class PipelineService:
             if not force and self._stage_complete(project, "music"):
                 return output if output.is_file() else None
             def operation() -> tuple[Path, list[Path]]:
-                self._archive_output(project, output)
+                self._archive_music_master(project, output)
                 music_root = output.parent
                 total_duration = self._effective_music_duration(project)
                 plans = self._movement_plans(project, total_duration)
@@ -7434,6 +7434,12 @@ class PipelineService:
                         "fingerprint": self._music_fingerprint(project),
                         "plan_hash": music_plan_hash(plans),
                         "movement_asset_ids": [entry["asset_id"] for entry in entries],
+                        "duration_seconds": round(total_duration, 3),
+                        "bpm": music_settings.get("bpm", 90),
+                        "key_scale": music_settings.get("key_scale", "C major"),
+                        "time_signature": str(music_settings.get("time_signature", "4")),
+                        "direction": str(music_settings.get("direction", "") or ""),
+                        "intensity": str(music_settings.get("intensity", "balanced") or "balanced"),
                     },
                 )
                 return output, [output, manifest_path, *movement_files]
@@ -7744,7 +7750,7 @@ class PipelineService:
                     music_stitch.stitch_movements(
                         movement_files, stitched_tmp, dip_seconds=MOVEMENT_DIP_SECONDS
                     )
-                    self._archive_output(project, output)
+                    self._archive_music_master(project, output)
                     os.replace(stitched_tmp, output)
                 except Exception:
                     stitched_tmp.unlink(missing_ok=True)
@@ -7783,6 +7789,12 @@ class PipelineService:
                         "fingerprint": current_fingerprint,
                         "plan_hash": plan_signature,
                         "movement_asset_ids": [entry["asset_id"] for entry in entries],
+                        "duration_seconds": round(total_duration, 3),
+                        "bpm": music_settings.get("bpm", 90),
+                        "key_scale": music_settings.get("key_scale", "C major"),
+                        "time_signature": str(music_settings.get("time_signature", "4")),
+                        "direction": str(music_settings.get("direction", "") or ""),
+                        "intensity": str(music_settings.get("intensity", "balanced") or "balanced"),
                     },
                 )
                 self.database.save_attempt(
@@ -8392,6 +8404,62 @@ class PipelineService:
         movements = manifest.get("movements") or []
         return [entry for entry in movements if isinstance(entry, dict)]
 
+    def _music_history_payload(self, project: Project) -> list[dict[str, Any]]:
+        """Return soundtrack generation records, newest first.
+
+        New replacements are archived and remain independently playable.
+        Legacy rows may all reference the live master; only the newest live
+        row is marked playable rather than misrepresenting replaced audio.
+        """
+        root = self.store.project_path(project)
+        live_relative = Path("music/background.wav")
+        assets = [
+            asset for asset in self.database.list_assets(project.id)
+            if asset.type is AssetType.MUSIC and asset.settings.get("role") == "music"
+        ]
+        assets.sort(key=lambda asset: asset.created_at, reverse=True)
+        newest_live_id = next(
+            (asset.id for asset in assets if Path(asset.filepath) == live_relative), None
+        )
+        history: list[dict[str, Any]] = []
+        for asset in assets:
+            relative = Path(asset.filepath)
+            path = resolve_asset_path(root, relative)
+            is_current = asset.id == newest_live_id and relative == live_relative
+            playable = path.is_file() and (relative != live_relative or is_current)
+            settings = asset.settings or {}
+            duration = settings.get("duration_seconds")
+            if duration is None and playable:
+                try:
+                    duration = round(wav_duration(path), 3)
+                except Exception:
+                    duration = None
+            history.append({
+                "asset_id": asset.id,
+                "created_at": asset.created_at.isoformat(),
+                "current": is_current,
+                "available": playable,
+                "url": (
+                    f"/api/projects/{project.id}/assets/{asset.id}/file"
+                    if playable else None
+                ),
+                "hash": asset.hash,
+                "duration_seconds": duration,
+                "backend": asset.backend,
+                "model": asset.model,
+                "model_version": asset.model_version,
+                "seed": asset.seed,
+                "prompt": asset.prompt,
+                "settings": {
+                    key: settings[key]
+                    for key in (
+                        "bpm", "key_scale", "time_signature", "direction", "intensity",
+                    )
+                    if key in settings
+                },
+            })
+        return history
+
     def _score_artifact_info(
         self, project: Project, name: str,
     ) -> dict[str, Any] | None:
@@ -8507,6 +8575,7 @@ class PipelineService:
                 "ace": ace_payload,
             },
             "soundtrack": soundtrack,
+            "soundtrack_history": self._music_history_payload(project),
             "movements": self._music_manifest_movements(project),
             "scored": scored,
             "narration": narration_payload,
@@ -10184,6 +10253,32 @@ class PipelineService:
             project.slug,
             path.relative_to(self.store.project_path(project)),
         )
+
+    def _archive_music_master(self, project: Project, path: Path) -> Path | None:
+        """Archive the live soundtrack and keep its asset record resolvable."""
+        if not path.is_file():
+            return None
+        root = self.store.project_path(project)
+        relative = path.relative_to(root)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        candidates = [
+            asset for asset in self.database.list_assets(project.id)
+            if asset.type is AssetType.MUSIC
+            and asset.settings.get("role") == "music"
+            and Path(asset.filepath) == relative
+            and asset.hash == digest
+        ]
+        destination = self.store.archive_variant(project.slug, relative)
+        if candidates:
+            previous = max(candidates, key=lambda asset: asset.created_at)
+            self.database.save_asset(previous.model_copy(update={
+                "filepath": destination.relative_to(root),
+                "settings": {
+                    **previous.settings,
+                    "archived_at": utc_now().isoformat(),
+                },
+            }))
+        return destination
 
     def _publish_pending_file(
         self, project: Project, pending: Path, destination: Path,

@@ -458,6 +458,7 @@ function soundtrackPanel(snap) {
     ));
   }
   const planHash = snap.score_plan_hash;
+  const history = (snap.soundtrack_history || []).map((item) => soundtrackHistoryRow(item));
   return el("div", { class: "panel" },
     el("div", { class: "row" },
       el("span", { class: "panel-title" }, "Soundtracks"),
@@ -473,7 +474,49 @@ function soundtrackPanel(snap) {
       planHash
         ? el("div", { class: "muted small mono" }, `score plan ${planHash}`)
         : null,
+      history.length
+        ? el("div", { class: "soundtrack-history stack" },
+          el("div", { class: "soundtrack-history-head" },
+            el("span", { class: "small", style: { fontWeight: "650" } }, "Generation history"),
+            el("span", { class: "muted small" }, `${history.length} ${history.length === 1 ? "version" : "versions"}`),
+          ),
+          ...history,
+        )
+        : null,
     ),
+  );
+}
+
+function soundtrackHistoryRow(item) {
+  const settings = item.settings || {};
+  const detailBits = [
+    item.model || item.backend || "unknown model",
+    item.duration_seconds != null ? fmtDuration(Number(item.duration_seconds)) : null,
+    settings.bpm != null ? `${settings.bpm} BPM` : null,
+    settings.key_scale || null,
+    settings.time_signature ? `${settings.time_signature}/4` : null,
+    item.seed != null ? `seed ${item.seed}` : null,
+  ].filter(Boolean);
+  const audioUrl = item.url ? versionedAudioUrl(item.url, item.hash) : null;
+  return el("div", { class: `soundtrack-history-row${item.current ? " current" : ""}` },
+    el("div", { class: "soundtrack-history-meta" },
+      el("div", { class: "row" },
+        el("strong", { class: "small" }, item.current ? "Current soundtrack" : "Previous soundtrack"),
+        item.current ? badge("good", "current", false) : null,
+        el("span", { class: "spacer" }),
+        el("time", { class: "muted small", datetime: item.created_at || "" },
+          item.created_at ? fmtDate(item.created_at) : "Unknown date"),
+      ),
+      el("div", { class: "muted small" }, detailBits.join(" · ")),
+      settings.direction
+        ? el("div", { class: "soundtrack-history-prompt small", title: settings.direction }, settings.direction)
+        : item.prompt
+          ? el("div", { class: "soundtrack-history-prompt small", title: item.prompt }, item.prompt)
+          : null,
+    ),
+    audioUrl
+      ? el("audio", { controls: true, preload: "metadata", src: audioUrl })
+      : el("span", { class: "muted small" }, "Audio unavailable (legacy record)"),
   );
 }
 
