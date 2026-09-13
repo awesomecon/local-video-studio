@@ -8181,8 +8181,9 @@ class PipelineService:
         ``music/background.wav`` exactly as before.
         """
         root = self.store.project_path(project)
+        plan = load_score_plan(root)
         scored = scored_background_path(root)
-        if scored.is_file() and scored.stat().st_size > 0:
+        if plan is not None and scored.is_file() and scored.stat().st_size > 0:
             return scored
         background = root / "music" / "background.wav"
         return background if background.is_file() else None
@@ -8734,6 +8735,26 @@ class PipelineService:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
             info = probe_media(temporary, self.renderer.binaries)
+            if not info.has_audio:
+                raise ValueError("the effect file contains no audio stream")
+            if info.has_video:
+                raise ValueError("the effect file must be audio, not video")
+            format_name = (info.format_name or "").lower()
+            expected = extension.lower()
+            # Reject files whose container does not match the extension (garbage uploads).
+            if expected not in format_name and format_name not in expected:
+                # Allow close matches (e.g., "mp4" vs "m4a" for audio) only when
+                # the container is a known audio format for the extension.
+                allowed = {
+                    "wav": {"wav", "wave"},
+                    "flac": {"flac"},
+                    "mp3": {"mp3", "mpeg"},
+                }.get(expected, set())
+                if format_name.split(",")[0] not in allowed:
+                    raise ValueError(
+                        f"the effect format '{format_name or 'unknown'}' does not match "
+                        f"the declared .{extension} extension"
+                    )
             duration = info.duration_seconds or 0.0
             if duration > MAX_EFFECT_SECONDS:
                 raise ValueError(

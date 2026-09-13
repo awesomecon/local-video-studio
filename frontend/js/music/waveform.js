@@ -34,14 +34,6 @@ export function destroyWaveformContext() {
 /** @type {Map<string, {peaks: Float32Array, frames: number}>} */
 const peakCache = new Map();
 
-/** Drop decoded peaks for URLs that are no longer served (new asset hashes). */
-export function pruneWaveformCache(urls) {
-  const keep = new Set(urls);
-  for (const key of peakCache.keys()) {
-    if (!keep.has(key)) peakCache.delete(key);
-  }
-}
-
 /**
  * Decode `url` and compute per-bucket peak levels (0..1, max channel).
  * @param {string} url

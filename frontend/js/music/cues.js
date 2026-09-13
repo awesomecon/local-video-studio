@@ -125,29 +125,6 @@ export function serializePlan(durationSeconds, cues, sourceMusicHash = null) {
   };
 }
 
-/**
- * Stable comparison of two plan payloads (ignoring revision/updated_at,
- * mirroring the backend's score_plan_hash content set).
- * @param {object} a
- * @param {object} b
- * @returns {boolean}
- */
-export function plansEqual(a, b) {
-  if (!a || !b) return a === b;
-  if (Math.abs(a.duration_seconds - b.duration_seconds) > 1e-6) return false;
-  if ((a.source_music_hash || null) !== (b.source_music_hash || null)) return false;
-  if (a.cues.length !== b.cues.length) return false;
-  const sort = (cues) => cues
-    .map((c) => JSON.stringify({
-      id: c.id, t: c.time_seconds, a: c.action, l: c.label,
-      tr: c.transition_seconds, g: c.gain_db ?? null, f: c.lowpass_hz ?? null,
-      ea: c.effect_asset_id || null, ep: c.effect_path || null,
-      eg: c.effect_gain_db ?? null, s: c.source, lk: !!c.locked,
-    }))
-    .sort();
-  return sort(a.cues || []).join("\n") === sort(b.cues || []).join("\n");
-}
-
 /** @param {string} action @returns {string} "automation" | "effect" */
 export function cueKind(action) {
   return EFFECT_ACTIONS.has(action) ? "effect" : "automation";
@@ -335,7 +312,7 @@ export function cueInspector(cue, { effects, onField, onAction, onToggleLock, on
 
   const lockBtn = el("button", {
     class: "btn btn-sm", type: "button", "aria-pressed": String(!!cue.locked),
-  }, cue.locked ? "Unlocked from Auto Score" : "Locked against Auto Score");
+  }, cue.locked ? "Unlock from Auto Score" : "Lock against Auto Score");
   lockBtn.onclick = () => onToggleLock();
   const dupBtn = el("button", { class: "btn btn-sm", type: "button" }, "Duplicate");
   dupBtn.onclick = () => onDuplicate();

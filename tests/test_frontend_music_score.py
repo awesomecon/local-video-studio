@@ -93,6 +93,25 @@ def test_score_styles_use_the_existing_tokens() -> None:
     assert css.count("@media") >= 2
 
 
+def test_score_layout_contains_the_timeline_canvas() -> None:
+    """The fixed-pixel lane canvas must scroll inside its panel, not under
+    the cues column (grid items default to min-width:auto = min-content)."""
+    css = _css("components.css")
+    rule = css[css.index(".score-col > *"):]
+    assert "min-width: 0" in rule[:120]
+    # The playhead wrap spans the ruler row plus the five lanes. Rows are
+    # all implicit, where 1/-1 collapses to a single row, so the span is
+    # written out explicitly.
+    assert "grid-row: 1 / 7" in css
+
+
+def test_timeline_initial_zoom_fits_the_viewport() -> None:
+    """The initial px-per-second fit must reserve the sticky label column,
+    matching the Fit button, or the lanes always open with a dead scroll."""
+    src = _js("music/timeline.js")
+    assert "rect.width - 100" in src
+
+
 def test_no_duplicate_mockup_palette() -> None:
     """The mockup's standalone purple interface must not leak in."""
     for rel in ("pages/music.js", "music/waveform.js", "music/cues.js",
@@ -127,6 +146,19 @@ def test_timeline_lanes_transport_and_cue_dragging() -> None:
     assert "shiftKey" in src
     # A silent clock keeps the transport useful before any audio exists.
     assert "silentClock" in src
+
+
+def test_transport_buttons_use_distinct_icons() -> None:
+    """Play/pause and stop-and-return must never share an icon.
+
+    The play button toggles play/pause glyphs; the stop button (which also
+    returns to 0:00) uses a skip-back glyph, so the two are distinguishable
+    in every transport state.
+    """
+    src = _js("music/timeline.js")
+    assert 'icon("skip_back"' in src
+    assert 'icon("pause"' in src
+    assert "Stop and return to 0:00" in src
 
 
 def test_timeline_tears_down_the_transport() -> None:

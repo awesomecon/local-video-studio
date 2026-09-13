@@ -104,7 +104,7 @@ export function createScoreTimeline(container, options) {
   }, icon("play", 15));
   const stopBtn = el("button", {
     class: "btn btn-sm", type: "button", "aria-label": "Stop", title: "Stop and return to 0:00",
-  }, icon("stop", 15));
+  }, icon("skip_back", 15));
   const seek = el("input", {
     type: "range", class: "sc-seek", min: "0", step: "0.01", value: "0",
     "aria-label": "Seek",
@@ -426,7 +426,7 @@ export function createScoreTimeline(container, options) {
   }
 
   function setPlayIcon() {
-    playBtn.replaceChildren(playing ? icon("stop", 15) : icon("play", 15));
+    playBtn.replaceChildren(playing ? icon("pause", 15) : icon("play", 15));
     playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
   }
 
@@ -536,10 +536,12 @@ export function createScoreTimeline(container, options) {
     transport.remove();
   }
 
-  // Initial layout
+  // Initial layout: fit the lane canvas inside the visible viewport. The
+  // grid's first column holds the sticky lane labels (~100px, same
+  // allowance as the Fit button), so only the remainder is audio canvas.
   const rect = container.getBoundingClientRect();
   if (rect.width > 0) {
-    pxPerSecond = clamp(rect.width / duration, 5, 160);
+    pxPerSecond = clamp((rect.width - 100) / duration, 5, 160);
     zoom.value = String(Math.round(pxPerSecond));
   }
   paint();

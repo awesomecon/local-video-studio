@@ -42,7 +42,7 @@ import { parseRoute } from "../router.js";
 import { createScoreTimeline } from "../music/timeline.js";
 import { destroyWaveformContext } from "../music/waveform.js";
 import {
-  CUE_ACTIONS, newCue, serializePlan, plansEqual, cueRow, cueInspector,
+  CUE_ACTIONS, newCue, serializePlan, cueRow, cueInspector,
   EFFECT_ACTIONS, snapTime,
 } from "../music/cues.js";
 
@@ -214,7 +214,7 @@ function generationPanel(snap, models, reload) {
   const durationBox = el("input", {
     type: "text", class: "input", readonly: true,
     value: snap.music && snap.music.duration_seconds
-      ? `${snap.music.duration_seconds}s` : "—",
+      ? `${Number(snap.music.duration_seconds).toFixed(1)}s` : "—",
     "aria-label": "Duration (derived from narration)",
   });
 

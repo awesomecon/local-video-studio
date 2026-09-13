@@ -1326,21 +1326,36 @@ export function scorePreview(config, projectId, { force = false } = {}, opts = {
  * POST /api/projects/{id}/music/effects — register a local one-shot
  * (WAV/FLAC/MP3) as a project effect asset. Never uploaded to a remote host.
  * @param {File} file
+ * @param {{signal?: AbortSignal, timeoutMs?: number}} [opts]
  * @returns {Promise<{asset_id: string, url: string, name: string, effect_path: string, format: string, duration_seconds: number, size_bytes: number, sha256: string, duplicate: boolean}>}
  */
 export async function uploadScoreEffect(config, projectId, file, opts = {}) {
   const url = apiUrl(config, `/api/projects/${encodeURIComponent(projectId)}/music/effects`);
   const form = new FormData();
   form.append("file", file, file.name);
+  // Like request(): bound the upload with a timeout linked to the caller's
+  // signal, so a stalled connection surfaces as an error instead of hanging
+  // the Studio's upload button forever.
+  const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : 300000;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(url, {
-      method: "POST", body: form, credentials: "same-origin", signal: opts.signal,
+      method: "POST", body: form, credentials: "same-origin", signal: controller.signal,
     });
   } catch (err) {
     throw new ApiErrorInstance(normalizeError(err, {
-      url, userAborted: !!(opts.signal && opts.signal.aborted),
+      timeoutMs, url, userAborted: !!(opts.signal && opts.signal.aborted),
     }));
+  } finally {
+    clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
   }
   const text = await response.text();
   let body = null;

@@ -1139,6 +1139,11 @@ a:focus-visible { box-shadow: var(--focus-ring); }
   align-items: start;
 }
 .score-col { min-width: 0; display: grid; gap: var(--gap-lg); }
+/* Grid items default to min-width:auto (their min-content). The timeline's
+   lane canvas is sized in fixed pixels (duration × px-per-second) and would
+   otherwise force the panel wider than its track, painting underneath the
+   cues column instead of scrolling inside .sc-viewport. */
+.score-col > * { min-width: 0; }
 @media (max-width: 1500px) {
   /* Tablet: timeline full-width on top, generation and cues side by side. */
   .score-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -1281,9 +1286,11 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 }
 
 /* Playhead: a grid cell spanning the lane column; the line inside is placed
-   in lane-local pixels so ruler, lanes, and head share one coordinate space. */
+   in lane-local pixels so ruler, lanes, and head share one coordinate space.
+   Rows are all implicit (ruler + five lanes = rows 1-6), and 1/-1 collapses
+   when a grid has no explicit rows, so the span is written out (1/7). */
 .sc-playhead-wrap {
-  grid-column: 2; grid-row: 1 / -1;
+  grid-column: 2; grid-row: 1 / 7;
   position: relative;
   pointer-events: none;
   z-index: 4;
