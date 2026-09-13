@@ -1323,22 +1323,59 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 
 /* ---- cue list rows --------------------------------------------------------- */
 .cue-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "main actions" "label actions";
+  align-items: center;
+  gap: 4px 8px;
+  padding: 8px 8px 8px 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-md, 8px);
   background: var(--surface-2);
   cursor: pointer;
 }
-.cue-row:hover { background: var(--surface-3); }
+.cue-row::before {
+  content: "";
+  position: absolute; inset: 7px auto 7px 0;
+  width: 2px; border-radius: 0 2px 2px 0;
+  background: transparent;
+}
+.cue-row:hover { background: var(--surface-3); border-color: var(--line-strong); }
 .cue-row.selected {
   border-color: color-mix(in oklab, var(--accent) 55%, transparent);
   background: var(--accent-wash);
 }
+.cue-row.selected::before { background: var(--accent); }
 .cue-row.locked .cue-time { color: var(--warning); }
 .cue-row.suggested { border-style: dashed; }
-.cue-time { min-width: 72px; font-size: 12px; color: var(--text-2); }
-.cue-label { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cue-row-main { grid-area: main; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cue-row-actions { grid-area: actions; display: flex; align-items: center; gap: 1px; }
+.cue-action-btn, .cue-lock-btn {
+  width: 28px; height: 28px; min-height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+}
+.cue-delete-btn:hover { color: var(--critical); }
+.cue-time { min-width: 58px; font-size: 12px; color: var(--text-2); }
+.cue-label {
+  grid-area: label;
+  min-width: 0; font-size: 11px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.music-level-control, .music-llm-draft {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface-inset);
+}
+.music-level-control { display: grid; gap: 8px; }
+.music-level-number { width: 68px; text-align: right; }
+.music-llm-draft { display: grid; gap: 6px; }
+@media (max-width: 420px) {
+  .cue-row { grid-template-areas: "main main" "label actions"; }
+  .cue-row-actions { justify-self: end; }
+}
 
 /* ---- auto score suggestions ---------------------------------------------- */
 .auto-suggestion {

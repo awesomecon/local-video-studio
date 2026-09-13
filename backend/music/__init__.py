@@ -26,6 +26,12 @@ from .autoscore import (
     llm_auto_score,
     validate_auto_score_payload,
 )
+from .direction import (
+    MUSIC_DIRECTION_JSON_SCHEMA,
+    MusicDirectionProposal,
+    build_music_direction_prompt,
+    llm_music_direction,
+)
 from .score import (
     DEFAULT_BUILD_DB,
     DEFAULT_PULL_BACK_DB,
@@ -104,8 +110,12 @@ __all__ = [
     "AUTO_SCORE_JSON_SCHEMA",
     "AutoScoreProposal",
     "AutoScoreSuggestion",
+    "MUSIC_DIRECTION_JSON_SCHEMA",
+    "MusicDirectionProposal",
+    "build_music_direction_prompt",
     "build_auto_score_prompt",
     "llm_auto_score",
+    "llm_music_direction",
     "validate_auto_score_payload",
     "apply_edge_fades",
     "compile_music_envelope",

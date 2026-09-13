@@ -1384,6 +1384,17 @@ export function autoScore(config, projectId, { musicDirection, intensity } = {},
 }
 
 /**
+ * POST /api/projects/{id}/music/suggest-settings — ask the configured local
+ * LLM for an unapplied generation-settings draft. The user must still Save.
+ * @returns {Promise<{source:"local_llm", model:string|null, settings:{direction:string,bpm:number,key_scale:string,time_signature:string,intensity:string}, rationale:string, applied:false}>}
+ */
+export function suggestMusicSettings(config, projectId, opts = {}) {
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/suggest-settings`, {
+    method: "POST", timeoutMs: 180000, ...opts,
+  });
+}
+
+/**
  * POST /api/projects/{id}/render — assemble existing media into a final video.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} id

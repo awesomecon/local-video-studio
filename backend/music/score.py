@@ -164,6 +164,11 @@ class ScorePlan(DomainModel):
     duration_seconds: float = Field(
         gt=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False
     )
+    # Adjustment relative to the renderer's normal narration-safe music mix.
+    # Zero preserves the historical level; cues remain relative to this base.
+    music_gain_db: float = Field(
+        default=0.0, ge=GAIN_DB_MIN, le=GAIN_DB_MAX, allow_inf_nan=False
+    )
     source_music_hash: str | None = None
     source_backend: str = Field(default="unknown", max_length=80)
     revision: int = Field(default=1, ge=0)
@@ -287,6 +292,7 @@ def score_plan_hash(plan: ScorePlan) -> str:
     payload: dict[str, Any] = {
         "version": plan.version,
         "duration_seconds": round(plan.duration_seconds, 6),
+        "music_gain_db": plan.music_gain_db,
         "source_music_hash": plan.source_music_hash,
         "cues": [cue.model_dump(mode="json") for cue in plan.cues],
     }
@@ -580,6 +586,15 @@ def _apply_gain_segments(samples: array, segments: list[_GainSegment], length: i
         scale(cursor, length, _db_to_gain(segments[-1].to_db))
 
 
+def _apply_music_gain(samples: array, gain_db: float) -> None:
+    """Apply the plan-wide bed adjustment before relative cue automation."""
+    if gain_db == 0.0:
+        return
+    gain = _db_to_gain(gain_db)
+    for index, value in enumerate(samples):
+        samples[index] = _clamp16(int(round(value * gain)))
+
+
 def _apply_lowpass_regions(samples: array, regions: list[_LowpassRegion], length: int) -> None:
     """Crossfade the dry music into a low-passed wet signal per region.
 
@@ -810,6 +825,7 @@ def render_scored_background(
         samples.extend(array("h", bytes(2 * SCORED_CHANNELS * (length - frames))))
 
     segments, regions = compile_music_envelope(plan)
+    _apply_music_gain(samples, plan.music_gain_db)
     _apply_lowpass_regions(samples, regions, length)
     _apply_gain_segments(samples, segments, length)
 
@@ -844,6 +860,7 @@ def render_scored_background(
             "plan_hash": score_plan_hash(plan),
             "revision": plan.revision,
             "cue_count": len(plan.cues),
+            "music_gain_db": plan.music_gain_db,
         },
         "effects": [
             {

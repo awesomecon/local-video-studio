@@ -211,6 +211,16 @@ def test_empty_score_plan_has_no_cues() -> None:
     assert plan.source_backend == "mock"
 
 
+def test_plan_music_gain_is_bounded_and_changes_hash() -> None:
+    assert _plan().music_gain_db == 0.0
+    assert _plan(music_gain_db=-12).music_gain_db == -12.0
+    assert score_plan_hash(_plan()) != score_plan_hash(_plan(music_gain_db=-6))
+    with pytest.raises(ValidationError):
+        _plan(music_gain_db=-60.5)
+    with pytest.raises(ValidationError):
+        _plan(music_gain_db=12.5)
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 
@@ -451,6 +461,21 @@ def test_scored_output_is_48k_stereo_pcm_at_exact_length(music_root: Path) -> No
     assert manifest["sample_rate"] == 48000
     assert manifest["channels"] == 2
     assert manifest["loudness_normalization"] is False
+
+
+def test_plan_music_gain_adjusts_the_whole_bed(music_root: Path) -> None:
+    background = music_root / "music" / "background.wav"
+    _stereo_background(background, seconds=2.0)
+    source, _ = _read_pcm(background)
+    render_scored_background(
+        music_root, _ScorePlan(duration_seconds=2.0, music_gain_db=-6.0),
+    )
+    scored, _ = _read_pcm(music_root / "music" / "scored-background.wav")
+    ratio = _rms(scored, 0.2, 1.8) / _rms(source, 0.2, 1.8)
+    assert ratio == pytest.approx(10 ** (-6 / 20), rel=0.01)
+    manifest = load_score_mix_manifest(music_root)
+    assert manifest is not None
+    assert manifest["plan"]["music_gain_db"] == -6.0
 
 
 def test_silence_step_is_sample_accurate(music_root: Path) -> None:

@@ -115,11 +115,12 @@ export function snapTime(time, points, radius = 0.35) {
  * @param {string | null} [sourceMusicHash]
  * @returns {object}
  */
-export function serializePlan(durationSeconds, cues, sourceMusicHash = null) {
+export function serializePlan(durationSeconds, cues, sourceMusicHash = null, musicGainDb = 0) {
   const ordered = [...cues].sort((a, b) => a.time_seconds - b.time_seconds);
   return {
     version: 1,
     duration_seconds: roundTime(durationSeconds),
+    music_gain_db: clamp(Number(musicGainDb) || 0, GAIN_DB_MIN, GAIN_DB_MAX),
     source_music_hash: sourceMusicHash,
     cues: ordered,
   };
@@ -156,12 +157,14 @@ export function cueRow(cue, state, onSelect, onToggleLock, onDuplicate, onDelete
     onToggleLock(cue.id);
   };
   const dup = el("button", {
-    class: "btn btn-ghost btn-sm", type: "button", "aria-label": "Duplicate cue",
-  }, "Duplicate");
+    class: "btn btn-ghost btn-icon cue-action-btn", type: "button",
+    title: "Duplicate cue", "aria-label": "Duplicate cue",
+  }, icon("copy", 14));
   dup.onclick = (ev) => { ev.stopPropagation(); onDuplicate(cue.id); };
   const del = el("button", {
-    class: "btn btn-ghost btn-sm", type: "button", "aria-label": "Delete cue",
-  }, "Delete");
+    class: "btn btn-ghost btn-icon cue-action-btn cue-delete-btn", type: "button",
+    title: "Delete cue", "aria-label": "Delete cue",
+  }, icon("trash", 14));
   del.onclick = (ev) => { ev.stopPropagation(); onDelete(cue.id); };
 
   const row = el("div", {
@@ -175,12 +178,15 @@ export function cueRow(cue, state, onSelect, onToggleLock, onDuplicate, onDelete
     tabindex: "0",
     "aria-label": `Cue at ${timeText}: ${action.label}${cue.label ? `, ${cue.label}` : ""}${cue.locked ? ", locked" : ""}`,
   },
-    el("span", { class: "cue-time mono" }, timeText),
-    badge(action.kind === "effect" ? "warning" : "accent", action.label, false),
-    cue.label ? el("span", { class: "cue-label" }, cue.label) : null,
-    state?.suggested ? badge("warning", "proposed", false) : null,
-    el("span", { class: "spacer" }),
-    lockBtn, dup, del,
+    el("div", { class: "cue-row-main" },
+      el("span", { class: "cue-time mono" }, timeText),
+      badge(action.kind === "effect" ? "warning" : "accent", action.label, false),
+      state?.suggested ? badge("warning", "proposed", false) : null,
+    ),
+    cue.label && cue.label !== action.label
+      ? el("div", { class: "cue-label", title: cue.label }, cue.label)
+      : null,
+    el("div", { class: "cue-row-actions" }, lockBtn, dup, del),
   );
   row.onclick = () => onSelect(cue.id);
   row.onkeydown = (ev) => {

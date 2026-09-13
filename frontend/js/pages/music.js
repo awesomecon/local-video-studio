@@ -33,6 +33,7 @@ import { state, needsProject } from "../state.js";
 import {
   editProject, musicModels, generateMusic,
   musicStudio, saveScorePlan, scorePreview, uploadScoreEffect, autoScore,
+  suggestMusicSettings,
 } from "../api.js";
 import {
   loadingState, errorPanel, badge, jobStatusBadge, toast, toastError, field, stageChip, icon,
@@ -211,6 +212,35 @@ function generationPanel(snap, models, reload) {
   );
   intensity.value = musicSettings.intensity || "balanced";
 
+  const llmStatus = el("div", { class: "muted small" });
+  const llmFill = el("button", { class: "btn btn-sm", type: "button" },
+    icon("music", 13), "Fill with local LLM");
+  llmFill.onclick = async () => {
+    llmFill.disabled = true;
+    llmStatus.textContent = "Reading the project and composing settings…";
+    try {
+      const result = await suggestMusicSettings(state.config, state.currentProjectId);
+      const proposal = result.settings || {};
+      direction.value = proposal.direction || direction.value;
+      if (proposal.bpm != null) bpm.value = String(proposal.bpm);
+      selectProposedOption(keyScale, proposal.key_scale);
+      selectProposedOption(timeSig, proposal.time_signature);
+      if (["subtle", "balanced", "expressive"].includes(proposal.intensity)) {
+        intensity.value = proposal.intensity;
+      }
+      llmStatus.replaceChildren(
+        badge("good", result.model ? `local LLM · ${result.model}` : "local LLM", false),
+        result.rationale ? el("span", {}, ` ${result.rationale}`) : null,
+      );
+      toast("good", "Music settings drafted", "Review the local LLM's choices, then save or edit them.");
+    } catch (err) {
+      llmStatus.textContent = "";
+      toastError(err, "draft music settings");
+    } finally {
+      llmFill.disabled = false;
+    }
+  };
+
   const durationBox = el("input", {
     type: "text", class: "input", readonly: true,
     value: snap.music && snap.music.duration_seconds
@@ -329,6 +359,17 @@ function generationPanel(snap, models, reload) {
         readinessReadinessBadge(ace, isReady),
       ),
       el("div", { class: "panel-body stack" },
+        el("div", { class: "music-llm-draft" },
+          el("div", { class: "row" },
+            el("div", {},
+              el("div", { class: "small", style: { fontWeight: "650" } }, "Need a starting point?"),
+              el("div", { class: "hint" }, "Your local LLM can choose the prompt, BPM, key, meter, and intensity from the project."),
+            ),
+            el("span", { class: "spacer" }),
+            llmFill,
+          ),
+          llmStatus,
+        ),
         el("div", { class: "field" },
           el("label", {}, "Music direction"),
           direction,
@@ -360,6 +401,15 @@ function generationPanel(snap, models, reload) {
     ),
     soundtrackPanel(snap),
   );
+}
+
+function selectProposedOption(select, value) {
+  if (value == null || value === "") return;
+  const text = String(value);
+  if (![...select.options].some((option) => option.value === text)) {
+    select.append(el("option", { value: text }, text));
+  }
+  select.value = text;
 }
 
 /**
@@ -660,16 +710,17 @@ function createCuesState(snap, duration) {
   const base = snap.score_plan
     ? {
         duration_seconds: snap.score_plan.duration_seconds || duration,
+        music_gain_db: Number(snap.score_plan.music_gain_db) || 0,
         source_music_hash: snap.score_plan.source_music_hash || null,
         cues: (snap.score_plan.cues || []).map((c) => ({ ...c })),
       }
-    : { duration_seconds: duration, source_music_hash: null, cues: [] };
+    : { duration_seconds: duration, music_gain_db: 0, source_music_hash: null, cues: [] };
   // `cs` = the local (unsaved) cue state. The module-level `state` import is
   // the application state and is NOT shadowed here.
   const cs = {
     baseRevision: snap.score_plan_revision || 0,
     base,
-    working: { duration_seconds: base.duration_seconds, source_music_hash: base.source_music_hash, cues: base.cues.map((c) => ({ ...c })) },
+    working: { duration_seconds: base.duration_seconds, music_gain_db: base.music_gain_db, source_music_hash: base.source_music_hash, cues: base.cues.map((c) => ({ ...c })) },
     selectedId: null,
     dirty: false,
   };
@@ -677,7 +728,16 @@ function createCuesState(snap, duration) {
   cs.cues = () => cs.working.cues;
   cs.duration = () => cs.working.duration_seconds;
   cs.isDirty = () => cs.dirty;
+  cs.musicGainDb = () => cs.working.music_gain_db;
   cs.markDirty = (value = true) => { cs.dirty = value; };
+
+  cs.setMusicGainDb = (value, region) => {
+    const next = Math.min(Math.max(Number(value) || 0, -60), 12);
+    if (next === cs.working.music_gain_db) return;
+    cs.working.music_gain_db = next;
+    cs.markDirty(true);
+    if (region) refreshRegion(cs, snap, region);
+  };
 
   cs.select = (cueId, region) => {
     cs.selectedId = cueId;
@@ -775,6 +835,7 @@ function createCuesState(snap, duration) {
   cs.discard = (region) => {
     cs.working = {
       duration_seconds: cs.base.duration_seconds,
+      music_gain_db: cs.base.music_gain_db,
       source_music_hash: cs.base.source_music_hash,
       cues: cs.base.cues.map((c) => ({ ...c })),
     };
@@ -785,7 +846,12 @@ function createCuesState(snap, duration) {
 
   /** Persist the working plan; on success the base advances to the saved revision. */
   cs.save = async (region, afterSave) => {
-    const plan = serializePlan(cs.working.duration_seconds, cs.working.cues, cs.working.source_music_hash);
+    const plan = serializePlan(
+      cs.working.duration_seconds,
+      cs.working.cues,
+      cs.working.source_music_hash,
+      cs.working.music_gain_db,
+    );
     const result = await saveScorePlan(state.config, state.currentProjectId, {
       plan,
       expectedRevision: cs.baseRevision,
@@ -793,6 +859,7 @@ function createCuesState(snap, duration) {
     cs.baseRevision = result.revision;
     cs.base = {
       duration_seconds: plan.duration_seconds,
+      music_gain_db: plan.music_gain_db,
       source_music_hash: plan.source_music_hash,
       cues: plan.cues.map((c) => ({ ...c })),
     };
@@ -883,6 +950,29 @@ function cuesPanel(state, snap, region) {
     icon("plus", 13), "Add at playhead");
   const saveBtn = el("button", { class: "btn btn-primary", type: "button", disabled: !state.dirty }, "Save plan");
   const discardBtn = el("button", { class: "btn btn-ghost", type: "button", disabled: !state.dirty }, "Discard");
+  const gainValue = el("input", {
+    type: "number", class: "input music-level-number", min: "-60", max: "12", step: "0.5",
+    value: String(state.musicGainDb()), "aria-label": "Music level adjustment in decibels",
+  });
+  const gainSlider = el("input", {
+    type: "range", class: "input", min: "-60", max: "12", step: "0.5",
+    value: String(state.musicGainDb()), "aria-label": "Music level adjustment",
+  });
+  gainSlider.oninput = () => { gainValue.value = gainSlider.value; };
+  gainSlider.onchange = () => state.setMusicGainDb(parseFloat(gainSlider.value), region);
+  gainValue.onchange = () => state.setMusicGainDb(parseFloat(gainValue.value), region);
+  const levelControl = el("div", { class: "music-level-control" },
+    el("div", { class: "row" },
+      el("div", {},
+        el("div", { class: "small", style: { fontWeight: "650" } }, "Music level"),
+        el("div", { class: "hint" }, "Adjusts the whole bed relative to the normal narration-safe mix."),
+      ),
+      el("span", { class: "spacer" }),
+      gainValue,
+      el("span", { class: "muted small mono" }, "dB"),
+    ),
+    gainSlider,
+  );
 
   addBtn.onclick = () => {
     const time = region._timeline ? region._timeline.getTime() : 0;
@@ -942,7 +1032,7 @@ function cuesPanel(state, snap, region) {
         el("span", { class: "spacer" }),
         addBtn,
       ),
-      el("div", { class: "panel-body stack" }, listRows),
+      el("div", { class: "panel-body stack" }, levelControl, listRows),
     ),
     el("div", { class: "panel" },
       el("div", { class: "row" },

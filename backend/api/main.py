@@ -847,6 +847,18 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+    @application.post("/api/projects/{project_id}/music/suggest-settings")
+    def suggest_music_settings(project_id: str) -> dict[str, Any]:
+        """Ask only the configured local LLM for an unapplied settings draft."""
+        try:
+            return service.suggest_music_direction(project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.get("/api/projects/{project_id}/music/media/{name}")
     def score_media_file(project_id: str, name: str) -> FileResponse:
         try:

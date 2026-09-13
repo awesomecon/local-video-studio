@@ -74,6 +74,7 @@ from backend.music import (
     deterministic_auto_score,
     hash_audio_file,
     llm_auto_score,
+    llm_music_direction,
     load_score_mix_manifest,
     load_score_plan,
     load_score_preview_manifest,
@@ -8899,6 +8900,38 @@ class PipelineService:
             "suggestions": [suggestion.model_dump(mode="json") for suggestion in suggestions],
             "locked_cue_times": [cue["time_seconds"] for cue in locked_cues],
             "note": note,
+        }
+
+    def suggest_music_direction(self, project_id: str) -> dict[str, Any]:
+        """Return reviewable generation settings from the configured local LLM.
+
+        This is deliberately read-only. The frontend fills its form with the
+        proposal, and only the existing explicit Save action changes project
+        settings or invalidates generated media.
+        """
+        project = self._project(project_id)
+        llm = self.director.llm
+        if llm is None:
+            raise PipelineError("The local LLM is not configured or available.")
+        model = project.selected_llm_model
+        if not model or model == "auto":
+            model = None
+        try:
+            proposal = llm_music_direction(
+                llm,
+                project=project,
+                scenes=self.database.list_scenes(project.id),
+                current_settings=(project.settings or {}).get("music", {}) or {},
+                model=model,
+            )
+        except Exception as exc:
+            raise PipelineError(f"The local LLM could not propose music settings: {exc}") from exc
+        return {
+            "source": "local_llm",
+            "model": model,
+            "settings": proposal.model_dump(mode="json", exclude={"rationale"}),
+            "rationale": proposal.rationale,
+            "applied": False,
         }
 
     def _auto_score_context(

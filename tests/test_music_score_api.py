@@ -598,6 +598,14 @@ def test_auto_score_404_for_unknown_project(tmp_path: Path) -> None:
     assert client.post("/api/projects/does-not-exist/music/auto-score").status_code == 404
 
 
+def test_music_settings_proposal_requires_local_llm(tmp_path: Path) -> None:
+    _, client = _app(tmp_path)
+    project_id = _create_project(client)
+    response = client.post(f"/api/projects/{project_id}/music/suggest-settings")
+    assert response.status_code == 409
+    assert "local LLM" in response.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Auto score: local-LLM preference and deterministic fallback
 # ---------------------------------------------------------------------------
@@ -621,6 +629,38 @@ def _patch_llm(app, payload) -> _FakeLlmBackend:
     fake = _FakeLlmBackend(payload)
     app.state.service.director.llm = fake
     return fake
+
+
+def test_local_llm_proposes_unapplied_music_settings(tmp_path: Path) -> None:
+    app, client = _app(tmp_path)
+    project_id = _create_project(client)
+    fake = _patch_llm(app, {
+        "direction": "Restrained analog pulse, felt piano, warm bass, no vocals",
+        "bpm": 84,
+        "key_scale": "D minor",
+        "time_signature": "4",
+        "intensity": "balanced",
+        "rationale": "Leaves space for narration while supporting the reveal.",
+    })
+
+    response = client.post(f"/api/projects/{project_id}/music/suggest-settings")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "local_llm"
+    assert body["applied"] is False
+    assert body["settings"]["bpm"] == 84
+    assert body["settings"]["key_scale"] == "D minor"
+    assert body["rationale"]
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["structured"] is True
+    assert call["thinking_budget_tokens"] > 0
+    prompt = " ".join(message["content"] for message in call["messages"])
+    assert "scoring a short" in prompt
+
+    # Suggestions only fill the client form; the project is unchanged.
+    snapshot = client.get(f"/api/projects/{project_id}").json()
+    assert snapshot["project"]["settings"].get("music") is None
 
 
 def test_auto_score_prefers_the_local_llm(tmp_path: Path) -> None:

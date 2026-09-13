@@ -53,7 +53,7 @@ def test_score_studio_modules_exist() -> None:
 def test_api_helpers_for_score_studio() -> None:
     api = _js("api.js")
     for name in ("musicStudio", "saveScorePlan", "scorePreview",
-                 "uploadScoreEffect", "autoScore"):
+                 "uploadScoreEffect", "autoScore", "suggestMusicSettings"):
         assert f"function {name}(" in api, name
     # The score-plan write is optimistic: it must send the expected revision.
     assert "expectedRevision" in api
@@ -290,6 +290,18 @@ def test_generation_panel_persists_music_settings() -> None:
     assert "Regenerate music" in page
     assert "generateMusic(" in page
     assert "registerLiveUpdate" in page
+
+
+def test_music_level_and_llm_settings_controls_are_reviewable() -> None:
+    page = _js("pages/music.js")
+    cues = _js("music/cues.js")
+    assert "Fill with local LLM" in page
+    assert "suggestMusicSettings(" in page
+    assert "Review the local LLM's choices" in page
+    assert "Music level" in page
+    assert "music_gain_db" in page
+    assert "music_gain_db" in cues
+    assert "Save plan" in page
 
 # ---------------------------------------------------------------- phase 6
 
