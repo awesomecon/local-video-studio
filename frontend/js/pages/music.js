@@ -20,6 +20,12 @@
  * Layout is responsive: desktop puts Generation / Timeline / Cues in three
  * columns, tablet stacks the cue inspector across the bottom, mobile
  * collapses to a single column in reading order.
+ *
+ * Phase 6 (deferred, intentionally absent): no region-repaint controls,
+ * no multi-GPU variant fan-out, and no model-generated impacts. A future
+ * "Repaint Selection" control may only appear when
+ * snap.music.ace.capabilities.regional_audio_inpaint is true, which the
+ * backend derives from the installed ACE-Step workflows.
  */
 
 import { el, fmtDate, fmtDuration, shortId } from "../dom.js";

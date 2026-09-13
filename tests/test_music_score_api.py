@@ -154,6 +154,21 @@ def test_studio_snapshot_shape(tmp_path: Path) -> None:
     assert isinstance(body["jobs"], list)
 
 
+def test_studio_snapshot_reports_ace_capabilities(tmp_path: Path) -> None:
+    """Phase 6: advanced score controls (repaint) stay hidden until the
+    installed ACE-Step workflows genuinely support regional audio editing;
+    the studio snapshot reports the file-based capability even with ACE
+    disabled so the frontend gate needs no live ComfyUI probe."""
+    app, client = _app(tmp_path)
+    project_id = _create_project(client)
+
+    response = client.get(f"/api/projects/{project_id}/music/studio")
+    assert response.status_code == 200
+    ace = response.json()["music"]["ace"]
+    assert ace["enabled"] is False
+    assert ace["capabilities"]["regional_audio_inpaint"] is False
+
+
 def test_studio_snapshot_404_for_unknown_project(tmp_path: Path) -> None:
     _, client = _app(tmp_path)
     response = client.get("/api/projects/does-not-exist/music/studio")

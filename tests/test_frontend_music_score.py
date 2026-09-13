@@ -17,7 +17,11 @@ frontend/tests/static_checks.py). They pin the contracts the plan relies on:
     are displayed distinctly, and only touch the saved plan after acceptance,
     with locked cues always preserved;
   - sound effects upload locally (WAV/FLAC/MP3) — the UI exposes no remote
-    audio processing.
+    audio processing;
+  - Phase 6: deferred features (region repaint, multi-GPU variants,
+    model-generated impacts) ship without fake controls; a future repaint
+    button is gated on the workflow-derived ``regional_audio_inpaint``
+    capability.
 """
 
 from pathlib import Path
@@ -239,3 +243,33 @@ def test_generation_panel_persists_music_settings() -> None:
     assert "Regenerate music" in page
     assert "generateMusic(" in page
     assert "registerLiveUpdate" in page
+
+# ---------------------------------------------------------------- phase 6
+
+
+def test_deferred_controls_are_absent() -> None:
+    """Phase 6: deferred features must not ship as fake controls.
+
+    The Music screen has no region-repaint/inpaint control, no "Repaint
+    Selection" button, and no multi-GPU variant or generated-impact UI. The
+    only gate for un-hiding a repaint control later is the workflow-derived
+    ``regional_audio_inpaint`` capability from the studio snapshot, which
+    the backend computes from the installed ACE-Step workflows.
+    """
+    for rel in (
+        "pages/music.js",
+        "music/timeline.js",
+        "music/cues.js",
+        "music/waveform.js",
+    ):
+        # Comment lines are skipped: the page's header may *document* the
+        # Phase 6 gate, only rendered controls are forbidden.
+        lines = _js(rel).splitlines()
+        code = "\n".join(
+            ln for ln in lines
+            if not ln.strip().startswith(("//", "*", "/*"))
+        ).lower()
+        assert "inpaint" not in code, rel
+        assert "repaint selection" not in code, rel
+    # The documented gate for a future repaint control is present.
+    assert "regional_audio_inpaint" in _js("pages/music.js")

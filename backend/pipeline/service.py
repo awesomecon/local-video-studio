@@ -8468,6 +8468,10 @@ class PipelineService:
         ace_payload: dict[str, Any] | None = {
             "enabled": ace_enabled,
             "selected": music_settings.get("backend") == "ace_step_comfyui",
+            # File-based flags (no ComfyUI probe) so deferred controls such
+            # as "Repaint Selection" stay hidden until the installed
+            # ACE-Step workflow genuinely supports regional audio editing.
+            "capabilities": self._ace_score_capabilities(),
         }
         if ace_enabled:
             # readiness() probes ComfyUI; only do that when the user has turned
@@ -8520,6 +8524,20 @@ class PipelineService:
             "stages": relevant_stages,
             "jobs": relevant_jobs,
         }
+
+    def _ace_score_capabilities(self) -> dict[str, bool]:
+        """Capability flags for the score studio's advanced controls.
+
+        Phase 6: repaint/inpaint, multi-GPU variant, and generated-impact
+        controls are deferred; the studio may only surface them when the
+        installed ACE-Step workflows genuinely provide the feature.  The
+        check is file-based and cheap, so it is safe even when ACE-Step is
+        disabled or ComfyUI is down.
+        """
+        try:
+            return self.registry.get("ace_step_comfyui").capabilities()
+        except Exception:
+            return {"regional_audio_inpaint": False}
 
     @staticmethod
     def _check_score_plan_duration(root: Path, plan: ScorePlan) -> None:
