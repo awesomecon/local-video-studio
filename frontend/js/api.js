@@ -1269,6 +1269,106 @@ export function generateMusic(config, projectId, body = {}, opts = {}) {
 }
 
 /**
+ * GET /api/projects/{id}/music/studio — the Score Studio snapshot.
+ * @typedef {Object} MusicStudioSnapshot
+ * @property {string} project_id
+ * @property {{settings: object, duration_seconds: number, ace: object}} music
+ * @property {{url: string, path: string, hash: string, duration_seconds?: number} | null} soundtrack
+ * @property {object[]} movements
+ * @property {{url: string, path: string, hash: string, plan_hash?: string, plan_revision?: number} | null} scored
+ * @property {{url: string | null, active_asset_id: string | null, master_path: string, duration_seconds: number} | null} narration
+ * @property {{scene_id: string, index: number, title: string, start_seconds: number, end_seconds: number, duration_seconds: number, music_mood: string | null}[]} scenes
+ * @property {{start_seconds: number, end_seconds: number, text: string}[]} captions
+ * @property {object | null} score_plan
+ * @property {number} score_plan_revision
+ * @property {string | null} score_plan_hash
+ * @property {{asset_id: string, url: string, effect_path: string, format: string, duration_seconds: number, name: string, size_bytes?: number}[]} effects
+ * @property {{url: string, hash: string | null, duration_seconds?: number, scored_hash?: string, has_narration?: boolean} | null} preview
+ * @property {object[string] | object} stages
+ * @property {import("./api.js").GenerationJob[]} jobs
+ */
+export function musicStudio(config, projectId, opts = {}) {
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/studio`, {
+    timeoutMs: 30000, ...opts,
+  });
+}
+
+/**
+ * PUT /api/projects/{id}/music/score-plan — validate and persist a full plan.
+ * `expectedRevision` is the revision the editor last saw (0 when unscored);
+ * a stale value yields a conflict (409) instead of clobbering newer cues.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {{plan: object, expectedRevision: number}} body
+ * @returns {Promise<{plan: object, revision: number, plan_hash: string, invalidated_stages: string[]}>}
+ */
+export function saveScorePlan(config, projectId, { plan, expectedRevision }, opts = {}) {
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/score-plan`, {
+    method: "PUT",
+    body: { plan, expected_revision: expectedRevision },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
+/**
+ * POST /api/projects/{id}/music/score-preview — render (or reuse) the fast
+ * narration-plus-score WAV. Much cheaper than a video render.
+ * @returns {Promise<{url: string, hash: string | null, duration_seconds?: number, scored: {url: string, hash: string | null, path: string | null}, has_narration: boolean, reused: boolean}>}
+ */
+export function scorePreview(config, projectId, { force = false } = {}, opts = {}) {
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/score-preview`, {
+    method: "POST", body: { force }, timeoutMs: 120000, ...opts,
+  });
+}
+
+/**
+ * POST /api/projects/{id}/music/effects — register a local one-shot
+ * (WAV/FLAC/MP3) as a project effect asset. Never uploaded to a remote host.
+ * @param {File} file
+ * @returns {Promise<{asset_id: string, url: string, name: string, effect_path: string, format: string, duration_seconds: number, size_bytes: number, sha256: string, duplicate: boolean}>}
+ */
+export async function uploadScoreEffect(config, projectId, file, opts = {}) {
+  const url = apiUrl(config, `/api/projects/${encodeURIComponent(projectId)}/music/effects`);
+  const form = new FormData();
+  form.append("file", file, file.name);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST", body: form, credentials: "same-origin", signal: opts.signal,
+    });
+  } catch (err) {
+    throw new ApiErrorInstance(normalizeError(err, {
+      url, userAborted: !!(opts.signal && opts.signal.aborted),
+    }));
+  }
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) {
+    const detail = body && typeof body === "object" && !Array.isArray(body) && "detail" in body
+      ? body.detail : body;
+    throw new ApiErrorInstance(classifyHttpError(response.status, detail));
+  }
+  return body;
+}
+
+/**
+ * POST /api/projects/{id}/music/auto-score — suggested cues from the local
+ * LLM (deterministic recipe fallback). Suggestions only: the saved plan is
+ * never touched by this call.
+ * @returns {Promise<{source: "local_llm"|"deterministic", model: string | null, duration_seconds: number, intensity: string, suggestions: {time_seconds: number, action: string, label: string, transition_seconds: number, reason: string, gain_db?: number | null, lowpass_hz?: number | null}[], locked_cue_times: number[], note: string}>}
+ */
+export function autoScore(config, projectId, { musicDirection, intensity } = {}, opts = {}) {
+  const body = {};
+  if (musicDirection != null) body.music_direction = musicDirection;
+  if (intensity != null) body.intensity = intensity;
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/auto-score`, {
+    method: "POST", body, timeoutMs: 180000, ...opts,
+  });
+}
+
+/**
  * POST /api/projects/{id}/render — assemble existing media into a final video.
  * @param {import("./config.js").LvsConfig} config
  * @param {string} id

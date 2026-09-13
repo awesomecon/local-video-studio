@@ -695,3 +695,286 @@ def test_compile_envelope_tracks_level_changes(music_root: Path) -> None:
     assert region.cutoff_hz == 2000.0
     assert region.start_sample == int(1.0 * SCORED_SAMPLE_RATE)
     assert region.end_sample == int(4.0 * SCORED_SAMPLE_RATE)
+
+
+# ---------------------------------------------------------------------------
+# Score preview (Phase 3) and deterministic auto-score
+# ---------------------------------------------------------------------------
+
+from array import array as _arr2  # noqa: E402
+
+from pydantic import ValidationError as _ValidationError  # noqa: E402
+
+from backend.music import (  # noqa: E402
+    AutoScoreSuggestion,
+    ScoreRenderError as _ScoreRenderError,
+    apply_auto_score_suggestions,
+    deterministic_auto_score,
+    load_score_preview_manifest,
+    mix_stereo,
+    render_score_preview,
+    score_preview_path,
+)
+
+
+def test_mix_stereo_adds_and_clamps() -> None:
+    dest = _arr2("h", [1000, 20000, -30000, -500])
+    addend = _arr2("h", [2000, 20000, -20000, 0])
+    mix_stereo(dest, addend)
+    assert dest[0] == 3000
+    assert dest[1] == 32767  # 20000 + 20000 clamps to full scale
+    assert dest[2] == -32768  # -30000 - 20000 clamps to the low rail
+    assert dest[3] == -500
+
+
+def test_mix_stereo_respects_gain_and_max_frames() -> None:
+    dest = _arr2("h", [0, 0, 0, 0])
+    addend = _arr2("h", [1000, 1000, 1000, 1000])
+    mix_stereo(dest, addend, gain_db=6.0, max_frames=1)
+    assert 1900 < dest[0] < 2100  # 1000 * 10**(6/20) ~ 1995
+    assert dest[2] == 0  # second frame not touched (max_frames=1)
+
+
+def test_render_score_preview_with_narration(music_root: Path) -> None:
+    background = music_root / "music" / "background.wav"
+    _stereo_background(background, seconds=2.0, hz=300.0)
+    # Scored bed and narration share a file here: the preview must be louder.
+    render_score_preview(music_root, scored_path=background, narration_path=background)
+    preview = score_preview_path(music_root)
+    assert preview.is_file()
+    samples, rate = _read_pcm(preview)
+    assert rate == 48000
+    master = _read_pcm(background)[0]
+    assert _rms(samples, 0.2, 1.5) > _rms(master, 0.2, 1.5)
+    manifest = load_score_preview_manifest(music_root)
+    assert manifest is not None
+    assert manifest["narration"] is not None
+    assert manifest["loudness_normalization"] is False
+    assert manifest["output"]["duration_seconds"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_render_score_preview_without_narration_is_a_copy(music_root: Path) -> None:
+    background = music_root / "music" / "background.wav"
+    _stereo_background(background, seconds=2.0)
+    master_bytes = background.read_bytes()
+    manifest = render_score_preview(music_root, scored_path=background)
+    preview = score_preview_path(music_root)
+    assert manifest["narration"] is None
+    # 48 kHz stereo bed with no narration: preview is byte-identical to the bed.
+    assert preview.read_bytes() == master_bytes
+
+
+def test_render_score_preview_requires_scored_bed(music_root: Path) -> None:
+    with pytest.raises(_ScoreRenderError):
+        render_score_preview(music_root, scored_path=music_root / "music" / "nope.wav")
+
+
+# --- deterministic auto-score ---
+
+
+def _suggestion_actions(suggestions) -> list[str]:
+    return [suggestion.action for suggestion in suggestions]
+
+
+def _first(suggestions, action: str):
+    return next(s for s in suggestions if s.action == action)
+
+
+def test_auto_score_recipe_shape() -> None:
+    suggestions = deterministic_auto_score(40.0)
+    actions = _suggestion_actions(suggestions)
+    assert actions.count("build") == 2
+    assert "pull_back" in actions
+    assert "silence" in actions
+    assert "restore" in actions
+    assert "end_sting" in actions
+    for suggestion in suggestions:
+        assert 0.0 <= suggestion.time_seconds <= 40.0
+        assert suggestion.reason
+        assert suggestion.transition_seconds > 0
+    times = [suggestion.time_seconds for suggestion in suggestions]
+    assert times == sorted(times)
+    restore = _first(suggestions, "restore").time_seconds
+    silence = _first(suggestions, "silence").time_seconds
+    assert restore >= 40.0 * 0.5
+    assert 0.0 <= restore - silence <= 0.4
+
+
+def test_auto_score_respects_locked_cue_times() -> None:
+    locked = [40.0 * 0.25]  # where the gentle build would land
+    suggestions = deterministic_auto_score(40.0, locked_cue_times=locked)
+    assert not any(
+        abs(s.time_seconds - 40.0 * 0.25) <= 0.5 and s.action == "build"
+        for s in suggestions
+    )
+
+
+def test_auto_score_empty_duration_returns_nothing() -> None:
+    assert deterministic_auto_score(0.0) == []
+
+
+def test_auto_score_suggestion_to_cue_is_auto_and_unlocked() -> None:
+    cue = deterministic_auto_score(40.0)[0].to_cue()
+    assert cue.source == "auto"
+    assert cue.locked is False
+    assert cue.id
+
+
+def test_auto_score_suggestion_rejects_invalid_fields() -> None:
+    with pytest.raises(_ValidationError):
+        AutoScoreSuggestion(time_seconds=1.0, action="not_an_action")
+    with pytest.raises(_ValidationError):
+        AutoScoreSuggestion(time_seconds=-1.0, action="build")
+    with pytest.raises(_ValidationError):
+        AutoScoreSuggestion(time_seconds=1.0, action="build", bogus=1)
+
+
+def test_apply_auto_score_preserves_locked_cues() -> None:
+    plan = _plan([_cue(10.0, "silence", locked=True, source="manual")])
+    suggestions = [
+        AutoScoreSuggestion(time_seconds=10.1, action="silence", reason="x"),
+        AutoScoreSuggestion(time_seconds=30.0, action="build", reason="y"),
+    ]
+    merged, added = apply_auto_score_suggestions(plan, suggestions)
+    auto_silences = [c for c in merged.cues if c.action == "silence" and c.source == "auto"]
+    assert auto_silences == [], "a locked silence protects that region from auto silence"
+    assert any(c.action == "build" and c.source == "auto" for c in merged.cues)
+    locked = [c for c in merged.cues if c.locked]
+    assert len(locked) == 1 and locked[0].time_seconds == 10.0
+    assert len(added) == 1
+    assert [c.time_seconds for c in merged.cues] == sorted(
+        c.time_seconds for c in merged.cues
+    )
+
+
+# --- local-LLM auto score (Phase 4) ---
+
+from backend.music import (  # noqa: E402
+    AUTO_SCORE_JSON_SCHEMA,
+    AutoScoreProposal,
+    build_auto_score_prompt,
+    llm_auto_score,
+    validate_auto_score_payload,
+)
+
+
+class _FakeLlmBackend:
+    """Stands in for LocalLLMBackend.complete in auto-score tests."""
+
+    def __init__(self, payload) -> None:
+        self.payload = payload
+        self.calls: list[dict] = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self.payload, BaseException):
+            raise self.payload
+        return self.payload
+
+
+def _auto_score_context(**overrides) -> dict:
+    context = {
+        "duration_seconds": 40.0,
+        "music_direction": "tense documentary tension",
+        "intensity": "balanced",
+        "narration_segments": [
+            {"start_seconds": 1.0, "end_seconds": 5.0, "text": "In 2016 the idea was born"},
+            {"start_seconds": 30.0, "end_seconds": 34.0, "text": "Today, the neural link is real"},
+        ],
+        "scene_spans": [
+            {"scene_id": "a", "index": 0, "title": "Origins", "start_seconds": 0.0, "end_seconds": 20.0},
+            {"scene_id": "b", "index": 1, "title": "The Reveal", "start_seconds": 20.0, "end_seconds": 40.0},
+        ],
+        "emphasis_phrases": [{"text": "the neural link is real", "start_seconds": 30.0}],
+        "locked_cues": [{"time_seconds": 12.0, "action": "silence", "label": "manual hold"}],
+        "effect_assets": ["impact.wav"],
+    }
+    context.update(overrides)
+    return context
+
+
+def test_auto_score_json_schema_covers_the_cue_vocabulary() -> None:
+    items = AUTO_SCORE_JSON_SCHEMA["properties"]["cues"]["items"]
+    assert set(items["properties"]) == {
+        "time_seconds", "action", "label", "transition_seconds",
+        "reason", "gain_db", "lowpass_hz",
+    }
+    assert set(items["properties"]["action"]["enum"]) == {
+        "build", "pull_back", "silence", "restore", "impact", "riser", "end_sting",
+    }
+    # Grammar-safe: no string length bounds for the llama.cpp compiler.
+    assert "maxLength" not in str(AUTO_SCORE_JSON_SCHEMA)
+
+
+def test_auto_score_prompt_carries_only_local_project_context() -> None:
+    messages = build_auto_score_prompt(_auto_score_context())
+    joined = " ".join(message["content"] for message in messages)
+    assert "tense documentary tension" in joined
+    assert "In 2016 the idea was born" in joined
+    assert "Today, the neural link is real" in joined
+    assert "Origins" in joined and "The Reveal" in joined
+    assert "the neural link is real" in joined
+    assert "manual hold" in joined and "impact.wav" in joined
+    assert "40.000s" in joined  # the soundtrack length is stated
+    # The prompt must stay local: no URLs, no remote hosts, no keys.
+    assert "http" not in joined
+    assert "api_key" not in joined.lower()
+
+
+def test_llm_auto_score_validates_and_sanitizes() -> None:
+    backend = _FakeLlmBackend({
+        "cues": [
+            # Out-of-range time: clamped to the soundtrack end.
+            {"time_seconds": 99.0, "action": "end_sting", "label": "Late sting", "reason": "lands the ending"},
+            # Crowds the locked silence at 12s: dropped.
+            {"time_seconds": 12.3, "action": "silence", "label": "Auto silence", "reason": "quiet beat"},
+            # Near the locked cue but a different action: kept.
+            {"time_seconds": 11.4, "action": "pull_back", "label": "Sit back", "reason": "room for voice", "gain_db": -6},
+            # In range, sorted before the clamped sting.
+            {"time_seconds": 2.0, "action": "build", "label": "Opening lift", "reason": "establish bed"},
+        ],
+    })
+    suggestions = llm_auto_score(backend, context=_auto_score_context())
+    assert [s.action for s in suggestions] == ["build", "pull_back", "end_sting"]
+    assert suggestions[2].time_seconds == 40.0  # clamped, not dropped
+    call = backend.calls[0]
+    assert call["structured"] is True
+    assert call["json_schema"] is AUTO_SCORE_JSON_SCHEMA
+    assert call["thinking_budget_tokens"] is not None  # reasoning stays enabled
+    assert call["validator"] is validate_auto_score_payload
+    # The prompt carries the full creative context: narration, scenes, emphasis.
+    context_blob = str(call["messages"][1]["content"])
+    assert "Timed narration" in context_blob
+    assert "Scene / composition boundaries" in context_blob
+    assert "Locked manual cues" in context_blob
+
+
+def test_llm_auto_score_rejects_malformed_structured_payload() -> None:
+    backend = _FakeLlmBackend({
+        "cues": [
+            {"time_seconds": 5.0, "action": "not_an_action", "label": "x", "reason": "y"},
+        ],
+    })
+    with pytest.raises(_ValidationError):
+        llm_auto_score(backend, context=_auto_score_context())
+
+
+def test_llm_auto_score_rejects_payload_with_unknown_keys() -> None:
+    backend = _FakeLlmBackend({"cues": [], "extra": 1})
+    with pytest.raises(_ValidationError):
+        llm_auto_score(backend, context=_auto_score_context())
+
+
+def test_llm_auto_score_requires_a_positive_duration() -> None:
+    backend = _FakeLlmBackend({"cues": []})
+    with pytest.raises(ValueError):
+        llm_auto_score(backend, context=_auto_score_context(duration_seconds=0.0))
+
+
+def test_validate_auto_score_payload_accepts_minimal_cues() -> None:
+    proposal = validate_auto_score_payload({
+        "cues": [{"time_seconds": 3.5, "action": "silence"}],
+    })
+    assert proposal.cues[0].label == ""
+    assert proposal.cues[0].reason == ""
+    assert proposal.cues[0].transition_seconds == 0.25

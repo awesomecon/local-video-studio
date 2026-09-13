@@ -16,7 +16,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from backend.core import AppConfig, SecretValidationError, inspect_environment, load_config
 from backend.core.h3_policy import h3_policy_payload
@@ -30,6 +30,7 @@ from backend.models.errors import BackendError, BackendErrorCode
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
 from backend.pipeline import PipelineService
 from backend.pipeline.service import LaneResolutionRejected, PipelineError
+from backend.music import SCORE_MEDIA_FILES, ScorePlan
 from backend.schemas.paths import resolve_asset_path
 from backend.schemas import (
     AspectRatio, DurationMode, GenerationJob, JobStatus, ProjectCreate,
@@ -42,6 +43,33 @@ from backend.workers.gpu import GPUResourceManager
 
 class RenderRequest(BaseModel):
     force: bool = False
+
+
+class ScorePlanSaveRequest(BaseModel):
+    """Body for PUT /api/projects/{id}/music/score-plan.
+
+    ``plan`` is the full portable score-plan payload (validated against the
+    schema, including cue ids, times, and effect paths). ``expected_revision``
+    is the revision the editor last saw (0 for a project with no plan), giving
+    optimistic concurrency so a stale tab cannot clobber newer cues.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    plan: dict[str, Any]
+    expected_revision: int = Field(ge=0)
+
+
+class ScorePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    force: bool = False
+
+
+class AutoScoreRequest(BaseModel):
+    """Optional steering for POST /api/projects/{id}/music/auto-score."""
+
+    model_config = ConfigDict(extra="forbid")
+    music_direction: str | None = Field(default=None, max_length=2000)
+    intensity: Literal["subtle", "balanced", "expressive"] | None = None
 
 
 class EditorialSettingsEdit(BaseModel):
@@ -731,6 +759,112 @@ def create_app(
             )
             raise HTTPException(status_code=status_code, detail=exc.as_dict() if isinstance(exc, BackendError) else str(exc)) from None
         return job.model_dump(mode="json")
+
+    # ------------------------------------------------------------------
+    # Score Studio (Phase 3): studio snapshot, plan save, score preview,
+    # local effect upload, deterministic auto-score, and score media.
+    # ------------------------------------------------------------------
+
+    @application.get("/api/projects/{project_id}/music/studio")
+    def music_studio(project_id: str) -> dict[str, Any]:
+        try:
+            return service.music_studio_snapshot(project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @application.put("/api/projects/{project_id}/music/score-plan")
+    def save_music_score_plan(
+        project_id: str, request: ScorePlanSaveRequest,
+    ) -> dict[str, Any]:
+        try:
+            plan = ScorePlan.model_validate(request.plan)
+        except ValidationError as exc:
+            detail = [
+                {"type": error["type"], "loc": [str(part) for part in error["loc"]], "msg": error["msg"]}
+                for error in exc.errors()
+            ]
+            raise HTTPException(status_code=422, detail=detail) from None
+        try:
+            return service.save_music_score_plan(
+                project_id, plan, request.expected_revision,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.post("/api/projects/{project_id}/music/score-preview")
+    def create_score_preview(
+        project_id: str,
+        request: ScorePreviewRequest = ScorePreviewRequest(),
+    ) -> dict[str, Any]:
+        try:
+            return service.ensure_score_preview(project_id, force=request.force)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @application.post(
+        "/api/projects/{project_id}/music/effects",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def upload_score_effect(
+        project_id: str,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        data = await file.read()
+        content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].lower()
+        filename = file.filename or "effect"
+        try:
+            return service.import_score_effect(
+                project_id, filename=filename, data=data, content_type=content_type,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.post("/api/projects/{project_id}/music/auto-score")
+    def auto_score(
+        project_id: str,
+        request: AutoScoreRequest = AutoScoreRequest(),
+    ) -> dict[str, Any]:
+        try:
+            return service.suggest_score_cues(
+                project_id,
+                music_direction=request.music_direction,
+                intensity=request.intensity,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @application.get("/api/projects/{project_id}/music/media/{name}")
+    def score_media_file(project_id: str, name: str) -> FileResponse:
+        try:
+            project = service._project(project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        if name not in SCORE_MEDIA_FILES or "/" in name or "\\" in name:
+            raise HTTPException(status_code=404, detail="unknown score media file")
+        path = service.store.project_path(project) / "music" / name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="score media file not found")
+        if name.endswith(".wav"):
+            media_type = "audio/wav"
+        elif name.endswith(".json"):
+            media_type = "application/json"
+        else:
+            media_type = "application/octet-stream"
+        return FileResponse(path, media_type=media_type)
 
     @application.get("/api/tts/models")
     def tts_models() -> dict[str, Any]:

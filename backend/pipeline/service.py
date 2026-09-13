@@ -61,18 +61,32 @@ from backend.models.ideogram_prompt import (
 from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
 from backend.graphics import GraphicScreenGenerator, GraphicScreenManifest, GraphicScreenRenderer
 from backend.music import (
+    EFFECTS_DIRECTORY,
+    EFFECT_ACTIONS,
     MovementPlan,
     SCORE_MIX_WORKFLOW_VERSION,
+    SCORE_PREVIEW_FILENAME,
+    SCORE_PREVIEW_WORKFLOW_VERSION,
+    AutoScoreSuggestion,
+    ScoreCue,
     ScorePlan,
+    ScorePlanConflict,
+    deterministic_auto_score,
     hash_audio_file,
+    llm_auto_score,
     load_score_mix_manifest,
     load_score_plan,
+    load_score_preview_manifest,
     plan_hash as music_plan_hash,
     plan_movements,
     render_scored_background,
+    render_score_preview,
+    save_score_plan,
     score_mix_manifest_path,
     score_plan_hash,
+    score_preview_path,
     scored_background_path,
+    validate_score_plan_effects,
 )
 from backend.music import stitch as music_stitch
 from backend.core.h3_policy import (
@@ -84,7 +98,7 @@ from backend.core.h3_policy import (
 from backend.schemas.h3_continuity import (
     validate_continuity_graph, h3_continuity_status,
 )
-from backend.schemas.paths import portable_relative_path, resolve_asset_path
+from backend.schemas.paths import portable_relative_path, resolve_asset_path, safe_portable_filename
 from backend.rendering.frames import extract_last_frame, compute_sha256
 from backend.rendering.manifests import (
     SCENE_ASSEMBLY_WORKFLOW,
@@ -168,6 +182,13 @@ logger = logging.getLogger(__name__)
 MUSIC_SEED_BASE = 30_001
 # Fade-out/fade-in dip between stitched movements (keeps totals exact).
 MOVEMENT_DIP_SECONDS = 1.5
+
+# Score Studio effect-upload guardrails: one-shot sounds (impacts, risers,
+# stings) are short and small. Bounds keep the project directory lean and the
+# deterministic score mix fast.
+EFFECT_EXTENSIONS = frozenset({"wav", "flac", "mp3"})
+MAX_EFFECT_BYTES = 100 * 1024 * 1024
+MAX_EFFECT_SECONDS = 60.0
 
 
 class PipelineError(RuntimeError):
@@ -7340,7 +7361,7 @@ class PipelineService:
                     project,
                     "music",
                     project_dir=music_root,
-                    prompt=f"instrumental {project.style} background, restrained, no vocals",
+                    prompt=self._mock_music_prompt(project, music_settings),
                     duration=total_duration,
                     seed=MUSIC_SEED_BASE,
                     extra_settings={
@@ -7348,6 +7369,8 @@ class PipelineService:
                         "bpm": music_settings.get("bpm", 90),
                         "key_scale": music_settings.get("key_scale", "C major"),
                         "time_signature": str(music_settings.get("time_signature", "4")),
+                        "direction": str(music_settings.get("direction", "") or ""),
+                        "intensity": str(music_settings.get("intensity", "balanced") or "balanced"),
                     },
                 )
                 if result.outputs[0] != output:
@@ -7832,6 +7855,8 @@ class PipelineService:
             music.get("key_scale", "C major"),
             music.get("time_signature", "4"),
             music.get("language", "en"),
+            music.get("direction", ""),
+            music.get("intensity", "balanced"),
             project.style,
             music.get("mood", ""),
             music.get("instrumental", True),
@@ -7843,6 +7868,18 @@ class PipelineService:
             float(music.get("movement_seconds", 60) or 60),
         )
         return hashlib.sha256(json.dumps(components).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _mock_music_prompt(project: Project, music_settings: dict[str, Any]) -> str:
+        """Prompt recorded on the mock soundtrack (mirrors the ACE wording)."""
+        direction = str(music_settings.get("direction", "") or "").strip()
+        base = direction or f"instrumental {project.style} background, restrained"
+        intensity = str(music_settings.get("intensity", "balanced") or "balanced").strip().lower()
+        if intensity == "subtle":
+            base += ", sparse, gentle dynamics"
+        elif intensity == "expressive":
+            base += ", wide dynamic range, expressive swells"
+        return base + ", no vocals"
 
     @staticmethod
     def _movement_energy_words(energy: float) -> str:
@@ -7861,7 +7898,17 @@ class PipelineService:
     ) -> dict[str, Any]:
         instrumental = music_settings.get("instrumental", True)
         base_seed = int(music_settings.get("seed", MUSIC_SEED_BASE))
-        prompt_parts = [music_settings.get("style", project.style)]
+        # The dedicated music direction leads the prompt; the project's visual
+        # style is only a fallback for projects that never set one.
+        direction = str(music_settings.get("direction", "") or "").strip()
+        prompt_parts = [direction] if direction else [music_settings.get("style", project.style)]
+        intensity = str(music_settings.get("intensity", "balanced") or "balanced").strip().lower()
+        if intensity == "subtle":
+            prompt_parts.append("sparse, gentle dynamics, restrained texture")
+        elif intensity == "expressive":
+            prompt_parts.append("wide dynamic range, expressive swells, strong arc")
+        else:
+            prompt_parts.append("balanced dynamics")
         mood = music_settings.get("mood", "")
         if mood:
             prompt_parts.append(mood)
@@ -8155,6 +8202,7 @@ class PipelineService:
         plan = load_score_plan(root)
         if plan is None:
             return background
+        plan = self._resolve_score_plan_effect_assets(project, plan)
         scored = scored_background_path(root)
         if not force and self._stage_complete(project, "score_mix") and scored.is_file():
             manifest = load_score_mix_manifest(root)
@@ -8204,6 +8252,71 @@ class PipelineService:
             project, "score_mix", operation, backend="ffmpeg",
         )[0]
 
+    def _resolve_score_plan_effect_assets(
+        self, project: Project, plan: ScorePlan,
+    ) -> ScorePlan:
+        """Fill in project paths for effect cues that reference uploaded assets.
+
+        The saved plan keeps portable ``effect_asset_id`` references (the
+        Studio selects effects from the project's effect registry); the
+        renderer consumes project-relative paths. This returns a copy of the
+        plan with those paths resolved — the on-disk plan is untouched.
+        """
+        needs = [
+            cue for cue in plan.cues
+            if cue.action in EFFECT_ACTIONS
+            and cue.effect_path is None
+            and cue.effect_asset_id is not None
+        ]
+        if not needs:
+            return plan
+        asset_paths = {
+            asset.id: str(asset.filepath)
+            for asset in self.database.list_assets(project.id)
+            if asset.type is AssetType.AUDIO
+            and (asset.settings or {}).get("role") == "effect"
+        }
+        cues: list[ScoreCue] = []
+        for cue in plan.cues:
+            if (
+                cue.action in EFFECT_ACTIONS
+                and cue.effect_path is None
+                and cue.effect_asset_id is not None
+            ):
+                filepath = asset_paths.get(cue.effect_asset_id)
+                if filepath is None:
+                    raise PipelineError(
+                        f"cue {cue.id} references unknown effect asset "
+                        f"{cue.effect_asset_id}; the score mix cannot be rendered"
+                    )
+                cues.append(cue.model_copy(update={"effect_path": filepath}))
+            else:
+                cues.append(cue)
+        return ScorePlan.model_validate(plan.model_copy(update={"cues": cues}).model_dump())
+
+    def _check_score_plan_effect_assets(self, project: Project, plan: ScorePlan) -> None:
+        """Reject effect cues whose asset id is not in the project registry.
+
+        Failing at save time keeps the Studio from persisting a plan the
+        deterministic renderer would later refuse to mix.
+        """
+        asset_ids = {
+            asset.id
+            for asset in self.database.list_assets(project.id)
+            if asset.type is AssetType.AUDIO
+            and (asset.settings or {}).get("role") == "effect"
+        }
+        missing = sorted({
+            cue.effect_asset_id
+            for cue in plan.cues
+            if cue.effect_asset_id is not None
+            and cue.effect_asset_id not in asset_ids
+        })
+        if missing:
+            raise ValueError(
+                "unknown effect asset(s): " + ", ".join(missing)
+            )
+
     @staticmethod
     def _score_mix_is_current(
         project: Project, root: Path, plan: ScorePlan, manifest: dict[str, Any],
@@ -8225,6 +8338,585 @@ class PipelineService:
         except OSError:
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # Score Studio (Phase 3): studio snapshot, plan save, score preview,
+    # local effect upload, and deterministic auto-score suggestions.
+    # ------------------------------------------------------------------
+
+    def _score_background_duration(self, project: Project) -> float:
+        """Soundtrack length: the master if present, else the narration target."""
+        background = self.store.project_path(project) / "music" / "background.wav"
+        if background.is_file():
+            try:
+                return wav_duration(background)
+            except Exception:
+                pass
+        return self._effective_music_duration(project)
+
+    def _studio_scene_spans(self, project: Project) -> list[dict[str, Any]]:
+        """Scene/composition boundaries on the best available audio clock."""
+        scenes = self.database.list_scenes(project.id)
+        bounds = self._narration_scene_bounds(project)
+        spans: list[dict[str, Any]] = []
+        cursor = 0.0
+        for scene in scenes:
+            if bounds is not None and scene.id in bounds:
+                start, end = bounds[scene.id]
+            else:
+                start = cursor
+                end = cursor + scene.duration
+            spans.append(
+                {
+                    "scene_id": scene.id,
+                    "index": scene.index,
+                    "title": scene.title,
+                    "start_seconds": round(start, 3),
+                    "end_seconds": round(end, 3),
+                    "duration_seconds": round(end - start, 3),
+                    "music_mood": scene.music_mood,
+                }
+            )
+            cursor = end
+        return spans
+
+    def _music_manifest_movements(self, project: Project) -> list[dict[str, Any]]:
+        manifest = self._load_music_manifest(
+            self.store.project_path(project) / "music" / "manifest.json"
+        )
+        if not manifest:
+            return []
+        movements = manifest.get("movements") or []
+        return [entry for entry in movements if isinstance(entry, dict)]
+
+    def _score_artifact_info(
+        self, project: Project, name: str,
+    ) -> dict[str, Any] | None:
+        """Describe a score artifact (URL + hash + duration) if it exists."""
+        path = self.store.project_path(project) / "music" / name
+        if not path.is_file():
+            return None
+        info: dict[str, Any] = {
+            "url": f"/api/projects/{project.id}/music/media/{name}",
+            "path": f"music/{name}",
+            "hash": hash_audio_file(path),
+        }
+        if name.endswith(".wav"):
+            try:
+                info["duration_seconds"] = round(wav_duration(path), 3)
+            except Exception:
+                pass
+        return info
+
+    def _score_effects_payload(self, project: Project) -> list[dict[str, Any]]:
+        effects: list[dict[str, Any]] = []
+        for asset in self.database.list_assets(project.id):
+            if asset.type is not AssetType.AUDIO or asset.settings.get("role") != "effect":
+                continue
+            payload = asset.model_dump(mode="json")
+            payload["asset_id"] = asset.id
+            payload["url"] = f"/api/projects/{project.id}/assets/{asset.id}/file"
+            payload["effect_path"] = asset.filepath
+            payload["format"] = asset.settings.get("format")
+            payload["duration_seconds"] = asset.settings.get("duration_seconds")
+            effects.append(payload)
+        effects.sort(key=lambda item: (item.get("created_at") or "", item.get("name", "")))
+        return effects
+
+    def music_studio_snapshot(self, project_id: str) -> dict[str, Any]:
+        """Assemble the Score Studio view of a project (read-only)."""
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        music_settings = (project.settings or {}).get("music", {}) or {}
+
+        soundtrack = self._score_artifact_info(project, "background.wav")
+        scored = self._score_artifact_info(project, "scored-background.wav")
+        preview = self._score_artifact_info(project, "score-preview.wav")
+
+        plan = load_score_plan(root)
+        mix_manifest = load_score_mix_manifest(root)
+        if scored is not None and mix_manifest:
+            plan_block = mix_manifest.get("plan") or {}
+            scored["plan_hash"] = plan_block.get("plan_hash")
+            scored["plan_revision"] = plan_block.get("revision")
+        if preview is not None:
+            preview_manifest = load_score_preview_manifest(root)
+            if preview_manifest:
+                preview["scored_hash"] = (preview_manifest.get("scored") or {}).get("sha256")
+                preview["has_narration"] = preview_manifest.get("narration") is not None
+
+        narration_payload: dict[str, Any] | None = None
+        master = root / "narration" / "master.wav"
+        if master.is_file():
+            active_id = None
+            try:
+                _, active_id = self.tts.list_narration_takes(project_id)
+            except Exception:
+                active_id = None
+            narration_payload = {
+                "url": (
+                    f"/api/projects/{project.id}/assets/{active_id}/file"
+                    if active_id
+                    else None
+                ),
+                "active_asset_id": active_id,
+                "master_path": "narration/master.wav",
+                "duration_seconds": round(wav_duration(master), 3),
+            }
+
+        ace_enabled = bool(self.config.backends.ace_step.enabled)
+        ace_payload: dict[str, Any] | None = {
+            "enabled": ace_enabled,
+            "selected": music_settings.get("backend") == "ace_step_comfyui",
+        }
+        if ace_enabled:
+            # readiness() probes ComfyUI; only do that when the user has turned
+            # ACE-Step on, so a disabled Studio snapshot stays local and fast.
+            try:
+                ace_payload["readiness"] = self.registry.get("ace_step_comfyui").readiness()
+            except Exception:
+                ace_payload["readiness"] = None
+
+        stage_state = self._read_stage_state(project).get("stages", {})
+        relevant_stages = {
+            name: stage_state[name]
+            for name in (
+                "music", "score_mix", "timeline", "render_preview",
+                "quality_control", "render_final",
+            )
+            if name in stage_state
+        }
+        relevant_jobs = [
+            job.model_dump(mode="json")
+            for job in self.jobs.list(project_id)
+            if job.stage in {"music", "score_mix", "render", "pipeline", "render_stage"}
+        ]
+
+        return {
+            "project_id": project.id,
+            "music": {
+                "settings": music_settings,
+                "duration_seconds": self._score_background_duration(project),
+                "ace": ace_payload,
+            },
+            "soundtrack": soundtrack,
+            "movements": self._music_manifest_movements(project),
+            "scored": scored,
+            "narration": narration_payload,
+            "scenes": self._studio_scene_spans(project),
+            "captions": [
+                {
+                    "start_seconds": cue.start_seconds,
+                    "end_seconds": cue.end_seconds,
+                    "text": cue.text,
+                }
+                for cue in self._subtitle_cues(project)
+            ],
+            "score_plan": plan.model_dump(mode="json") if plan is not None else None,
+            "score_plan_revision": plan.revision if plan is not None else 0,
+            "score_plan_hash": score_plan_hash(plan) if plan is not None else None,
+            "effects": self._score_effects_payload(project),
+            "preview": preview,
+            "stages": relevant_stages,
+            "jobs": relevant_jobs,
+        }
+
+    @staticmethod
+    def _check_score_plan_duration(root: Path, plan: ScorePlan) -> None:
+        """Reject a plan whose length cannot line up with the soundtrack."""
+        background = root / "music" / "background.wav"
+        if not background.is_file():
+            return
+        try:
+            background_duration = wav_duration(background)
+        except Exception:
+            return
+        tolerance = max(0.5, 0.02 * background_duration)
+        if abs(plan.duration_seconds - background_duration) > tolerance:
+            raise ValueError(
+                f"score plan duration {plan.duration_seconds:.3f}s does not match the "
+                f"soundtrack ({background_duration:.3f}s); reload the studio and retry"
+            )
+
+    def save_music_score_plan(
+        self, project_id: str, plan: ScorePlan, expected_revision: int,
+    ) -> dict[str, Any]:
+        """Validate, atomically persist, and selectively invalidate a score plan.
+
+        ``expected_revision`` gives the caller optimistic concurrency: a stale
+        editor gets a conflict instead of clobbering newer cues. Only the mix
+        and its render descendants go stale; the generated soundtrack and all
+        visual/narration work are untouched.
+        """
+        with self._lock:
+            project = self._project(project_id)
+            root = self.store.project_path(project)
+            self._check_score_plan_effect_assets(project, plan)
+            validate_score_plan_effects(root, plan)
+            self._check_score_plan_duration(root, plan)
+            try:
+                saved = save_score_plan(root, plan, expected_revision=expected_revision)
+            except ScorePlanConflict as exc:
+                raise PipelineError(str(exc)) from exc
+            present = set(self._read_stage_state(project).get("stages", {})) & self.SCORE_PLAN_DOWNSTREAM_STAGES
+            self._invalidate_stages(project, self.SCORE_PLAN_DOWNSTREAM_STAGES)
+            return {
+                "plan": saved.model_dump(mode="json"),
+                "revision": saved.revision,
+                "plan_hash": score_plan_hash(saved),
+                "invalidated_stages": sorted(present),
+            }
+
+    def _record_score_preview_asset(self, project: Project) -> Asset:
+        output = score_preview_path(self.store.project_path(project))
+        result = GenerationResult(
+            outputs=(output,),
+            metadata={
+                "backend": "ffmpeg",
+                "model": "ffmpeg",
+                "model_version": self.renderer.binaries.source,
+                "workflow_version": SCORE_PREVIEW_WORKFLOW_VERSION,
+                "seed": 0,
+                "settings": {"loudness_normalization": False},
+            },
+            peak_vram_gb=0,
+        )
+        return self._record_asset(
+            project, None, output, AssetType.AUDIO, result, role="score_preview",
+        )
+
+    @staticmethod
+    def _score_preview_is_current(
+        root: Path, scored_path: Path, narration_path: Path | None,
+    ) -> bool:
+        """True when the cached preview still matches its scored bed and narration."""
+        manifest = load_score_preview_manifest(root)
+        if not manifest:
+            return False
+        preview = score_preview_path(root)
+        if not preview.is_file():
+            return False
+        try:
+            if (manifest.get("scored") or {}).get("sha256") != hash_audio_file(scored_path):
+                return False
+        except OSError:
+            return False
+        recorded_narration = (manifest.get("narration") or {}).get("sha256")
+        if narration_path is not None and narration_path.is_file():
+            try:
+                if recorded_narration != hash_audio_file(narration_path):
+                    return False
+            except OSError:
+                return False
+        elif recorded_narration is not None:
+            return False
+        try:
+            if (manifest.get("output") or {}).get("sha256") != hash_audio_file(preview):
+                return False
+        except OSError:
+            return False
+        return True
+
+    def ensure_score_preview(self, project_id: str, *, force: bool = False) -> dict[str, Any]:
+        """Render or reuse a fast narration-plus-score preview WAV.
+
+        The scored bed comes from the score stage (so cue moves are reflected)
+        and is mixed with the narration master as 48 kHz stereo PCM. This is a
+        listening check, not the deliverable mix, and never re-generates the
+        ACE-Step soundtrack.
+        """
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        background = root / "music" / "background.wav"
+        if not background.is_file():
+            raise PipelineError("Generate the soundtrack before previewing the score.")
+        scored = self._ensure_score_mix(project, force=force)
+        if scored is None or not scored.is_file():
+            raise PipelineError("The soundtrack could not be resolved for the score preview.")
+        narration = root / "narration" / "master.wav"
+        narration_path = narration if narration.is_file() else None
+        if not force and self._score_preview_is_current(root, scored, narration_path):
+            manifest = load_score_preview_manifest(root) or {}
+            reused = True
+        else:
+            manifest = render_score_preview(
+                root,
+                scored_path=scored,
+                narration_path=narration_path,
+                binaries=self.renderer.binaries,
+            )
+            self._record_score_preview_asset(project)
+            reused = False
+        return {
+            "url": f"/api/projects/{project.id}/music/media/{SCORE_PREVIEW_FILENAME}",
+            "hash": (manifest.get("output") or {}).get("sha256"),
+            "duration_seconds": (manifest.get("output") or {}).get("duration_seconds"),
+            "scored": {
+                "url": f"/api/projects/{project.id}/music/media/{scored.name}",
+                "hash": (manifest.get("scored") or {}).get("sha256"),
+                "path": (manifest.get("scored") or {}).get("path"),
+            },
+            "has_narration": narration_path is not None,
+            "reused": reused,
+        }
+
+    def import_score_effect(
+        self, project_id: str, *, filename: str, data: bytes, content_type: str,
+    ) -> dict[str, Any]:
+        """Register an uploaded local one-shot as a project effect asset.
+
+        The file is copied into ``music/effects/<name>-<hash8>.<ext>`` after its
+        format, size, and duration are validated; nothing leaves the machine.
+        Re-uploading identical content returns the existing asset.
+        """
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        extension = Path(filename).suffix.lower().lstrip(".")
+        if extension not in EFFECT_EXTENSIONS:
+            raise ValueError("effect files must be .wav, .flac, or .mp3")
+        if not data:
+            raise ValueError("the effect file is empty")
+        if len(data) > MAX_EFFECT_BYTES:
+            raise ValueError(
+                f"the effect is {len(data)} bytes; the limit is {MAX_EFFECT_BYTES}"
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        existing = next(
+            (
+                asset
+                for asset in self.database.list_assets(project.id)
+                if asset.type is AssetType.AUDIO
+                and asset.settings.get("role") == "effect"
+                and asset.hash == digest
+            ),
+            None,
+        )
+        if existing is not None:
+            settings = existing.settings
+            return {
+                "asset_id": existing.id,
+                "url": f"/api/projects/{project.id}/assets/{existing.id}/file",
+                "name": Path(existing.filepath).name,
+                "effect_path": existing.filepath,
+                "format": settings.get("format"),
+                "duration_seconds": settings.get("duration_seconds"),
+                "size_bytes": settings.get("size_bytes"),
+                "sha256": digest,
+                "duplicate": True,
+            }
+
+        effects_dir = root / EFFECTS_DIRECTORY
+        effects_dir.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".effect-upload-", suffix=f".{extension}", dir=effects_dir,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            info = probe_media(temporary, self.renderer.binaries)
+            duration = info.duration_seconds or 0.0
+            if duration > MAX_EFFECT_SECONDS:
+                raise ValueError(
+                    f"the effect is {duration:.1f}s; the limit is {MAX_EFFECT_SECONDS:.0f}s"
+                )
+            base_name = safe_portable_filename(Path(filename).stem or "effect")
+            destination = effects_dir / f"{base_name}-{digest[:8]}.{extension}"
+            os.replace(temporary, destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        result = GenerationResult(
+            outputs=(destination,),
+            metadata={
+                "backend": "upload",
+                "model": "upload",
+                "model_version": "1",
+                "workflow_version": "effect-upload-v1",
+                "seed": 0,
+                "settings": {
+                    "original_name": filename,
+                    "content_type": content_type,
+                    "format": extension,
+                    "duration_seconds": round(duration, 3),
+                    "size_bytes": len(data),
+                },
+            },
+            peak_vram_gb=0,
+        )
+        asset = self._record_asset(
+            project, None, destination, AssetType.AUDIO, result, role="effect",
+        )
+        return {
+            "asset_id": asset.id,
+            "url": f"/api/projects/{project.id}/assets/{asset.id}/file",
+            "name": destination.name,
+            "effect_path": destination.relative_to(root).as_posix(),
+            "format": extension,
+            "duration_seconds": round(duration, 3),
+            "size_bytes": len(data),
+            "sha256": digest,
+            "duplicate": False,
+        }
+
+    def suggest_score_cues(
+        self,
+        project_id: str,
+        *,
+        music_direction: str | None = None,
+        intensity: str | None = None,
+    ) -> dict[str, Any]:
+        """Return auto-score suggestions without touching the saved plan.
+
+        The configured local LLM is the preferred author (structured JSON,
+        reasoning kept enabled inside its per-request budget); when it is
+        unavailable or its response is unusable the deterministic recipe over
+        project-local data (timed narration, scene spans, caption emphasis,
+        duration, direction, intensity, locked cues) takes over. Nothing is
+        sent to a remote service and the saved plan is never modified.
+        """
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        music_settings = (project.settings or {}).get("music", {}) or {}
+        direction = (
+            music_direction
+            if music_direction is not None
+            else str(music_settings.get("direction", "") or "")
+        )
+        level = (
+            intensity
+            if intensity is not None
+            else str(music_settings.get("intensity", "balanced") or "balanced")
+        )
+        duration = self._score_background_duration(project)
+        if duration <= 0:
+            raise PipelineError("Generate narration or the soundtrack before auto-scoring.")
+        spans = self._studio_scene_spans(project)
+        boundaries = [(span["start_seconds"], span["end_seconds"]) for span in spans]
+        plan = load_score_plan(root)
+        locked_cues = [
+            {
+                "time_seconds": cue.time_seconds,
+                "action": str(cue.action),
+                "label": cue.label,
+            }
+            for cue in (plan.cues if plan else [])
+            if cue.locked
+        ]
+        context = self._auto_score_context(project, duration, spans, locked_cues)
+
+        model = None
+        suggestions: list[AutoScoreSuggestion] | None = None
+        error: str | None = None
+        if self.director.llm is not None:
+            model = project.selected_llm_model
+            if not model or model == "auto":
+                model = None
+            try:
+                if model is not None:
+                    self.director.llm.model = model
+                    self.director.llm.selected_model()
+                suggestions = llm_auto_score(
+                    self.director.llm,
+                    context={**context, "music_direction": direction, "intensity": level},
+                    model=model,
+                )
+            except Exception as exc:  # noqa: BLE001 - any LLM failure degrades to the recipe
+                suggestions = None
+                error = str(exc)
+
+        if suggestions is not None:
+            source = "local_llm"
+            note = (
+                "Suggested cues from the local LLM; the saved score plan was not "
+                "changed. Accept cues to persist them."
+            )
+        else:
+            suggestions = deterministic_auto_score(
+                duration,
+                scene_boundaries=boundaries,
+                emphasis_times=[
+                    float(item["start_seconds"])
+                    for item in context["emphasis_phrases"]
+                    if isinstance(item, dict) and item.get("start_seconds") is not None
+                ],
+                locked_cue_times=[cue["time_seconds"] for cue in locked_cues],
+                intensity=level,
+                music_direction=direction,
+            )
+            source = "deterministic"
+            note = (
+                "Suggested cues from the deterministic recipe; the saved score plan "
+                "was not changed. Accept cues to persist them."
+            )
+            if error is not None:
+                note += f" (The local LLM pass was unavailable: {error})"
+        return {
+            "source": source,
+            "model": model if source == "local_llm" else None,
+            "duration_seconds": duration,
+            "intensity": level,
+            "suggestions": [suggestion.model_dump(mode="json") for suggestion in suggestions],
+            "locked_cue_times": [cue["time_seconds"] for cue in locked_cues],
+            "note": note,
+        }
+
+    def _auto_score_context(
+        self,
+        project: Project,
+        duration: float,
+        spans: list[dict[str, Any]],
+        locked_cues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Assemble the project-local context the auto-score paths consume.
+
+        Narration segments come from the subtitle cues (audio-derived when the
+        alignment stage ran, estimated from scene narration otherwise); the
+        emphasis phrases come from the saved Edit Plan's caption emphasis, with
+        times recovered by matching each phrase against the narration segments.
+        """
+        cues = self._subtitle_cues(project)
+        segments = [
+            {
+                "start_seconds": round(cue.start_seconds, 3),
+                "end_seconds": round(cue.end_seconds, 3),
+                "text": cue.text.strip(),
+            }
+            for cue in cues
+            if cue.text.strip()
+        ]
+
+        emphasis: list[dict[str, Any]] = []
+        try:
+            edit_plan = self.store.load_edit_plan(project.slug)
+        except Exception:  # noqa: BLE001 - classic projects have no edit plan
+            edit_plan = None
+        if edit_plan is not None and getattr(edit_plan, "caption_emphasis", None):
+            for item in edit_plan.caption_emphasis:
+                phrase = str(item.text).strip()
+                if not phrase:
+                    continue
+                start = next(
+                    (
+                        seg["start_seconds"]
+                        for seg in segments
+                        if phrase in seg["text"]
+                    ),
+                    None,
+                )
+                entry = {"text": phrase}
+                if start is not None:
+                    entry["start_seconds"] = start
+                emphasis.append(entry)
+
+        return {
+            "duration_seconds": duration,
+            "narration_segments": segments,
+            "scene_spans": spans,
+            "emphasis_phrases": emphasis,
+            "locked_cues": locked_cues,
+            "effect_assets": [effect["name"] for effect in self._score_effects_payload(project)],
+        }
 
     def _ensure_subtitles(self, project: Project, *, force: bool) -> list[SubtitleCue]:
         root = self.store.project_path(project) / "subtitles"

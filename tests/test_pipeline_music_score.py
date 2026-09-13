@@ -266,3 +266,162 @@ def test_score_plan_downstream_set_never_touches_generation(tmp_path: Path) -> N
     assert not stages & {"music", "visuals", "narration", "plan", "subtitles", "references"}
     # The re-run endpoint accepts the new stage name.
     assert "score_mix" in PipelineService.RENDER_STAGE_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Effect cues that reference uploaded assets by registry id
+# ---------------------------------------------------------------------------
+
+
+def _effect_bytes(seconds: float = 0.25, hz: float = 2000.0) -> bytes:
+    import io
+
+    import wave as _wave
+
+    from array import array as _array
+
+    rate = 48000
+    frames = int(seconds * rate)
+    mono = [int(15000 * (i / frames) * (i / frames)) for i in range(frames)]
+    interleaved: list[int] = []
+    for value in mono:
+        interleaved.extend([value, value])
+    buffer = io.BytesIO()
+    with _wave.open(buffer, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(_array("h", interleaved).tobytes())
+    return buffer.getvalue()
+
+
+def _read_rms(path: Path, start: float, end: float, rate: int = 48000) -> float:
+    import math
+
+    import wave as _wave
+
+    from array import array as _array
+
+    with _wave.open(str(path), "rb") as handle:
+        samples = _array("h", handle.readframes(handle.getnframes()))
+    lo = int(start * rate) * 2
+    hi = min(int(end * rate) * 2, len(samples))
+    segment = samples[lo:hi]
+    if not segment:
+        return 0.0
+    return math.sqrt(sum(v * v for v in segment) / len(segment))
+
+
+def _write_48k_stereo_background(path: Path, seconds: float = 6.0, hz: float = 300.0, amp: int = 4000) -> None:
+    """Exact-format (48 kHz stereo s16) background: no FFmpeg resampling."""
+    import io
+
+    import wave as _wave
+
+    from array import array as _array
+
+    import math as _math
+
+    rate = 48000
+    frames = int(seconds * rate)
+    mono = [int(amp * _math.sin(2 * _math.pi * hz * i / rate)) for i in range(frames)]
+    interleaved: list[int] = []
+    for value in mono:
+        interleaved.extend([value, value])
+    buffer = io.BytesIO()
+    with _wave.open(buffer, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(_array("h", interleaved).tobytes())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(buffer.getvalue())
+
+
+def test_effect_cue_by_asset_id_is_mixed_at_its_cue_time(tmp_path: Path) -> None:
+    pipeline = service(tmp_path)
+    project = _create_project(pipeline)
+    project_id = project.id
+    root = _root(pipeline, project_id)
+    # An exact-format background keeps the mix a pure copy of the master
+    # outside the impact, so the assertions below are unambiguous.
+    _write_48k_stereo_background(root / "music" / "background.wav", seconds=6.0)
+    duration = 6.0
+
+    uploaded = pipeline.import_score_effect(
+        project_id, filename="impact.wav", data=_effect_bytes(), content_type="audio/wav",
+    )
+    plan = ScorePlan(
+        duration_seconds=duration,
+        cues=[
+            ScoreCue(
+                time_seconds=duration * 0.5,
+                action="impact",
+                effect_asset_id=uploaded["asset_id"],
+                effect_gain_db=0.0,
+            ),
+        ],
+    )
+    pipeline.save_music_score_plan(project_id, plan, expected_revision=0)
+
+    scored = pipeline._ensure_score_mix(pipeline._project(project_id), force=True)
+    assert scored is not None and scored.is_file()
+    background = root / "music" / "background.wav"
+    # The impact is a ramp that reaches full level at its end. The bed is
+    # playing throughout, so the proof is that the scored file is clearly
+    # louder than the untouched master in the window after the cue, while the
+    # region before the cue matches the master byte-for-byte.
+    cue = duration * 0.5
+    assert _read_rms(scored, cue + 0.12, cue + 0.24) > _read_rms(background, cue + 0.12, cue + 0.24) * 2.0
+    assert _read_rms(scored, 0.1, cue - 0.4) == pytest.approx(
+        _read_rms(background, 0.1, cue - 0.4), abs=1.0,
+    )
+
+
+def test_save_plan_rejects_unknown_effect_asset(tmp_path: Path) -> None:
+    pipeline = service(tmp_path)
+    project_id = _rendered(pipeline)
+    root = _root(pipeline, project_id)
+    background = root / "music" / "background.wav"
+    duration = probe_media(background, pipeline.renderer.binaries).duration_seconds
+    plan = ScorePlan(
+        duration_seconds=duration,
+        cues=[ScoreCue(time_seconds=1.0, action="impact", effect_asset_id="nope")],
+    )
+    with pytest.raises(ValueError):
+        pipeline.save_music_score_plan(project_id, plan, expected_revision=0)
+
+
+def test_mix_cache_survives_asset_id_resolution(tmp_path: Path) -> None:
+    pipeline = service(tmp_path)
+    project_id = _rendered(pipeline)
+    root = _root(pipeline, project_id)
+    uploaded = pipeline.import_score_effect(
+        project_id, filename="hit.wav", data=_effect_bytes(), content_type="audio/wav",
+    )
+    background = root / "music" / "background.wav"
+    duration = probe_media(background, pipeline.renderer.binaries).duration_seconds
+    plan = ScorePlan(
+        duration_seconds=duration,
+        source_music_hash=hash_audio_file(background),
+        source_backend="mock",
+        cues=[ScoreCue(
+            time_seconds=duration * 0.5,
+            action="impact",
+            effect_asset_id=uploaded["asset_id"],
+        )],
+    )
+    pipeline.save_music_score_plan(project_id, plan, expected_revision=0)
+
+    first = pipeline._ensure_score_mix(pipeline._project(project_id), force=True)
+    before = hash_audio_file(scored_background_path(root))
+    # The saved plan still carries the asset id (portable); the renderer
+    # resolves it on every run, so the cached mix stays "current" and the
+    # deterministic output is byte-stable.
+    on_disk = load_score_plan(root)
+    assert on_disk is not None
+    assert on_disk.cues[0].effect_asset_id == uploaded["asset_id"]
+    assert on_disk.cues[0].effect_path is None
+    second = pipeline._ensure_score_mix(pipeline._project(project_id), force=False)
+    assert second == first
+    assert hash_audio_file(scored_background_path(root)) == before

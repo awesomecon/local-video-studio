@@ -1125,3 +1125,220 @@ a:focus-visible { box-shadow: var(--focus-ring); }
   color: var(--text-1);
 }
 .banner-warning > span:first-child { color: var(--warning); }
+
+/* ==========================================================================
+   Score Studio (Music screen)
+   Responsive 3-column workspace: Generation | Timeline | Cues.
+   Reuses the shared .panel / .field / .btn / .badge primitives and tokens;
+   only the score-timeline geometry and cue chrome are new.
+   ========================================================================== */
+.score-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(460px, 2fr) minmax(320px, 1fr);
+  gap: var(--gap-lg);
+  align-items: start;
+}
+.score-col { min-width: 0; display: grid; gap: var(--gap-lg); }
+@media (max-width: 1500px) {
+  /* Tablet: timeline full-width on top, generation and cues side by side. */
+  .score-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .score-col-studio { grid-column: 1 / -1; order: -1; }
+}
+@media (max-width: 900px) {
+  /* Mobile: single column in reading order generation → timeline → cues. */
+  .score-layout { grid-template-columns: 1fr; }
+  .score-col-studio { grid-column: auto; order: 0; }
+}
+
+/* ---- score timeline ------------------------------------------------------ */
+.score-timeline { width: 100%; min-width: 0; }
+.sc-viewport {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface-inset);
+}
+.sc-grid { display: grid; min-width: max-content; }
+.sc-corner {
+  grid-row: 1; grid-column: 1;
+  position: sticky; top: 0; left: 0; z-index: 6;
+  padding: 6px 10px;
+  font-size: 11px; color: var(--text-3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+.sc-ruler {
+  position: relative;
+  height: 26px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.sc-tick { position: absolute; top: 0; width: 1px; height: 8px; background: var(--line-strong); }
+.sc-tick.major { height: 12px; }
+.sc-tick-label {
+  position: absolute; top: 2px;
+  font-size: 10px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  transform: translateX(3px);
+}
+.sc-label {
+  position: sticky; left: 0; z-index: 5;
+  display: flex; align-items: center;
+  padding: 0 10px;
+  font-size: 11px; color: var(--text-3); letter-spacing: 0.04em; text-transform: uppercase;
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sc-lane {
+  position: relative;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+.sc-lane-scenes { height: 64px; }
+.sc-lane-wave { height: 56px; }
+.sc-lane-clips { height: 48px; }
+.sc-lane-auto { height: 72px; background: color-mix(in oklab, var(--accent) 5%, var(--surface-inset)); }
+
+.sc-scene-block {
+  position: absolute; top: 4px; bottom: 4px;
+  background: color-mix(in oklab, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent);
+  border-radius: 6px;
+  padding: 6px 8px;
+  overflow: hidden;
+}
+.sc-scene-block + .sc-scene-block { margin-left: -1px; }
+.sc-scene-num { font-size: 10px; color: var(--accent); letter-spacing: 0.06em; }
+.sc-scene-title {
+  font-size: 11px; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sc-scene-mood { font-size: 10px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.sc-wave { display: block; width: 100%; height: 100%; }
+.sc-empty-note {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; padding-left: 12px;
+  font-size: 11px; color: var(--text-3); font-style: italic;
+}
+
+.sc-sfx-clip {
+  position: absolute; top: 6px; bottom: 6px;
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--warning) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warning) 40%, transparent);
+  padding: 4px 6px;
+  overflow: hidden;
+  cursor: default;
+}
+.sc-sfx-name { font-size: 10px; color: var(--warning); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.sc-cue {
+  position: absolute;
+  width: 18px; height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+.sc-cue:active { cursor: grabbing; }
+.sc-cue-line {
+  position: absolute; top: 0; bottom: 0; left: 8px;
+  width: 2px;
+  background: color-mix(in oklab, var(--accent) 70%, var(--text-1));
+}
+.sc-cue-head {
+  position: absolute; top: 4px; left: 50%;
+  transform: translateX(-50%);
+  min-width: 14px; height: 14px; padding: 0 4px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700;
+  color: var(--surface-1);
+  background: var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+}
+.sc-cue[data-action="silence"] .sc-cue-line { background: var(--text-3); }
+.sc-cue[data-action="silence"] .sc-cue-head { background: var(--text-3); }
+.sc-cue[data-kind="effect"] .sc-cue-line { background: var(--warning); }
+.sc-cue[data-kind="effect"] .sc-cue-head { background: var(--warning); }
+.sc-cue.locked .sc-cue-head { box-shadow: 0 0 0 1px var(--warning); }
+.sc-cue.selected .sc-cue-line {
+  background: var(--accent-2);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent) 60%, transparent);
+}
+.sc-cue.selected .sc-cue-head { background: var(--accent-2); }
+.sc-cue-time {
+  position: absolute; top: 22px; left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px; color: var(--text-3);
+  font-variant-nums: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Playhead: a grid cell spanning the lane column; the line inside is placed
+   in lane-local pixels so ruler, lanes, and head share one coordinate space. */
+.sc-playhead-wrap {
+  grid-column: 2; grid-row: 1 / -1;
+  position: relative;
+  pointer-events: none;
+  z-index: 4;
+}
+.sc-playhead {
+  position: absolute; top: 0; bottom: 0;
+  width: 0;
+}
+.sc-playhead::after {
+  content: "";
+  position: absolute; top: 0; bottom: 0; left: -1px;
+  width: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--accent) 60%, transparent);
+}
+
+/* ---- transport ------------------------------------------------------------ */
+.sc-transport {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 8px);
+}
+.sc-seek { flex: 1; min-width: 80px; accent-color: var(--accent); }
+.sc-time { min-width: 92px; text-align: right; font-size: 12px; color: var(--text-2); }
+.sc-snap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); }
+.sc-snap input { accent-color: var(--accent); }
+
+/* ---- cue list rows --------------------------------------------------------- */
+.cue-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.cue-row:hover { background: var(--surface-3); }
+.cue-row.selected {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: var(--accent-wash);
+}
+.cue-row.locked .cue-time { color: var(--warning); }
+.cue-row.suggested { border-style: dashed; }
+.cue-time { min-width: 72px; font-size: 12px; color: var(--text-2); }
+.cue-label { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- auto score suggestions ---------------------------------------------- */
+.auto-suggestion {
+  padding: 6px 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface-2);
+}
+.sfx-row { gap: 8px; }
+.sc-envelope { position: absolute; inset: 0; display: block; }

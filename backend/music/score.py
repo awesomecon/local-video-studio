@@ -824,3 +824,165 @@ def render_scored_background(
     }
     _atomic_write_json(score_mix_manifest_path(project_root), manifest)
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# Score preview: a fast narration-plus-score monitor
+#
+# The final video render mixes narration and the scored bed through the normal
+# timeline. The Studio's *score preview* is a much cheaper stand-in: it reuses
+# the already-rendered ``scored-background.wav`` (rendering it only when the
+# plan is newer than the cached mix) and mixes the narration master over it as
+# 48 kHz stereo PCM. The result is a rough listening check for cue moves, not
+# the deliverable mix, so it deliberately applies no loudness normalization and
+# no ducking: the music keeps exactly the level the automation produced.
+# ---------------------------------------------------------------------------
+
+SCORE_PREVIEW_FILENAME = "score-preview.wav"
+SCORE_PREVIEW_MANIFEST_FILENAME = "score-preview-manifest.json"
+SCORE_PREVIEW_WORKFLOW_VERSION = "score-preview-v1"
+
+#: Basenames the Studio may stream straight from ``music/`` by name. Anything
+#: else is rejected so a crafted path can never read outside the project.
+SCORE_MEDIA_FILES = frozenset(
+    {
+        "background.wav",
+        SCORED_OUTPUT_FILENAME,
+        SCORE_PREVIEW_FILENAME,
+        SCORE_PLAN_FILENAME,
+        "manifest.json",
+        SCORE_MIX_MANIFEST_FILENAME,
+        SCORE_PREVIEW_MANIFEST_FILENAME,
+    }
+)
+
+
+def score_preview_path(project_root: Path) -> Path:
+    return project_root / "music" / SCORE_PREVIEW_FILENAME
+
+
+def score_preview_manifest_path(project_root: Path) -> Path:
+    return project_root / "music" / SCORE_PREVIEW_MANIFEST_FILENAME
+
+
+def load_score_preview_manifest(project_root: Path) -> dict[str, Any] | None:
+    """Read the preview manifest, or ``None`` when the preview never ran."""
+    path = score_preview_manifest_path(project_root)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def decode_stereo_pcm(path: Path, binaries: FFmpegBinaries | None = None) -> array:
+    """Read a file as interleaved 48 kHz stereo int16 samples (public API).
+
+    Public wrapper over the renderer's normalizer so the score preview can
+    consume the narration master and the scored bed with the same guarantees:
+    exact-format files are read directly, anything else is normalized.
+    """
+    return _read_stereo_pcm(path, binaries)
+
+
+def encode_stereo_pcm(path: Path, samples: array) -> None:
+    """Atomically write interleaved 48 kHz stereo int16 samples (public API)."""
+    _write_pcm_atomic(path, samples)
+
+
+def mix_stereo(
+    destination: array,
+    addend: array,
+    *,
+    gain_db: float = 0.0,
+    max_frames: int | None = None,
+) -> None:
+    """Add ``addend`` into ``destination`` in place, sample-accurate and clamped.
+
+    Both buffers are interleaved 48 kHz stereo. The sum is limited to
+    ``max_frames`` (or the shorter buffer) and clipped to the 16-bit range; no
+    normalization is applied, matching the score renderer's automation policy.
+    """
+    channels = SCORED_CHANNELS
+    frames = min(len(destination) // channels, len(addend) // channels)
+    if max_frames is not None:
+        frames = min(frames, max_frames)
+    if frames <= 0:
+        return
+    gain = _db_to_gain(gain_db) if gain_db else 1.0
+    for frame in range(frames):
+        for channel in range(channels):
+            position = frame * channels + channel
+            destination[position] = _clamp16(
+                destination[position] + int(round(addend[position] * gain))
+            )
+
+
+def render_score_preview(
+    project_root: Path,
+    *,
+    scored_path: Path,
+    narration_path: Path | None = None,
+    binaries: FFmpegBinaries | None = None,
+) -> dict[str, Any]:
+    """Mix the narration master over an already-scored bed into a preview.
+
+    ``scored_path`` is the ``scored-background.wav`` produced by the score
+    stage (or the untouched master for an unscored project). The narration is
+    optional: without it the preview is simply the scored music. The output is
+    48 kHz stereo PCM at the scored bed's length; the manifest records every
+    input and output hash plus the FFmpeg version used for normalization.
+
+    Returns the written manifest. Raises :class:`ScoreRenderError` when the
+    scored bed is missing or unreadable.
+    """
+    if not scored_path.is_file():
+        raise ScoreRenderError(
+            "scored background is missing; generate and score the soundtrack first"
+        )
+    output = score_preview_path(project_root)
+    samples = _read_stereo_pcm(scored_path, binaries)
+    has_narration = narration_path is not None and narration_path.is_file()
+    if has_narration:
+        narration = _read_stereo_pcm(narration_path, binaries)
+        mix_stereo(samples, narration, max_frames=len(samples) // SCORED_CHANNELS)
+
+    _write_pcm_atomic(output, samples)
+    frames = len(samples) // SCORED_CHANNELS
+
+    def _relative(path: Path) -> str:
+        try:
+            return str(Path(path).relative_to(project_root))
+        except ValueError:
+            return Path(path).name
+
+    manifest: dict[str, Any] = {
+        "version": 1,
+        "workflow_version": SCORE_PREVIEW_WORKFLOW_VERSION,
+        "sample_rate": SCORED_SAMPLE_RATE,
+        "channels": SCORED_CHANNELS,
+        "loudness_normalization": False,
+        "ffmpeg_version": _ffmpeg_version_text(binaries),
+        "scored": {
+            "path": _relative(scored_path),
+            "sha256": hash_audio_file(scored_path),
+        },
+        "narration": (
+            {
+                "path": _relative(narration_path),
+                "sha256": hash_audio_file(narration_path),
+            }
+            if has_narration
+            else None
+        ),
+        "output": {
+            "path": _relative(output),
+            "sha256": hash_audio_file(output),
+            "duration_seconds": frames / SCORED_SAMPLE_RATE,
+        },
+        "generated_at": utc_now().isoformat(),
+    }
+    _atomic_write_json(score_preview_manifest_path(project_root), manifest)
+    return manifest
