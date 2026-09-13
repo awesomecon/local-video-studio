@@ -1,0 +1,93 @@
+name: Bug report
+description: Report a reproducible problem in the core studio or an optional backend
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Local Video Studio. Never include API keys, private prompts, voice samples, media, or unredacted local paths.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Core studio / browser UI
+        - Planning / local LLM
+        - Images or video
+        - Voice / TTS
+        - Music
+        - Captions
+        - Timeline / rendering / export
+        - Installation / packaging
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.2.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Runtime mode
+      options:
+        - Mock mode
+        - Real backends
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, GPU model if relevant, and FFmpeg version. Do not include usernames or private paths.
+      placeholder: Ubuntu 24.04; Python 3.12; RTX 4090; FFmpeg 7.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use a synthetic project and redact any private data.
+      placeholder: |
+        1. Start in mock mode...
+        2. Create a project...
+        3. Run...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized error
+      description: Paste only logs that you have checked for secrets, prompts, media paths, and personal information.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I reproduced this without downloading model weights automatically.
+          required: true
+        - label: I checked this report for secrets and private project content.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
