@@ -34,6 +34,7 @@ from typing import Any
 from pydantic import Field, field_validator, model_validator
 
 from backend.rendering.binaries import FFmpegBinaries, require_ffmpeg
+from backend.rendering.commands import DEFAULT_MUSIC_GAIN_DB
 from backend.rendering.process import run_media_process
 from backend.schemas.models import DomainModel, new_id, utc_now
 from backend.schemas.paths import portable_relative_path, resolve_project_path
@@ -779,7 +780,9 @@ def _write_pcm_atomic(path: Path, samples: array) -> None:
             handle.setsampwidth(2)
             handle.setframerate(SCORED_SAMPLE_RATE)
             handle.writeframes(samples.tobytes())
-        with open(temporary, "rb") as handle:
+        # Windows rejects fsync() on a read-only descriptor even though POSIX
+        # accepts it. Open read/write so the durability step is portable.
+        with open(temporary, "r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except Exception:
@@ -890,13 +893,13 @@ def render_scored_background(
 # the already-rendered ``scored-background.wav`` (rendering it only when the
 # plan is newer than the cached mix) and mixes the narration master over it as
 # 48 kHz stereo PCM. The result is a rough listening check for cue moves, not
-# the deliverable mix, so it deliberately applies no loudness normalization and
-# no ducking: the music keeps exactly the level the automation produced.
+# the deliverable mix, so it applies no loudness normalization or ducking. It
+# does use export's narration-safe baseline music gain so the balance is useful.
 # ---------------------------------------------------------------------------
 
 SCORE_PREVIEW_FILENAME = "score-preview.wav"
 SCORE_PREVIEW_MANIFEST_FILENAME = "score-preview-manifest.json"
-SCORE_PREVIEW_WORKFLOW_VERSION = "score-preview-v1"
+SCORE_PREVIEW_WORKFLOW_VERSION = "score-preview-v2"
 
 #: Basenames the Studio may stream straight from ``music/`` by name. Anything
 #: else is rejected so a crafted path can never read outside the project.
@@ -1000,6 +1003,7 @@ def render_score_preview(
         )
     output = score_preview_path(project_root)
     samples = _read_stereo_pcm(scored_path, binaries)
+    _apply_music_gain(samples, DEFAULT_MUSIC_GAIN_DB)
     has_narration = narration_path is not None and narration_path.is_file()
     if has_narration:
         narration = _read_stereo_pcm(narration_path, binaries)
@@ -1019,6 +1023,7 @@ def render_score_preview(
         "workflow_version": SCORE_PREVIEW_WORKFLOW_VERSION,
         "sample_rate": SCORED_SAMPLE_RATE,
         "channels": SCORED_CHANNELS,
+        "music_gain_db": DEFAULT_MUSIC_GAIN_DB,
         "loudness_normalization": False,
         "ffmpeg_version": _ffmpeg_version_text(binaries),
         "scored": {

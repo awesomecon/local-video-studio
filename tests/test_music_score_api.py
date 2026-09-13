@@ -323,16 +323,43 @@ def test_save_score_plan_requires_expected_revision(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
-def test_save_score_plan_rejects_mismatched_duration(tmp_path: Path) -> None:
+def test_save_score_plan_rejects_mismatched_timeline_duration(tmp_path: Path) -> None:
     app, client = _app(tmp_path)
     project_id = _create_project(client)
     _write_background(app, project_id, 4.0)
-    # Plan claims 60s but the soundtrack is 4s: cannot line up.
+    # Plan claims 60s but the project timeline is 4s: cannot line up.
     response = client.put(
         f"/api/projects/{project_id}/music/score-plan",
         json={"plan": _plan_payload(60.0, [{"time_seconds": 30.0, "action": "build"}]), "expected_revision": 0},
     )
     assert response.status_code == 422
+
+
+def test_short_soundtrack_is_padded_to_timeline_when_score_plan_saves(tmp_path: Path) -> None:
+    app, client = _app(tmp_path)
+    project_id = _create_project(client)
+    _write_background(app, project_id, 3.0)
+    _write_narration(app, project_id, 4.0)
+
+    snapshot = client.get(f"/api/projects/{project_id}/music/studio").json()
+    assert snapshot["music"]["duration_seconds"] == pytest.approx(4.0, abs=0.05)
+    assert snapshot["soundtrack"]["duration_seconds"] == pytest.approx(3.0, abs=0.05)
+
+    response = client.put(
+        f"/api/projects/{project_id}/music/score-plan",
+        json={
+            "plan": _plan_payload(
+                4.0, [{"time_seconds": 3.5, "action": "restore"}],
+            ),
+            "expected_revision": 0,
+        },
+    )
+    assert response.status_code == 200
+    assert client.post(f"/api/projects/{project_id}/music/score-preview").status_code == 200
+
+    scored = _project_root(app, project_id) / "music" / "scored-background.wav"
+    with wave.open(str(scored), "rb") as handle:
+        assert handle.getnframes() / handle.getframerate() == pytest.approx(4.0, abs=0.01)
 
 
 @pytest.mark.parametrize("bad_cue", [
@@ -480,6 +507,24 @@ def test_upload_effect_success(tmp_path: Path) -> None:
     # The studio snapshot lists the effect.
     effects = client.get(f"/api/projects/{project_id}/music/studio").json()["effects"]
     assert any(item["asset_id"] == body["asset_id"] for item in effects)
+
+
+def test_wav_effect_validation_does_not_depend_on_platform_ffprobe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.pipeline.service as service_module
+
+    def reject_probe(*args, **kwargs):
+        raise AssertionError("valid WAV uploads should use the deterministic WAV parser")
+
+    monkeypatch.setattr(service_module, "probe_media", reject_probe)
+    _, client = _app(tmp_path)
+    project_id = _create_project(client)
+    response = client.post(
+        f"/api/projects/{project_id}/music/effects",
+        files={"file": ("impact.wav", _wav_bytes(0.2, hz=2000.0), "audio/wav")},
+    )
+    assert response.status_code == 201
 
 
 def test_upload_effect_dedupes_identical_content(tmp_path: Path) -> None:

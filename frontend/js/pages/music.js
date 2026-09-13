@@ -440,9 +440,9 @@ function aceNotes(readiness, turboMissing) {
 function soundtrackPanel(snap) {
   const rows = [];
   const entries = [
-    ["Soundtrack (master)", snap.soundtrack],
-    ["Scored mix", snap.scored],
-    ["Score preview", snap.preview],
+    ["Soundtrack (music only)", snap.soundtrack],
+    ["Scored mix (music only)", snap.scored],
+    ["Score preview (music + voice)", snap.preview],
   ];
   for (const [label, item] of entries) {
     if (!item) continue;
@@ -503,10 +503,9 @@ function soundtrackHistoryRow(item) {
       el("div", { class: "row" },
         el("strong", { class: "small" }, item.current ? "Current soundtrack" : "Previous soundtrack"),
         item.current ? badge("good", "current", false) : null,
-        el("span", { class: "spacer" }),
-        el("time", { class: "muted small", datetime: item.created_at || "" },
-          item.created_at ? fmtDate(item.created_at) : "Unknown date"),
       ),
+      el("time", { class: "muted small", datetime: item.created_at || "" },
+        item.created_at ? `Made ${fmtDate(item.created_at)}` : "Creation time unavailable"),
       el("div", { class: "muted small" }, detailBits.join(" · ")),
       settings.direction
         ? el("div", { class: "soundtrack-history-prompt small", title: settings.direction }, settings.direction)

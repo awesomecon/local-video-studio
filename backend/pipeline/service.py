@@ -8360,13 +8360,12 @@ class PipelineService:
     # ------------------------------------------------------------------
 
     def _score_background_duration(self, project: Project) -> float:
-        """Soundtrack length: the master if present, else the narration target."""
-        background = self.store.project_path(project) / "music" / "background.wav"
-        if background.is_file():
-            try:
-                return wav_duration(background)
-            except Exception:
-                pass
+        """Score timeline length, derived from narration or the video plan.
+
+        ACE-Step output can be a few seconds shorter or longer than requested.
+        The deterministic score renderer pads or trims that source to this
+        editorial clock, so the raw master must not redefine the cue timeline.
+        """
         return self._effective_music_duration(project)
 
     def _studio_scene_spans(self, project: Project) -> list[dict[str, Any]]:
@@ -8611,21 +8610,14 @@ class PipelineService:
         except Exception:
             return {"regional_audio_inpaint": False}
 
-    @staticmethod
-    def _check_score_plan_duration(root: Path, plan: ScorePlan) -> None:
-        """Reject a plan whose length cannot line up with the soundtrack."""
-        background = root / "music" / "background.wav"
-        if not background.is_file():
-            return
-        try:
-            background_duration = wav_duration(background)
-        except Exception:
-            return
-        tolerance = max(0.5, 0.02 * background_duration)
-        if abs(plan.duration_seconds - background_duration) > tolerance:
+    def _check_score_plan_duration(self, project: Project, plan: ScorePlan) -> None:
+        """Require the plan to use the editorial clock, not raw music length."""
+        timeline_duration = self._effective_music_duration(project)
+        tolerance = max(0.5, 0.02 * timeline_duration)
+        if abs(plan.duration_seconds - timeline_duration) > tolerance:
             raise ValueError(
                 f"score plan duration {plan.duration_seconds:.3f}s does not match the "
-                f"soundtrack ({background_duration:.3f}s); reload the studio and retry"
+                f"project timeline ({timeline_duration:.3f}s); reload the studio and retry"
             )
 
     def save_music_score_plan(
@@ -8643,7 +8635,7 @@ class PipelineService:
             root = self.store.project_path(project)
             self._check_score_plan_effect_assets(project, plan)
             validate_score_plan_effects(root, plan)
-            self._check_score_plan_duration(root, plan)
+            self._check_score_plan_duration(project, plan)
             try:
                 saved = save_score_plan(root, plan, expected_revision=expected_revision)
             except ScorePlanConflict as exc:
@@ -8682,6 +8674,8 @@ class PipelineService:
         """True when the cached preview still matches its scored bed and narration."""
         manifest = load_score_preview_manifest(root)
         if not manifest:
+            return False
+        if manifest.get("workflow_version") != SCORE_PREVIEW_WORKFLOW_VERSION:
             return False
         preview = score_preview_path(root)
         if not preview.is_file():
@@ -8804,12 +8798,28 @@ class PipelineService:
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
-            info = probe_media(temporary, self.renderer.binaries)
-            if not info.has_audio:
-                raise ValueError("the effect file contains no audio stream")
-            if info.has_video:
-                raise ValueError("the effect file must be audio, not video")
-            format_name = (info.format_name or "").lower()
+            if extension == "wav":
+                # WAV is fully verifiable with the standard library. Avoid
+                # platform-specific FFprobe demuxer differences for this
+                # simple container while still rejecting malformed data.
+                try:
+                    with wave.open(str(temporary), "rb") as handle:
+                        frame_rate = handle.getframerate()
+                        frame_count = handle.getnframes()
+                        if handle.getnchannels() <= 0 or frame_rate <= 0 or frame_count <= 0:
+                            raise ValueError("the effect file contains no audio stream")
+                        duration = frame_count / frame_rate
+                except (EOFError, OSError, wave.Error) as exc:
+                    raise ValueError("the effect file is not a valid WAV audio file") from exc
+                format_name = "wav"
+            else:
+                info = probe_media(temporary, self.renderer.binaries)
+                if not info.has_audio:
+                    raise ValueError("the effect file contains no audio stream")
+                if info.has_video:
+                    raise ValueError("the effect file must be audio, not video")
+                format_name = (info.format_name or "").lower()
+                duration = info.duration_seconds or 0.0
             expected = extension.lower()
             # Reject files whose container does not match the extension (garbage uploads).
             if expected not in format_name and format_name not in expected:
@@ -8825,7 +8835,6 @@ class PipelineService:
                         f"the effect format '{format_name or 'unknown'}' does not match "
                         f"the declared .{extension} extension"
                     )
-            duration = info.duration_seconds or 0.0
             if duration > MAX_EFFECT_SECONDS:
                 raise ValueError(
                     f"the effect is {duration:.1f}s; the limit is {MAX_EFFECT_SECONDS:.0f}s"

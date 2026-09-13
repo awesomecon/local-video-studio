@@ -463,6 +463,26 @@ def test_scored_output_is_48k_stereo_pcm_at_exact_length(music_root: Path) -> No
     assert manifest["loudness_normalization"] is False
 
 
+def test_scored_output_fsync_uses_a_writable_descriptor(
+    music_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows requires a writable descriptor for fsync()."""
+    import os
+
+    import backend.music.score as score_module
+
+    _stereo_background(music_root / "music" / "background.wav", seconds=1.0)
+    real_fsync = os.fsync
+
+    def require_writable(fd: int) -> None:
+        os.write(fd, b"")
+        real_fsync(fd)
+
+    monkeypatch.setattr(score_module.os, "fsync", require_writable)
+    render_scored_background(music_root, _ScorePlan(duration_seconds=1.0))
+    assert (music_root / "music" / "scored-background.wav").is_file()
+
+
 def test_plan_music_gain_adjusts_the_whole_bed(music_root: Path) -> None:
     background = music_root / "music" / "background.wav"
     _stereo_background(background, seconds=2.0)
@@ -903,30 +923,36 @@ def test_mix_stereo_respects_gain_and_max_frames() -> None:
 def test_render_score_preview_with_narration(music_root: Path) -> None:
     background = music_root / "music" / "background.wav"
     _stereo_background(background, seconds=2.0, hz=300.0)
-    # Scored bed and narration share a file here: the preview must be louder.
+    # Scored bed and narration share a file here. Music uses export's -12 dB
+    # baseline before the narration is added.
     render_score_preview(music_root, scored_path=background, narration_path=background)
     preview = score_preview_path(music_root)
     assert preview.is_file()
     samples, rate = _read_pcm(preview)
     assert rate == 48000
     master = _read_pcm(background)[0]
-    assert _rms(samples, 0.2, 1.5) > _rms(master, 0.2, 1.5)
+    ratio = _rms(samples, 0.2, 1.5) / _rms(master, 0.2, 1.5)
+    assert ratio == pytest.approx(1 + 10 ** (-12 / 20), rel=0.02)
     manifest = load_score_preview_manifest(music_root)
     assert manifest is not None
     assert manifest["narration"] is not None
+    assert manifest["music_gain_db"] == -12.0
     assert manifest["loudness_normalization"] is False
     assert manifest["output"]["duration_seconds"] == pytest.approx(2.0, abs=0.01)
 
 
-def test_render_score_preview_without_narration_is_a_copy(music_root: Path) -> None:
+def test_render_score_preview_without_narration_uses_export_music_gain(
+    music_root: Path,
+) -> None:
     background = music_root / "music" / "background.wav"
     _stereo_background(background, seconds=2.0)
-    master_bytes = background.read_bytes()
+    master = _read_pcm(background)[0]
     manifest = render_score_preview(music_root, scored_path=background)
     preview = score_preview_path(music_root)
     assert manifest["narration"] is None
-    # 48 kHz stereo bed with no narration: preview is byte-identical to the bed.
-    assert preview.read_bytes() == master_bytes
+    preview_samples = _read_pcm(preview)[0]
+    ratio = _rms(preview_samples, 0.2, 1.5) / _rms(master, 0.2, 1.5)
+    assert ratio == pytest.approx(10 ** (-12 / 20), rel=0.02)
 
 
 def test_render_score_preview_requires_scored_bed(music_root: Path) -> None:
