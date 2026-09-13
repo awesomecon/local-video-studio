@@ -749,14 +749,22 @@ function snapPointsOf(snap, duration) {
  * @param {number} duration
  */
 function createCuesState(snap, duration) {
+  const savedDuration = snap.score_plan
+    ? Number(snap.score_plan.duration_seconds || duration)
+    : duration;
+  const durationChanged = Math.abs(savedDuration - duration) > 0.001;
+  const currentSourceHash = (snap.soundtrack && snap.soundtrack.hash) || null;
   const base = snap.score_plan
     ? {
-        duration_seconds: snap.score_plan.duration_seconds || duration,
+        duration_seconds: duration,
         music_gain_db: Number(snap.score_plan.music_gain_db) || 0,
-        source_music_hash: snap.score_plan.source_music_hash || null,
-        cues: (snap.score_plan.cues || []).map((c) => ({ ...c })),
+        source_music_hash: currentSourceHash || snap.score_plan.source_music_hash || null,
+        cues: (snap.score_plan.cues || []).map((c) => ({
+          ...c,
+          time_seconds: Math.min(Number(c.time_seconds) || 0, duration),
+        })),
       }
-    : { duration_seconds: duration, music_gain_db: 0, source_music_hash: null, cues: [] };
+    : { duration_seconds: duration, music_gain_db: 0, source_music_hash: currentSourceHash, cues: [] };
   // `cs` = the local (unsaved) cue state. The module-level `state` import is
   // the application state and is NOT shadowed here.
   const cs = {
@@ -764,7 +772,10 @@ function createCuesState(snap, duration) {
     base,
     working: { duration_seconds: base.duration_seconds, music_gain_db: base.music_gain_db, source_music_hash: base.source_music_hash, cues: base.cues.map((c) => ({ ...c })) },
     selectedId: null,
-    dirty: false,
+    dirty: durationChanged || Boolean(
+      snap.score_plan && currentSourceHash
+      && snap.score_plan.source_music_hash !== currentSourceHash
+    ),
   };
 
   cs.cues = () => cs.working.cues;

@@ -264,6 +264,10 @@ def test_saving_is_explicit_and_reports_scoped_invalidation() -> None:
     assert "unsaved" in page
     # Unsaved edits are discarded back to the saved base, not lost silently.
     assert "Discard" in page
+    # A regenerated narration/music clock rebases stale saved plans locally;
+    # the server performs the same alignment as a final guard.
+    assert "durationChanged" in page
+    assert "Math.min(Number(c.time_seconds)" in page
 
 
 # ---------------------------------------------------------------- auto score

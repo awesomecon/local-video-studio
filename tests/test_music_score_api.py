@@ -323,16 +323,19 @@ def test_save_score_plan_requires_expected_revision(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
-def test_save_score_plan_rejects_mismatched_timeline_duration(tmp_path: Path) -> None:
+def test_save_score_plan_rebases_mismatched_timeline_duration(tmp_path: Path) -> None:
     app, client = _app(tmp_path)
     project_id = _create_project(client)
     _write_background(app, project_id, 4.0)
-    # Plan claims 60s but the project timeline is 4s: cannot line up.
+    # A stale editor claims 60s, but the server rebases it to the current 4s
+    # clock and moves an out-of-range cue to the new endpoint.
     response = client.put(
         f"/api/projects/{project_id}/music/score-plan",
         json={"plan": _plan_payload(60.0, [{"time_seconds": 30.0, "action": "build"}]), "expected_revision": 0},
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["plan"]["duration_seconds"] == pytest.approx(4.0)
+    assert response.json()["plan"]["cues"][0]["time_seconds"] == pytest.approx(4.0)
 
 
 def test_short_soundtrack_is_padded_to_timeline_when_score_plan_saves(tmp_path: Path) -> None:

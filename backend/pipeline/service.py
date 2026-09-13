@@ -8610,15 +8610,23 @@ class PipelineService:
         except Exception:
             return {"regional_audio_inpaint": False}
 
-    def _check_score_plan_duration(self, project: Project, plan: ScorePlan) -> None:
-        """Require the plan to use the editorial clock, not raw music length."""
+    def _align_score_plan_duration(self, project: Project, plan: ScorePlan) -> ScorePlan:
+        """Rebase stale cue plans onto the current narration/video clock."""
         timeline_duration = self._effective_music_duration(project)
         tolerance = max(0.5, 0.02 * timeline_duration)
-        if abs(plan.duration_seconds - timeline_duration) > tolerance:
-            raise ValueError(
-                f"score plan duration {plan.duration_seconds:.3f}s does not match the "
-                f"project timeline ({timeline_duration:.3f}s); reload the studio and retry"
-            )
+        if abs(plan.duration_seconds - timeline_duration) <= tolerance:
+            return plan
+        cues = [
+            cue.model_copy(update={
+                "time_seconds": min(cue.time_seconds, timeline_duration),
+            })
+            for cue in plan.cues
+        ]
+        return ScorePlan.model_validate({
+            **plan.model_dump(mode="python"),
+            "duration_seconds": timeline_duration,
+            "cues": cues,
+        })
 
     def save_music_score_plan(
         self, project_id: str, plan: ScorePlan, expected_revision: int,
@@ -8635,7 +8643,7 @@ class PipelineService:
             root = self.store.project_path(project)
             self._check_score_plan_effect_assets(project, plan)
             validate_score_plan_effects(root, plan)
-            self._check_score_plan_duration(project, plan)
+            plan = self._align_score_plan_duration(project, plan)
             try:
                 saved = save_score_plan(root, plan, expected_revision=expected_revision)
             except ScorePlanConflict as exc:
