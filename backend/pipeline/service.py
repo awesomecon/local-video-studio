@@ -1811,13 +1811,6 @@ class PipelineService:
                     )
         if bounds is None:
             return plan, "authored_plan"
-        recorded_duration = max(end for _start, end in bounds.values())
-        frame_tolerance = max(1.0 / plan.fps, 0.001)
-        if abs(plan.duration - recorded_duration) <= frame_tolerance:
-            # The fallback has no word-level evidence with which to improve an
-            # already recorded-clock plan. Returning it unchanged also avoids
-            # repeatedly redistributing compositions that share narration refs.
-            return plan, "recorded_scene_clock"
         claims: dict[str, list[tuple[int, float]]] = {}
         referenced_by_composition: dict[int, list[str]] = {}
         for index, composition in enumerate(plan.compositions):

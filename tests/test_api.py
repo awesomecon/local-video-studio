@@ -2596,12 +2596,14 @@ def _create_editorial_project(client: TestClient, target_duration: int = 14) -> 
     return pid
 
 
-def _save_planned_clock_plan(service, pid: str) -> None:
-    """Save a three-composition plan on the planned clock (12s total).
+def _save_planned_clock_plan(
+    service, pid: str, durations: tuple[float, float, float] = (4, 4, 4),
+) -> None:
+    """Save a three-composition plan on the requested authored clock.
 
-    The mock narration master is 14s long, so the plan sits off the recorded
-    clock and both retiming fallbacks have work to do. Each composition
-    references one distinct scene.
+    The default 12-second plan sits off the 14-second mock narration clock so
+    both retiming fallbacks have work to do. Each composition references one
+    distinct scene.
     """
     from backend.editorial import (
         EditPlan,
@@ -2612,9 +2614,10 @@ def _save_planned_clock_plan(service, pid: str) -> None:
     )
 
     scenes = service.database.list_scenes(pid)
+    starts = (0.0, durations[0], durations[0] + durations[1])
     compositions = [
         EditorialComposition(
-            id=composition_id, start=start, duration=4,
+            id=composition_id, start=start, duration=durations[index],
             template=EditorialTemplate.ARCHIVE_CANVAS,
             elements=[EditorialElement(
                 id=f"{composition_id}-title", type=EditorialElementType.TEXT,
@@ -2623,7 +2626,7 @@ def _save_planned_clock_plan(service, pid: str) -> None:
             narration_refs=[scenes[index].id],
         )
         for index, (composition_id, start) in enumerate(
-            [("c1", 0.0), ("c2", 4.0), ("c3", 8.0)],
+            zip(("c1", "c2", "c3"), starts, strict=True),
         )
     ]
     service.save_edit_plan(pid, EditPlan(
@@ -2746,6 +2749,29 @@ def test_editorial_timeline_plan_falls_back_to_recorded_scene_clock(
     ]
     stored = service.load_edit_plan(pid)
     assert [c.start for c in stored.compositions] == [0.0, 4.0, 8.0]
+
+
+def test_editorial_timeline_plan_retimes_equal_total_with_different_scene_bounds(
+    tmp_path: Path,
+) -> None:
+    """Equal totals do not prove that authored cuts match the recorded clock."""
+    app, client, service = _editorial_api_app(tmp_path)
+    pid = _create_editorial_project(client)
+    # The plan and narration both total 14 seconds, but these authored cuts
+    # differ from the recorded take's three equal scene spans.
+    _save_planned_clock_plan(service, pid, durations=(2, 6, 6))
+    project = service._project(pid)
+    service._ensure_narration(project, force=False)
+    _write_recorded_scene_clock(service, project)
+
+    response = client.get(f"/api/projects/{pid}/editorial/timeline-plan")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timing_basis"] == "recorded_scene_clock"
+    assert body["narration_synced"] is True
+    compositions = body["plan"]["compositions"]
+    assert [round(comp["start"] * 24) for comp in compositions] == [0, 112, 224]
+    assert [comp["start"] for comp in compositions] != [0.0, 2.0, 8.0]
 
 
 def test_editorial_timeline_plan_reports_authored_plan_without_a_usable_clock(

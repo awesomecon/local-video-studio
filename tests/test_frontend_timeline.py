@@ -77,11 +77,15 @@ def test_editorial_timeline_validates_the_envelope_before_rendering() -> None:
     assert "Array.isArray(plan.compositions)" in validator
     # Geometry: contiguous compositions, finite non-negative starts,
     # positive finite durations.
-    assert "Math.abs(start - expectedStart) > TL_FRAME_TOL" in validator
+    assert "Math.round(start * fps) !== Math.round(expectedStart * fps)" in validator
+    assert 'error: "The timeline-plan response has an invalid frame rate."' in validator
     assert "duration <= 0" in validator
     # Events: malformed numeric fields are ignored, and the display width is
     # clamped at the composition end without mutating the source values.
     assert "Math.min(dur, Math.max(0, duration - time))" in validator
+    # Fit includes even sub-quarter-second compositions when preserving the
+    # minimum readable clip width.
+    assert ".filter((d) => d > 0);" in source
     # Rendering happens only after validation passes.
     render_call = source.index("buildEditorialTimeline(summary, snap, zoom)")
     summary_call = source.index("summarizeEditorialTimeline(envelope)")

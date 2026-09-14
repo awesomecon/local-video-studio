@@ -2713,6 +2713,7 @@ const TL_PLAN = {
   plan: {
     schema_version: 1,
     project_id: "proj-tl",
+    fps: 24,
     compositions: [
       {
         id: "c1", start: 0, duration: 5, template: "bigTextReveal",
@@ -2794,7 +2795,7 @@ record("editorial-timeline: the envelope summarizer validates geometry strictly"
 
   // Unknown templates stay identifiable and never get a tint class.
   const unknownTpl = summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "z", start: 0, duration: 3, template: "invented" }] },
+    plan: { fps: 24, compositions: [{ id: "z", start: 0, duration: 3, template: "invented" }] },
     timing_basis: "authored_plan",
     narration_synced: false,
   });
@@ -2804,7 +2805,7 @@ record("editorial-timeline: the envelope summarizer validates geometry strictly"
 
   // Malformed events are ignored, never emitted as invalid geometry.
   const messy = summarizeEditorialTimeline({
-    plan: { compositions: [{
+    plan: { fps: 24, compositions: [{
       id: "m", start: 0, duration: 4, template: "documentReveal",
       events: [
         { time: 1, duration: 1, action: "fade", target: "canvas" },
@@ -2830,35 +2831,37 @@ record("editorial-timeline: the summarizer rejects unrenderable envelopes", () =
   eq(summarizeEditorialTimeline({ ...TL_PLAN, timing_basis: "vibes" }).ok, false, "unknown basis rejected");
   eq(summarizeEditorialTimeline({ ...TL_PLAN, narration_synced: "yes" }).ok, false, "non-strict flag rejected");
   eq(summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
+    plan: { fps: 24, compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
                             { id: "b", start: 7, duration: 2, template: "x" }] },
     timing_basis: "word_timings",
     narration_synced: true,
   }).ok, false, "a gap breaks the contiguous geometry");
   eq(summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "a", start: 2, duration: 5, template: "x" }] },
+    plan: { fps: 24, compositions: [{ id: "a", start: 2, duration: 5, template: "x" }] },
     timing_basis: "word_timings",
     narration_synced: true,
   }).ok, false, "a leading gap breaks the contiguous geometry");
   eq(summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
+    plan: { fps: 24, compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
                             { id: "b", start: -1, duration: 2, template: "x" }] },
     timing_basis: "word_timings",
     narration_synced: true,
   }).ok, false, "negative start rejected");
   eq(summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "a", start: 0, duration: 0, template: "x" }] },
+    plan: { fps: 24, compositions: [{ id: "a", start: 0, duration: 0, template: "x" }] },
     timing_basis: "word_timings",
     narration_synced: true,
   }).ok, false, "zero duration rejected");
-  // The frame-grid epsilon is tolerated, not snapped.
+  // Raw seconds may differ while both sides still resolve to the same frame.
   const epsilon = summarizeEditorialTimeline({
-    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
-                            { id: "b", start: 5.005, duration: 2, template: "x" }] },
+    plan: { fps: 24, compositions: [{ id: "a", start: 0, duration: 1.001, template: "x" },
+                                     { id: "b", start: 1.019, duration: 0.981, template: "x" }] },
     timing_basis: "authored_plan",
     narration_synced: false,
   });
-  assert(epsilon.ok, `epsilon contiguity accepted: ${epsilon.error}`);
+  assert(epsilon.ok, `same-frame contiguity accepted: ${epsilon.error}`);
+  eq(summarizeEditorialTimeline({ ...TL_PLAN, plan: { ...TL_PLAN.plan, fps: 0 } }).ok,
+    false, "invalid frame rate rejected");
 });
 
 record("voice: mode-aware take badges name the format, not an alignment promise", () => {
@@ -2943,6 +2946,44 @@ await recordAsync("editorial-timeline: the effective plan renders compositions, 
   comps[0].dispatchEvent(new Event("click", { bubbles: true }));
   eq(window.location.hash, "#/editorial", "clip click opens the Editorial workspace");
   window.location.hash = "#/";
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-timeline: Fit keeps sub-quarter-second compositions readable", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl";
+  const shortPlan = {
+    ...TL_PLAN,
+    plan: {
+      ...TL_PLAN.plan,
+      compositions: [
+        { id: "quick", start: 0, duration: 0.2, template: "bigTextReveal", events: [] },
+        { id: "rest", start: 0.2, duration: 9.8, template: "archiveCanvas", events: [] },
+      ],
+    },
+  };
+  stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_SNAP };
+    }
+    if (call.method === "GET" && call.url === TL_PLAN_URL) {
+      return { payload: shortPlan };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderTimeline({ name: "timeline" });
+  document.body.append(screen);
+  await flush();
+  const built = await waitFor(() => screen.textContent.includes("2 compositions"));
+  assert(built, `short timeline built: ${screen.textContent}`);
+  const fit = [...screen.querySelectorAll("button")].find((button) => button.textContent === "Fit");
+  assert(fit, "short timeline exposes Fit");
+  fit.dispatchEvent(new Event("click", { bubbles: true }));
+  const quick = screen.querySelector(".tl-comp");
+  assert(quick, `short composition rendered: ${screen.textContent}`);
+  assert(parseFloat(quick.style.width) >= 60,
+    `0.2s composition stays readable after Fit: ${quick.style.width}`);
   screen.remove();
   state.currentProjectId = null;
 });

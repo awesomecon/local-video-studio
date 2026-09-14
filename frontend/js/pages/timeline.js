@@ -159,9 +159,6 @@ function timelinePanel() {
  * the Editorial workspace; this screen only explains it.
  * ==========================================================================*/
 
-/** Frame-grid tolerance when validating the stored composition geometry. */
-const TL_FRAME_TOL = 0.01;
-
 /** Readable names for the renderer-owned composition templates. */
 const COMP_TEMPLATE_LABELS = {
   archiveCanvas: "Archive canvas",
@@ -290,6 +287,10 @@ export function summarizeEditorialTimeline(envelope) {
   if (typeof envelope.narration_synced !== "boolean") {
     return { ok: false, error: "The timeline-plan response is missing a strict narration_synced flag." };
   }
+  const fps = plan.fps;
+  if (typeof fps !== "number" || !Number.isInteger(fps) || fps < 1 || fps > 120) {
+    return { ok: false, error: "The timeline-plan response has an invalid frame rate." };
+  }
   const raw = /** @type {any[]} */ (plan.compositions);
   const compositions = [];
   let expectedStart = 0; // the first composition starts at zero on the frame grid
@@ -306,7 +307,7 @@ export function summarizeEditorialTimeline(envelope) {
     if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0) {
       return { ok: false, error: `Composition ${i + 1} has an invalid duration.` };
     }
-    if (Math.abs(start - expectedStart) > TL_FRAME_TOL) {
+    if (Math.round(start * fps) !== Math.round(expectedStart * fps)) {
       return { ok: false, error: `Composition ${i + 1} breaks the contiguous timeline geometry.` };
     }
     expectedStart = start + duration;
@@ -317,7 +318,7 @@ export function summarizeEditorialTimeline(envelope) {
       const dur = e.duration;
       if (typeof time !== "number" || !Number.isFinite(time) || time < 0) continue;
       if (typeof dur !== "number" || !Number.isFinite(dur) || dur < 0) continue;
-      if (time > duration + TL_FRAME_TOL) continue; // past the composition end
+      if (time > duration) continue; // past the composition end
       events.push({
         time,
         duration: Math.min(dur, Math.max(0, duration - time)), // display clamp only
@@ -468,7 +469,7 @@ function buildEditorialTimeline(summary, snap, zoom) {
     const viewportEl = /** @type {HTMLElement} */ (grid.parentElement);
     const available = Math.max(240, viewportEl.clientWidth - LABEL_COL_PX - 2);
     const fit = total > 0 ? available / total : 8;
-    const durations = summary.compositions.map((c) => c.duration).filter((d) => d > 0.25);
+    const durations = summary.compositions.map((c) => c.duration).filter((d) => d > 0);
     const minDur = durations.length ? Math.min(...durations) : 1;
     return Math.max(fit, MIN_CLIP_PX / minDur, 0.5);
   }
