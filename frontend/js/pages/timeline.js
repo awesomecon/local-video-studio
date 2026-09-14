@@ -266,8 +266,8 @@ function timingBasisBadge(basis) {
  * Strictly validate the timeline-plan envelope and reduce it to safe rows.
  * A composition row keeps only finite, non-negative start and positive,
  * finite duration; the stored order is preserved and the geometry must stay
- * contiguous (the domain requires contiguous compositions, so a break is an
- * invalid plan, not an expected gap). Events with malformed numeric fields
+ * contiguous from zero (the domain requires contiguous compositions, so a
+ * leading gap or a break is an invalid plan, not an expected gap). Events with malformed numeric fields
  * are ignored rather than emitted as invalid CSS; a valid event whose
  * duration runs past the composition end is clamped at the end for display
  * only - the source values are never mutated and no start is invented.
@@ -306,7 +306,7 @@ export function summarizeEditorialTimeline(envelope) {
     if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0) {
       return { ok: false, error: `Composition ${i + 1} has an invalid duration.` };
     }
-    if (i > 0 && Math.abs(start - expectedStart) > TL_FRAME_TOL) {
+    if (Math.abs(start - expectedStart) > TL_FRAME_TOL) {
       return { ok: false, error: `Composition ${i + 1} breaks the contiguous timeline geometry.` };
     }
     expectedStart = start + duration;
@@ -379,9 +379,12 @@ async function loadEditorialTimeline(region, snap, zoom, hooks) {
   }
   const url = safeEditorialTimelinePlanUrl(editorial.timeline_plan_url, state.currentProjectId);
   if (!url) {
-    region.replaceChildren(errorPanel(new Error(
+    region.replaceChildren(emptyState(
+      "Timeline unavailable",
       "The snapshot reports an Edit Plan, but its timeline-plan URL is not a usable project-local path, so this timeline cannot be read safely.",
-    )));
+      [el("button", { class: "btn btn-primary", type: "button", onclick: () => navigate("#/editorial") },
+        "Open Editorial workspace")],
+    ));
     return;
   }
   let envelope;

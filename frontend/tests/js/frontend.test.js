@@ -2836,6 +2836,11 @@ record("editorial-timeline: the summarizer rejects unrenderable envelopes", () =
     narration_synced: true,
   }).ok, false, "a gap breaks the contiguous geometry");
   eq(summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "a", start: 2, duration: 5, template: "x" }] },
+    timing_basis: "word_timings",
+    narration_synced: true,
+  }).ok, false, "a leading gap breaks the contiguous geometry");
+  eq(summarizeEditorialTimeline({
     plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
                             { id: "b", start: -1, duration: 2, template: "x" }] },
     timing_basis: "word_timings",
@@ -2873,6 +2878,8 @@ record("voice: mode-aware take badges name the format, not an alignment promise"
   b = narrationTimingBadge("editorial", "override");
   assert(b.textContent.includes("script override"));
   assert(b.className.includes("badge-neutral"));
+  assert(b.title.includes("not mapped to scenes"), `override title: ${b.title}`);
+  assert(b.title.includes("Timeline"), "override defers alignment authority to the Timeline");
   // ...and only genuinely unknown/missing formats read as legacy.
   b = narrationTimingBadge("editorial", "weird_mode_1999");
   assert(b.className.includes("badge-warning"));
@@ -2972,6 +2979,8 @@ await recordAsync("editorial-timeline: an untrusted timeline_plan_url degrades w
   await flush();
   assert(screen.textContent.includes("not a usable project-local path"),
     `honest state shown`);
+  assert(screen.textContent.includes("Timeline unavailable"), "unavailable state title shown");
+  assert(screen.querySelector(".empty-state"), "untrusted URL degrades to an empty state, not an error panel");
   eq(calls.filter((c) => c.url.includes("/editorial/")).length, 0,
     "no timeline-plan traffic for a cross-project URL");
   assert(!screen.querySelector(".tl-comp"));

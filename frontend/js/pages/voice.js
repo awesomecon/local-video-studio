@@ -1346,7 +1346,11 @@ export function narrationTimingBadge(videoMode, timingMode, active = false) {
         : "When selected, Editorial follows this take's narration clock after alignment rebuilds - exact word alignment may not exist yet, and selecting it rebuilds captions and downstream renders.";
       return b;
     }
-    if (timingMode === "override") return badge("neutral", "script override", false);
+    if (timingMode === "override") {
+      const b = badge("neutral", "script override", false);
+      b.title = "Script override audio: not mapped to scenes. After this take is selected and alignment rebuilds, Editorial cuts follow its narration clock; the Timeline's timing badge states the current alignment.";
+      return b;
+    }
     return badge("warning", "legacy timing", false);
   }
   if (timingMode === "scene_audio_v1") return badge("good", "scene synced", false);
