@@ -20,6 +20,10 @@ from fastapi.testclient import TestClient
 
 from backend.api.main import create_app
 from backend.core import load_config
+from backend.music.direction import (
+    MUSIC_DIRECTION_MAX_TOKENS,
+    MUSIC_DIRECTION_THINKING_BUDGET_TOKENS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +732,12 @@ def test_local_llm_proposes_unapplied_music_settings(tmp_path: Path) -> None:
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call["structured"] is True
-    assert call["thinking_budget_tokens"] > 0
+    # Reasoning stays enabled with the requested 8k budget, and because llama.cpp
+    # counts hidden reasoning inside max_tokens, the completion ceiling must stay
+    # above it or every Fill-with-local-LLM click truncates before any JSON.
+    assert call["thinking_budget_tokens"] == MUSIC_DIRECTION_THINKING_BUDGET_TOKENS == 8_000
+    assert call["max_tokens"] == MUSIC_DIRECTION_MAX_TOKENS
+    assert call["max_tokens"] > call["thinking_budget_tokens"]
     prompt = " ".join(message["content"] for message in call["messages"])
     assert "scoring a short" in prompt
 

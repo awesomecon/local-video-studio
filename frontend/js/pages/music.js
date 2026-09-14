@@ -217,7 +217,7 @@ function generationPanel(snap, models, reload) {
     icon("music", 13), "Fill with local LLM");
   llmFill.onclick = async () => {
     llmFill.disabled = true;
-    llmStatus.textContent = "Reading the project and composing settings…";
+    llmStatus.textContent = "Reading the project and reasoning about the score (8k thinking budget — allow a few minutes)…";
     try {
       const result = await suggestMusicSettings(state.config, state.currentProjectId);
       const proposal = result.settings || {};

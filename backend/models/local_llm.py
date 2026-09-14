@@ -377,7 +377,8 @@ class LocalLLMBackend(GeneratorBackend):
         if choice.get("finish_reason") == "length":
             raise BackendError(
                 BackendErrorCode.INVALID_RESPONSE,
-                "The local LLM response was truncated at its token limit. Reduce the "
+                "The local LLM response was truncated at its token limit "
+                f"({max_tokens} completion tokens, hidden reasoning included). Reduce the "
                 "requested script length or increase the completion limit.",
                 retryable=True,
             )

@@ -1389,8 +1389,12 @@ export function autoScore(config, projectId, { musicDirection, intensity } = {},
  * @returns {Promise<{source:"local_llm", model:string|null, settings:{direction:string,bpm:number,key_scale:string,time_signature:string,intensity:string}, rationale:string, applied:false}>}
  */
 export function suggestMusicSettings(config, projectId, opts = {}) {
+  // The settings draft asks the local LLM with an 8k reasoning budget, so this
+  // synchronous call needs the same ceiling as the backend's llm.timeout_seconds
+  // (600s) instead of the short default - otherwise the browser aborts a request
+  // the model is still thinking about.
   return request(config, `/api/projects/${encodeURIComponent(projectId)}/music/suggest-settings`, {
-    method: "POST", timeoutMs: 180000, ...opts,
+    method: "POST", timeoutMs: 600000, ...opts,
   });
 }
 
