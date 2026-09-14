@@ -255,13 +255,19 @@ def apply_auto_score_suggestions(
 # path degrades to the deterministic recipe.
 # ---------------------------------------------------------------------------
 
-#: Suggestion budget: short enough to finish quickly, long enough for the
-#: full cue vocabulary with labels and reasons.
-AUTO_SCORE_MAX_TOKENS = 4096
 AUTO_SCORE_TEMPERATURE = 0.2
 #: Reasoning stays enabled (per the machine's LLM policy) inside a modest
 #: per-request budget; cue placement does not need long deliberation.
 AUTO_SCORE_THINKING_BUDGET_TOKENS = 2_000
+#: Response room for the full cue vocabulary with labels and reasons: the 24-cue
+#: ceiling at realistic label/reason lengths. llama.cpp counts hidden reasoning
+#: and the JSON answer against `max_tokens`, so the completion limit is always
+#: reasoning + response room; a smaller ceiling truncates proposals that crowd
+#: long timelines into a retryable `finish_reason=length`.
+AUTO_SCORE_RESPONSE_BUDGET_TOKENS = 4_096
+AUTO_SCORE_MAX_TOKENS = (
+    AUTO_SCORE_THINKING_BUDGET_TOKENS + AUTO_SCORE_RESPONSE_BUDGET_TOKENS
+)
 
 #: How many timed context lines the prompt may carry per collection.
 _MAX_PROMPT_SEGMENTS = 40

@@ -14,8 +14,19 @@ from pydantic import Field
 from backend.schemas.models import DomainModel, Project, Scene
 
 
-MUSIC_DIRECTION_MAX_TOKENS = 1200
-MUSIC_DIRECTION_THINKING_BUDGET_TOKENS = 1600
+# llama.cpp counts hidden reasoning *and* the schema-constrained answer against
+# `max_tokens`. A ceiling below the reasoning budget therefore truncates the
+# reply before a single JSON token is written ("truncated at its token limit"
+# on every attempt), which is why the completion limit is always derived as
+# reasoning + response room instead of being picked independently.
+MUSIC_DIRECTION_THINKING_BUDGET_TOKENS = 8_000
+# Response room for the full proposal at its schema ceilings: a 2,000-character
+# direction plus a 600-character rationale (~700 tokens of prose) with keys,
+# enums and numbers, rounded up so nothing lands on the boundary.
+MUSIC_DIRECTION_RESPONSE_BUDGET_TOKENS = 2_048
+MUSIC_DIRECTION_MAX_TOKENS = (
+    MUSIC_DIRECTION_THINKING_BUDGET_TOKENS + MUSIC_DIRECTION_RESPONSE_BUDGET_TOKENS
+)
 MUSIC_DIRECTION_TEMPERATURE = 0.25
 
 

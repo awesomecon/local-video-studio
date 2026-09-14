@@ -33,6 +33,27 @@ materializes IDs, indexes, statuses, and durations from the returned draft.
 - The completion budget is computed per request: `10000 + 2048 + 640 × scene ceiling`, so long
   projects are not truncated into a retryable `finish_reason=length`.
 
+### Completion budgets
+
+llama.cpp counts hidden reasoning **and** the visible answer against `max_tokens`. Every caller
+therefore derives its completion limit as `reasoning budget + response room`; a ceiling below the
+reasoning budget stops the model before it writes a single JSON token, which surfaces as the
+retryable "truncated at its token limit" error rather than a bad proposal.
+
+| Call | Reasoning budget | `max_tokens` |
+| --- | --- | --- |
+| Director plan | 10,000 | `10000 + 2048 + 640 × scene ceiling` |
+| Voice performance tags (per batch) | 3,000 | `3000 + 512 + 2 × spoken words` |
+| Music settings — **Fill with local LLM** | 8,000 | 10,048 (8,000 + 2,048 response) |
+| Auto-score cue suggestions | 2,000 | 6,096 (2,000 + 4,096 response) |
+| Editorial plan | 16,384 | 32,768 |
+| Graphic Screens | 16,384 | 32,768 |
+
+Reasoning budgets stay enabled by user preference; the response side is what grows when a feature
+reports truncation. Because a full 8k deliberation can outlast short HTTP timeouts, synchronous
+LLM endpoints in the web UI (music settings) use the same 600-second ceiling as
+`llm.timeout_seconds`.
+
 ### Scene-count bounds
 
 For a project with a fixed target duration, the director is asked for:

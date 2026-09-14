@@ -1047,6 +1047,34 @@ from backend.music import (  # noqa: E402
     llm_auto_score,
     validate_auto_score_payload,
 )
+from backend.music.autoscore import (  # noqa: E402
+    AUTO_SCORE_MAX_TOKENS,
+    AUTO_SCORE_RESPONSE_BUDGET_TOKENS,
+    AUTO_SCORE_THINKING_BUDGET_TOKENS,
+)
+from backend.music.direction import (  # noqa: E402
+    MUSIC_DIRECTION_MAX_TOKENS,
+    MUSIC_DIRECTION_RESPONSE_BUDGET_TOKENS,
+    MUSIC_DIRECTION_THINKING_BUDGET_TOKENS,
+)
+
+
+def test_music_llm_completion_limits_leave_room_for_reasoning() -> None:
+    """llama.cpp bills hidden reasoning against max_tokens.
+
+    A ceiling below the thinking budget truncates the reply before the model
+    writes any JSON, so both music LLM paths derive max_tokens from
+    reasoning + response room (the settings-fill truncation regression).
+    """
+
+    assert AUTO_SCORE_MAX_TOKENS == (
+        AUTO_SCORE_THINKING_BUDGET_TOKENS + AUTO_SCORE_RESPONSE_BUDGET_TOKENS
+    )
+    assert MUSIC_DIRECTION_MAX_TOKENS == (
+        MUSIC_DIRECTION_THINKING_BUDGET_TOKENS + MUSIC_DIRECTION_RESPONSE_BUDGET_TOKENS
+    )
+    assert AUTO_SCORE_MAX_TOKENS > AUTO_SCORE_THINKING_BUDGET_TOKENS
+    assert MUSIC_DIRECTION_MAX_TOKENS > MUSIC_DIRECTION_THINKING_BUDGET_TOKENS
 
 
 class _FakeLlmBackend:
@@ -1132,6 +1160,8 @@ def test_llm_auto_score_validates_and_sanitizes() -> None:
     assert call["structured"] is True
     assert call["json_schema"] is AUTO_SCORE_JSON_SCHEMA
     assert call["thinking_budget_tokens"] is not None  # reasoning stays enabled
+    assert call["max_tokens"] == AUTO_SCORE_MAX_TOKENS
+    assert call["max_tokens"] > call["thinking_budget_tokens"]
     assert call["validator"] is validate_auto_score_payload
     # The prompt carries the full creative context: narration, scenes, emphasis.
     context_blob = str(call["messages"][1]["content"])
