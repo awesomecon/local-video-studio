@@ -26,6 +26,7 @@ import { loadConfig } from "./config.js";
 import { parseRoute, onHashChange, navigate, onRoute } from "./router.js";
 import { icon, badge, toast, STAGE_LABELS } from "./ui.js";
 import { health, systemStatus, listProjects } from "./api.js";
+import { effectiveVideoMode } from "./video-mode.js";
 import { createJobFeed } from "./events.js";
 import { renderDashboard } from "./pages/dashboard.js";
 import { renderNewProject } from "./pages/new-project.js";
@@ -75,6 +76,8 @@ const HEALTH_RETRY_MS = 10000;
 
 /** @type {HTMLElement|null} the `.content` main element. */
 let contentEl = null;
+/** @type {HTMLElement|null} the Storyboard nav button (mode-aware visibility). */
+let storyboardNavEl = null;
 /** @type {HTMLElement|null} the `.body` grid (nav + content). */
 let bodyEl = null;
 /** @type {(() => void)|null} live-update hook for the currently displayed screen. */
@@ -121,6 +124,8 @@ function buildNavItem(item) {
 
 /**
  * Build the sidebar: primary section, items, and a pinned system foot.
+ * The Storyboard button is kept by reference so the mode-aware sync can hide
+ * it for Editorial projects without rebuilding the shell.
  * @returns {HTMLElement}
  */
 function buildSidebar() {
@@ -128,11 +133,27 @@ function buildSidebar() {
     el("div", { class: "nav-section" }, "System"),
     ...NAV_FOOT.map(buildNavItem),
   );
+  const primary = NAV_PRIMARY.map(buildNavItem);
+  storyboardNavEl = primary.find((btn) => btn.dataset.route === "storyboard") || null;
   return el("nav", { class: "sidebar", "aria-label": "Primary navigation" },
     el("div", { class: "nav-section" }, "Studio"),
-    ...NAV_PRIMARY.map(buildNavItem),
+    ...primary,
     foot,
   );
+}
+
+/**
+ * Keep the mode-aware sidebar entries in sync with the selected project:
+ * Editorial projects hide the Classic Storyboard nav item (its route still
+ * renders a safe pointer to #/editorial); Classic, legacy, and no-project
+ * selections show it. Timeline stays visible in both modes. Runs after the
+ * project list reconciles, after project-switcher changes, and on every
+ * route render, so the sidebar never shows the previous project's mode.
+ */
+export function syncModeAwareNavigation() {
+  if (!storyboardNavEl) return;
+  const project = state.projects.find((p) => p.id === state.currentProjectId) || null;
+  storyboardNavEl.hidden = effectiveVideoMode(project) === "editorial";
 }
 
 /**
@@ -418,6 +439,7 @@ async function bootProjects() {
     // clearing it because a background boot fetch failed.
   }
   renderSwitcher();
+  syncModeAwareNavigation();
   // A mounted screen whose rows resolve project titles (Job Monitor) re-renders
   // only on job-feed frames; without a change to the job set no further frame
   // arrives, so poke the live hook to pick up the freshly loaded projects.
@@ -534,6 +556,7 @@ function renderRoute() {
   // Keep the top-bar project switcher in sync with the current selection and
   // the (possibly just-created) project list on every navigation.
   renderSwitcher();
+  syncModeAwareNavigation();
 }
 
 /**

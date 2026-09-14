@@ -479,6 +479,7 @@ class PipelineService:
                 "stale": plan_status["stale"],
                 "stale_reasons": plan_status["stale_reasons"],
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
+                "timeline_plan_url": f"/api/projects/{project.id}/editorial/timeline-plan",
                 "generate_url": f"/api/projects/{project.id}/editorial/plan",
                 "preview_url": f"/api/projects/{project.id}/editorial/preview",
                 "settings_url": f"/api/projects/{project.id}/editorial/settings",
@@ -1757,17 +1758,28 @@ class PipelineService:
             cursor += duration
         return clock
 
-    def _retimed_editorial_plan(self, project: Project, plan: EditPlan) -> EditPlan | None:
-        """Snap stored plan boundaries onto caption sentences or the scene clock.
+    def _effective_editorial_plan(
+        self, project: Project, plan: EditPlan,
+    ) -> tuple[EditPlan, str]:
+        """One shared retiming operation: ``(effective plan, timing basis)``.
 
         Plans authored before the narration takes exist (or against planned
         scene durations) place composition boundaries on the planned clock.
-        Snapping those boundaries to the recorded scene edges - splitting a
-        scene shared by several compositions in proportion to its planned
-        durations - keeps compositions, caption beats, and the spoken audio
-        aligned without re-authoring the plan. Returns None when the real
-        clock is unavailable or the plan cannot be fully mapped, in which
-        case callers keep using the stored plan.
+        Snapping those boundaries to caption sentences - or, without word
+        timings, to the recorded scene edges (splitting a scene shared by
+        several compositions in proportion to its planned durations) - keeps
+        compositions, caption beats, and the spoken audio aligned without
+        re-authoring the plan.
+
+        The basis names the clock that actually produced the returned plan:
+        ``"word_timings"`` when audio-derived word timings retimed it,
+        ``"recorded_scene_clock"`` when recorded scene bounds retimed it (or
+        the stored plan already sits on the recorded clock, so it is returned
+        unchanged), and ``"authored_plan"`` when no usable current narration
+        clock exists or the plan cannot be mapped onto one. Preview,
+        captions, final-render validation, and the timeline-plan endpoint all
+        consume this result so they describe the same composition
+        boundaries. Nothing here is persisted and provenance is untouched.
         """
         bounds = self._narration_scene_bounds(project)
         words = self._editorial_word_timings(project)
@@ -1788,27 +1800,23 @@ class PipelineService:
                     hold_seconds=plan.sentence_hold_seconds,
                 )
                 if compositions is not None:
-                    return EditPlan.model_validate({
-                        **plan.model_dump(mode="python"),
-                        "compositions": [
-                            item.model_dump(mode="python") for item in compositions
-                        ],
-                    })
+                    return (
+                        EditPlan.model_validate({
+                            **plan.model_dump(mode="python"),
+                            "compositions": [
+                                item.model_dump(mode="python") for item in compositions
+                            ],
+                        }),
+                        "word_timings",
+                    )
         if bounds is None:
-            return None
-        recorded_duration = max(end for _start, end in bounds.values())
-        frame_tolerance = max(1.0 / plan.fps, 0.001)
-        if abs(plan.duration - recorded_duration) <= frame_tolerance:
-            # The fallback has no word-level evidence with which to improve an
-            # already recorded-clock plan. Returning it unchanged also avoids
-            # repeatedly redistributing compositions that share narration refs.
-            return plan
+            return plan, "authored_plan"
         claims: dict[str, list[tuple[int, float]]] = {}
         referenced_by_composition: dict[int, list[str]] = {}
         for index, composition in enumerate(plan.compositions):
             referenced = [ref for ref in dict.fromkeys(composition.narration_refs) if ref in bounds]
             if not referenced:
-                return None
+                return plan, "authored_plan"
             referenced_by_composition[index] = referenced
             for scene_id in referenced:
                 claims.setdefault(scene_id, []).append((index, composition.duration))
@@ -1851,10 +1859,42 @@ class PipelineService:
                 "events": events,
             }))
             cursor = end
-        return EditPlan.model_validate({
-            **plan.model_dump(mode="python"),
-            "compositions": [item.model_dump(mode="python") for item in compositions],
-        })
+        return (
+            EditPlan.model_validate({
+                **plan.model_dump(mode="python"),
+                "compositions": [item.model_dump(mode="python") for item in compositions],
+            }),
+            "recorded_scene_clock",
+        )
+
+    def _retimed_editorial_plan(self, project: Project, plan: EditPlan) -> EditPlan | None:
+        """Compatibility view over :meth:`_effective_editorial_plan`.
+
+        Returns the effective plan, or None when the plan stays on the
+        authored clock (callers keep using the plan they passed in).
+        """
+        effective, basis = self._effective_editorial_plan(project, plan)
+        if basis == "authored_plan":
+            return None
+        return effective
+
+    def editorial_timeline_plan(self, project_id: str) -> dict[str, Any]:
+        """The effective (possibly narration-retimed) Edit Plan for Timeline.
+
+        Read-only: returns the same plan preview, captions, and final-render
+        validation consume, tagged with the timing basis actually used. The
+        retimed copy is never persisted and plan provenance is untouched.
+        """
+        project = self._project(project_id)
+        if project.video_mode is not VideoMode.EDITORIAL:
+            raise ValueError("project is not in Editorial Mode")
+        plan = self.store.load_edit_plan(project.slug)
+        effective, basis = self._effective_editorial_plan(project, plan)
+        return {
+            "plan": effective.model_dump(mode="json"),
+            "timing_basis": basis,
+            "narration_synced": basis in ("word_timings", "recorded_scene_clock"),
+        }
 
     def _editorial_caption_cues(self, project: Project, plan: EditPlan) -> list[EditorialCaptionCue]:
         """Compute and suppress Editorial caption beats on the narration clock.

@@ -635,6 +635,60 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   background: color-mix(in oklab, var(--warning) 40%, transparent);
   border-color: var(--warning);
 }
+
+/* --- Editorial Mode: composition + motion-event clips -----------------------
+   Read-only timeline view; clips are tinted by the renderer-owned template
+   (the same --tpl-* tints the composition cards use) and open the Editorial
+   workspace. */
+.tl-comp { cursor: pointer; transition: border-color var(--dur), box-shadow var(--dur); }
+.tl-comp:hover, .tl-comp:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); z-index: 1; }
+.tl-comp .tl-clip-info {
+  position: absolute; left: 6px; right: 6px; bottom: 3px;
+  display: flex; gap: 6px; align-items: baseline;
+  color: #fff; font-size: 10px; line-height: 1.25;
+  white-space: nowrap; overflow: hidden;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+}
+.tl-comp .tl-clip-name { font-weight: 700; flex: none; }
+.tl-comp .tl-clip-dur { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.tl-comp.narrow .tl-clip-dur { display: none; }
+.tl-comp.tpl-archiveCanvas {
+  background: color-mix(in oklab, var(--tpl-archive-canvas) 40%, #1a1408);
+  border-color: color-mix(in oklab, var(--tpl-archive-canvas) 75%, transparent);
+}
+.tl-comp.tpl-documentReveal {
+  background: color-mix(in oklab, var(--tpl-document-reveal) 40%, #0d1a16);
+  border-color: color-mix(in oklab, var(--tpl-document-reveal) 75%, transparent);
+}
+.tl-comp.tpl-comparisonCanvas {
+  background: color-mix(in oklab, var(--tpl-comparison-canvas) 38%, #171331);
+  border-color: color-mix(in oklab, var(--tpl-comparison-canvas) 75%, transparent);
+}
+.tl-comp.tpl-illustrationCanvas {
+  background: color-mix(in oklab, var(--tpl-illustration-canvas) 40%, #0a1a2c);
+  border-color: color-mix(in oklab, var(--tpl-illustration-canvas) 75%, transparent);
+}
+.tl-comp.tpl-bigTextReveal {
+  background: color-mix(in oklab, var(--tpl-big-text-reveal) 40%, #241009);
+  border-color: color-mix(in oklab, var(--tpl-big-text-reveal) 75%, transparent);
+}
+/* Motion-event markers: dashed so they read as events, not media. */
+.tl-event {
+  position: absolute; top: 4px; bottom: 4px;
+  min-width: 3px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--accent) 28%, transparent);
+  border: 1px dashed color-mix(in oklab, var(--accent) 70%, transparent);
+  overflow: hidden;
+}
+.tl-event-label {
+  position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
+  font-size: 9px; font-weight: 600; color: #fff;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
 .tl-stage {
   display: flex; align-items: center;
   padding: 0 8px;

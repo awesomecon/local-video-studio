@@ -65,6 +65,44 @@ rule applies: use deterministic text when the wording must be guaranteed.
    deliberately changes that policy.
 9. **Perform visual QC.** Watch the sequence at normal speed and inspect each text frame at full size.
 
+## Editorial mode screens
+
+Projects created with the **Editorial** video style cut as renderer-owned
+compositions instead of scene-based video, and the screens follow that:
+
+- **Storyboard is hidden from the sidebar** while an Editorial project is
+  selected: the Edit Plan, not the scene board, owns the project's picture,
+  text, evidence, and motion. A bookmarked or manually entered
+  `#/storyboard` route never shows Classic scene controls; it renders a safe
+  pointer to the Editorial workspace (`#/editorial`) and to the Script
+  screen, which owns the narration text. Switching back to a Classic or
+  legacy project restores the scene board on the same panel.
+- **Timeline stays visible in both modes** and is the read-only view of the
+  Editorial picture. For Editorial projects it is a composition and
+  motion-event timeline built from the *effective* plan — the same
+  narration-retimed plan that preview, captions, and export render (the
+  authored plan snapped to current narration word timings, or to recorded
+  scene bounds when no word-level clock exists). Clicking a composition
+  opens it in the Editorial workspace; the Timeline itself never edits.
+- **The timing badge above the Timeline** states whether the current plan is
+  actually aligned to the active narration:
+  - **Narration aligned** (green) — composition cuts follow the active
+    narration's word timings.
+  - **Recorded narration clock** (neutral) — cuts follow the recorded scene
+    boundaries of the active narration: real audio, coarser than word-level
+    alignment.
+  - **Planned timing** (warning) — narration alignment is not current; the
+    compositions sit on the authored plan's clock until the narration is
+    aligned (or a take is recorded).
+- **Voice timing badges are mode- and format-aware.** Known take formats
+  (scene timing, Editorial narration, script override) are labeled by what
+  the take contains; only genuinely unknown legacy formats read as
+  *legacy timing*. Selecting or regenerating narration rebuilds captions and
+  downstream renders, after which the Timeline's timing badge reports the
+  resulting alignment — the take badge itself never claims it.
+
+Classic and legacy projects keep the existing scene-based screens unchanged.
+
 ## Long-form rhythm
 
 A long-form video uses a documentary rhythm instead of one visual method throughout:

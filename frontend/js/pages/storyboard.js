@@ -43,6 +43,15 @@
  *
  * After every action the region reloads from the backend: nothing here is
  * optimistic.
+ *
+ * Mode guard: for Editorial projects (video_mode === "editorial") the panel
+ * renders a safe pointer to the Editorial workspace instead of the Classic
+ * scene controls — the Edit Plan owns this project's picture, text,
+ * evidence, and motion, so scene cards, jobs, and batch actions are never
+ * shown. The pointer re-renders on every accepted snapshot load, so a
+ * project switch away from Editorial restores the Classic grid on the same
+ * panel, and a late response for the previous project cannot repaint it
+ * (last-write-wins token guard).
  */
 
 import { el, fmtDuration } from "../dom.js";
@@ -72,6 +81,7 @@ import {
 } from "../ui.js";
 import { navigate, parseRoute } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { effectiveVideoMode } from "../video-mode.js";
 
 /** Scene visuals currently being generated from this browser session. */
 const pendingVisualSceneIds = new Set();
@@ -168,6 +178,8 @@ function boardPanel() {
     class: "btn btn-ghost btn-sm", type: "button", hidden: true,
   }, "Cancel all");
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
+  const introEl = el("p", { class: "muted small" },
+    "Generated previews stream from project-scoped local URLs. Generate a visual to fill a card.");
   const batchBar = el("div", { class: "row", style: { flexWrap: "wrap", alignItems: "center" } });
 
   /** @type {import("../api.js").Scene[]} */
@@ -185,8 +197,7 @@ function boardPanel() {
       cancelAllBtn,
       refreshBtn,
     ),
-    el("p", { class: "muted small" },
-      "Generated previews stream from project-scoped local URLs. Generate a visual to fill a card."),
+    introEl,
     batchBar,
     body,
   );
@@ -256,6 +267,21 @@ function boardPanel() {
     try {
       const snap = await getProject(state.config, state.currentProjectId);
       if (token !== inflight) return;
+      // Editorial projects are cut as compositions, not scenes: never render
+      // the Classic scene controls for them, and hide them if an earlier
+      // selection left this panel on the Classic view.
+      if (effectiveVideoMode(snap.project) === "editorial") {
+        summaryEl.replaceChildren();
+        introEl.hidden = true;
+        cancelAllBtn.hidden = true;
+        batchBar.replaceChildren();
+        region.replaceChildren(editorialPointerState());
+        hasContent = true;
+        return;
+      }
+      // Classic: restore the scene controls (hidden while an Editorial
+      // selection was active on this same panel) before painting the grid.
+      introEl.hidden = false;
       scenes = snap.scenes || [];
       assets = snap.assets || [];
       jobs = snap.jobs || [];
@@ -423,6 +449,30 @@ function boardPanel() {
   registerLiveUpdate(() => load(body, { skeleton: false }));
   load(body);
   return panel;
+}
+
+/* ============================================================================
+ * Editorial pointer (mode guard)
+ * ==========================================================================*/
+
+/**
+ * Safe state for an Editorial project on the Storyboard route (sidebar link,
+ * bookmark, or a project switch). The Classic scene controls stay hidden;
+ * the Edit Plan — not the scene board — owns this project's picture, text,
+ * evidence, and motion, and the Script owns its narration text.
+ * @returns {HTMLElement}
+ */
+function editorialPointerState() {
+  return emptyState(
+    "Editorial projects are cut as compositions",
+    "This project's Edit Plan owns the picture, text, evidence, and motion; the Script owns its narration text, so the Classic scene board does not apply.",
+    [
+      el("button", { class: "btn btn-primary", type: "button", onclick: () => navigate("#/editorial") },
+        "Open Editorial workspace"),
+      el("button", { class: "btn btn-ghost", type: "button", onclick: () => navigate("#/script") },
+        "Open Script"),
+    ],
+  );
 }
 
 /* ============================================================================

@@ -116,6 +116,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { effectiveVideoMode } from "../video-mode.js";
 
 /** Editable brief fields and how they map to controls. */
 const TEXT_FIELDS = [
@@ -471,14 +472,15 @@ function resolutionField(inputs, value, opts = {}) {
 
 /* --- Value reading / diffing ---------------------------------------------- */
 
-/**
- * Existing projects may omit video_mode; only an explicit editorial value
- * opts into the new generator.
- * @param {{video_mode?: any} | null | undefined} project
+/* `effectiveVideoMode` lives in the shared, dependency-neutral module
+ * (js/video-mode.js) so the app shell can compute it without importing the
+ * Project page (which imports the shell's live-update hook back). The import
+ * above serves this page; this re-export keeps the existing importers
+ * (Editorial screen, tests) on their current path. The helper returns
+ * "editorial" only for an explicit value; legacy projects with a missing or
+ * unknown video_mode read as classic.
  */
-export function effectiveVideoMode(project) {
-  return project?.video_mode === "editorial" ? "editorial" : "classic";
-}
+export { effectiveVideoMode };
 
 /** @param {any} p */
 export function readProjectFields(p) {
