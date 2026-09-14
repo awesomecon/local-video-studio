@@ -337,6 +337,7 @@ function build(snap, stages, active, last, thumbnails) {
           mode === "editorial"
             ? stageRerunCell("editorial_visual", stages.editorial_visual, { active, onRerun })
             : null,
+          stageRerunCell("score_mix", stages.score_mix, { active, onRerun }),
           stageRerunCell("timeline", stages.timeline, { active, onRerun }),
           stageRerunCell("render_preview", stages.render_preview, { active, onRerun }),
           stageRerunCell("quality_control", stages.quality_control, { active, onRerun }),
@@ -474,6 +475,7 @@ async function doRender(force, project) {
 export function stageRerunLabel(stage) {
   return ({
     editorial_visual: "Editorial canvas",
+    score_mix: "Score mix",
     timeline: "Timeline",
     render_preview: "Preview render",
     quality_control: "Quality check",
@@ -637,6 +639,7 @@ export function renderStageLabel(stage) {
     queued: "Queued",
     validating_inputs: "Validating inputs",
     editorial_visual: "Rendering Editorial canvas",
+    score_mix: "Scoring music",
     timeline: "Building timeline",
     render_preview: "Rendering preview",
     quality_control: "Quality check",

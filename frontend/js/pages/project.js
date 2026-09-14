@@ -572,10 +572,10 @@ function fieldsEqual(a, b) {
 function invalidatedStages(d) {
   const stages = new Set();
   if (d.briefChanged) {
-    for (const s of ["plan", "references", "visuals", "narration", "music", "subtitles", "timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"]) stages.add(s);
+    for (const s of ["plan", "references", "visuals", "narration", "music", "score_mix", "subtitles", "timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"]) stages.add(s);
   }
   if (d.dimensionChanged) {
-    for (const s of ["timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"]) stages.add(s);
+    for (const s of ["score_mix", "timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"]) stages.add(s);
   }
   if (d.narratorChanged) {
     for (const s of ["narration", "subtitles", "timeline", "render_preview", "quality_control", "render_final", "thumbnails", "metadata"]) stages.add(s);

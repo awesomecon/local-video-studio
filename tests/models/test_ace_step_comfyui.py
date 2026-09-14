@@ -225,6 +225,85 @@ def test_readiness_reports_missing_nodes() -> None:
     }
 
 
+def test_capabilities_report_repaint_unsupported_for_bundled_workflows() -> None:
+    """Phase 6: the bundled full-track workflows provide no regional audio
+    editing, so the score studio's repaint control must stay hidden."""
+    backend = ACEStepComfyUIBackend(
+        endpoint="http://127.0.0.1:8188",
+        model_name="xl_turbo",
+        workflows_dir=WORKFLOW_DIR,
+    )
+    assert backend.capabilities() == {"regional_audio_inpaint": False}
+
+
+def test_capabilities_detect_inpaint_support_in_workflows(tmp_path: Path) -> None:
+    """A workflow that genuinely wires an audio inpaint node flips the flag."""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    for name in (
+        "ace-step-1.5-xl-turbo.workflow.json",
+        "ace-step-1.5-xl-sft.workflow.json",
+    ):
+        workflow = json.loads((WORKFLOW_DIR / name).read_text(encoding="utf-8"))
+        workflow["42"] = {"class_type": "AceStepAudioInpaint", "inputs": {}}
+        (workflows / name).write_text(json.dumps(workflow), encoding="utf-8")
+    backend = ACEStepComfyUIBackend(
+        endpoint="http://127.0.0.1:8188",
+        model_name="xl_turbo",
+        workflows_dir=workflows,
+    )
+    assert backend.capabilities() == {"regional_audio_inpaint": True}
+
+
+def test_capabilities_are_deterministic_and_probe_free() -> None:
+    """Capabilities come from the workflow files only: no client is touched,
+    so the flag is well defined even when ComfyUI is down or unregistered."""
+    backend = ACEStepComfyUIBackend(
+        endpoint="http://127.0.0.1:9999",  # never dialed
+        model_name="xl_turbo",
+        workflows_dir=WORKFLOW_DIR,
+    )
+    first = backend.capabilities()
+    again = backend.capabilities()
+    assert first == again == {"regional_audio_inpaint": False}
+
+
+def test_readiness_includes_capabilities_when_healthy() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"system": {"comfyui_version": "0.0.0"}})
+        if request.url.path == "/object_info":
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+
+    transport = httpx.MockTransport(handler)
+    backend = ACEStepComfyUIBackend(
+        endpoint="http://127.0.0.1:8188",
+        model_name="xl_turbo",
+        workflows_dir=WORKFLOW_DIR,
+        client_factory=lambda **kwargs: httpx.Client(transport=transport, **kwargs),
+    )
+    result = backend.readiness()
+    assert result["comfyui_healthy"] is True
+    assert result["capabilities"] == {"regional_audio_inpaint": False}
+
+
+def test_readiness_includes_capabilities_when_unhealthy() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(500, text="boom"))
+    backend = ACEStepComfyUIBackend(
+        endpoint="http://127.0.0.1:8188",
+        model_name="xl_turbo",
+        workflows_dir=WORKFLOW_DIR,
+        client_factory=lambda **kwargs: httpx.Client(transport=transport, **kwargs),
+    )
+    result = backend.readiness()
+    assert result["comfyui_healthy"] is False
+    # Workflow-file capability flags are still reported so the studio can
+    # hide advanced controls without a live backend.
+    assert result["capabilities"] == {"regional_audio_inpaint": False}
+
+
 def test_readiness_reports_missing_files() -> None:
     info = {
         "UNETLoader": {

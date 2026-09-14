@@ -149,21 +149,25 @@ def test_form_screens_do_not_full_rerender() -> None:
     assert "registerLiveUpdate" not in _js("pages/voice.js")
     # Music registers a hook, but it must only sync the generate/regenerate
     # job region (syncJobState) — never reload the whole screen, which would
-    # reset the settings form mid-edit.
+    # reset the settings form mid-edit. When the job settles it refreshes
+    # only the studio/cues columns (refreshAfterGeneration).
     music = _js("pages/music.js")
     assert "registerLiveUpdate" in music
-    assert "syncJobState(state.jobs)" in music
+    assert "syncJobState()" in music
     assert "registerLiveUpdate(() => load(" not in music
+    assert "refreshAfterGeneration" in music
 
 
-def test_music_screen_selects_current_uncached_soundtrack_assets() -> None:
+def test_music_screen_uses_snapshot_selected_soundtracks_and_cache_busting() -> None:
     source = _js("pages/music.js")
-    assert "const music = soundtracks.length ? soundtracks[soundtracks.length - 1] : null;" in source
-    assert "function currentMovements(assets, soundtracks) {" in source
-    assert "movement_asset_ids" in source
-    assert "current.plan_hash === settings.plan_hash" in source
-    assert "function versionedAudioUrl(asset) {" in source
-    assert "encodeURIComponent(version)" in source
+    # The studio snapshot carries the current (server-selected) soundtrack,
+    # scored mix, and preview assets; the page never re-derives them from
+    # raw asset lists and always cache-busts with the asset version.
+    assert "snap.soundtrack" in source
+    assert "snap.scored" in source
+    assert "snap.preview" in source
+    assert "function versionedAudioUrl(" in source
+    assert "encodeURIComponent" in source
 
 
 def test_voice_screen_compares_and_selects_immutable_narration_takes() -> None:

@@ -11,6 +11,7 @@ from backend.timeline.models import AudioTrack, Timeline
 from .binaries import FFmpegBinaries, require_ffmpeg
 
 _CROSSFADE_TRANSITIONS = {"crossfade", "fade", "dissolve", "fade_through_black", "dip_to_white"}
+DEFAULT_MUSIC_GAIN_DB = -12.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,7 @@ class RenderOptions:
     duck_music: bool = True
     narration_loudness_lufs: float = -18.0
     narration_true_peak_db: float = -2.0
-    music_gain_db: float = -12.0
+    music_gain_db: float = DEFAULT_MUSIC_GAIN_DB
     limit_audio: bool = True
 
     def validate(self) -> None:

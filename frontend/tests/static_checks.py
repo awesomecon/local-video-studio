@@ -14,6 +14,8 @@ Node is not assumed, so the whole suite runs on python3 (stdlib only):
      http(s) hosts; no telemetry APIs.
   5. Structure             - no package/lock/build artifacts; index.html loads
      the module entry and every referenced local asset exists.
+  6. Score-studio guards   - Phase 6 deferred controls (repaint selection,
+     region inpainting) never appear as fake UI in the Music screen modules.
 
 Exit code 0 = all checks pass.
 """
@@ -296,6 +298,37 @@ def check_structure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6. score-studio guards (Phase 6: deferred controls stay hidden)
+# ---------------------------------------------------------------------------
+
+SCORE_STUDIO_FILES = ("js/pages/music.js", "js/music/timeline.js",
+                      "js/music/cues.js", "js/music/waveform.js")
+
+
+def check_score_studio_guards() -> None:
+    """Deferred score controls must never surface as fake UI.
+
+    The Music screen ships without a "Repaint Selection" button and without
+    any region-inpaint control; they may only appear once the installed
+    ACE-Step workflow genuinely supports audio-conditioned regional editing
+    (``music.ace.capabilities.regional_audio_inpaint``).
+    """
+    for rel_path in SCORE_STUDIO_FILES:
+        p = FRONTEND / rel_path
+        if not p.exists():
+            continue
+        # Comment lines are skipped: the page's header may *document* the
+        # Phase 6 gate, only rendered controls are forbidden.
+        code_lines = [ln for ln in read(p).splitlines()
+                      if not ln.strip().startswith(("//", "*", "/*"))]
+        src = "\n".join(code_lines).lower()
+        if "inpaint" in src:
+            fail(f"guards: {rel_path} references region/inpaint audio editing")
+        if "repaint selection" in src:
+            fail(f"guards: {rel_path} exposes a deferred Repaint Selection control")
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     check_balance()
@@ -303,6 +336,7 @@ def main() -> int:
     check_routes()
     check_security()
     check_structure()
+    check_score_studio_guards()
     if FAILURES:
         print(f"FAIL: {len(FAILURES)} problem(s)")
         for f in FAILURES:

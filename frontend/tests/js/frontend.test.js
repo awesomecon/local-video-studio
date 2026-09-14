@@ -1038,7 +1038,7 @@ await recordAsync("export: classic screen keeps the unchanged presentation", asy
   assert(panel.textContent.includes("Timeline → preview → quality check → final MP4 → frame extraction"),
     "classic workflow text kept");
   eq(chipRowBadges(panel), [
-    "Timeline: Pending", "Preview render: Pending", "Quality check: Pending",
+    "Score mix: Pending", "Timeline: Pending", "Preview render: Pending", "Quality check: Pending",
     "Final render: Pending", "Thumbnails: Pending",
   ], "no editorial canvas chip on classic screens");
   eq(calls.map((c) => `${c.method} ${c.url}`),
@@ -1055,7 +1055,7 @@ await recordAsync("export: legacy project (omitted video_mode) keeps the classic
   assert(panel.querySelector("dl.kv").textContent.includes("Scene visuals"), "scene visuals row kept");
   assert(panel.textContent.includes("Timeline → preview → quality check → final MP4 → frame extraction"),
     "classic workflow kept");
-  eq(chipRowBadges(panel)[0], "Timeline: Pending", "first chip is timeline, not editorial canvas");
+  eq(chipRowBadges(panel)[0], "Score mix: Pending", "first chip is score mix, not editorial canvas");
 });
 
 await recordAsync("export: editorial screen shows the additive workflow (current plan)", async () => {
@@ -1074,7 +1074,7 @@ await recordAsync("export: editorial screen shows the additive workflow (current
   assert(panel.textContent.includes("Editorial canvas → timeline → preview → quality check → final MP4 → frame extraction"),
     "compact editorial workflow");
   eq(chipRowBadges(panel), [
-    "Editorial canvas: Completed", "Timeline: Pending", "Preview render: Pending",
+    "Editorial canvas: Completed", "Score mix: Pending", "Timeline: Pending", "Preview render: Pending",
     "Quality check: Pending", "Final render: Pending", "Thumbnails: Pending",
   ], "editorial canvas chip leads the stage row");
   eq(calls.map((c) => `${c.method} ${c.url}`),
@@ -1124,7 +1124,7 @@ await recordAsync("export: active editorial render shows the canvas stage label"
     status: "preparing", progress: 0.12, priority: 0,
     parameters: {
       force: false, current_stage: "editorial_visual",
-      stages: ["editorial_visual", "timeline", "render_preview", "quality_control", "render_final", "thumbnails"],
+      stages: ["editorial_visual", "score_mix", "timeline", "render_preview", "quality_control", "render_final", "thumbnails"],
     },
     attempt_count: 1, max_attempts: 3, error: null,
     created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:01Z",
@@ -1290,7 +1290,7 @@ await recordAsync("export rerun: each deterministic stage row exposes a Re-run b
     exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS }),
   );
   const classicButtons = stageRerunButtons(renderControlsPanel(classic.screen));
-  eq(classicButtons.length, 5, "classic has five deterministic stages");
+  eq(classicButtons.length, 6, "classic has six deterministic stages including score mix");
   assert(classicButtons.every((b) => !b.disabled), "no active job, so all are enabled");
 
   const editorial = await renderRerunControls(
@@ -1298,7 +1298,7 @@ await recordAsync("export rerun: each deterministic stage row exposes a Re-run b
     exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT),
   );
   const edButtons = stageRerunButtons(renderControlsPanel(editorial.screen));
-  eq(edButtons.length, 6, "editorial adds the Editorial canvas stage");
+  eq(edButtons.length, 7, "editorial adds the Editorial canvas stage");
   closeModals();
 });
 
@@ -1307,8 +1307,8 @@ await recordAsync("export rerun: Re-run confirms scope then posts force to the s
   const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
   const row = renderControlsPanel(screen).querySelector(".row.mt");
   const rerunButtons = [...row.querySelectorAll("button")];
-  eq(rerunButtons.length, 5, "one Re-run per stage row");
-  rerunButtons[4].click(); // thumbnails is the last classic stage
+  eq(rerunButtons.length, 6, "one Re-run per stage row");
+  rerunButtons[5].click(); // thumbnails is the last classic stage
   await flush();
   const modal = document.querySelector("dialog.modal");
   assert(modal, "confirmation dialog opened");
@@ -1331,7 +1331,7 @@ await recordAsync("export rerun: canceling the confirmation issues no request", 
   const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
   const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
   const row = renderControlsPanel(screen).querySelector(".row.mt");
-  [...row.querySelectorAll("button")][0].click(); // timeline
+  [...row.querySelectorAll("button")][1].click(); // timeline (score mix leads the row)
   await flush();
   const modal = document.querySelector("dialog.modal");
   assert(modal, "confirmation opened");

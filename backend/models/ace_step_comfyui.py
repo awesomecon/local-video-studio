@@ -27,6 +27,11 @@ _ACE_COMBO_FIELDS = {
     "time_signature": "timesignature",
 }
 
+# Phase 6 (deferred features): the stock ACE-Step ComfyUI workflows only
+# generate full tracks.  Score-Studio controls for region repaint / audio
+# inpainting stay hidden until an installed preset workflow genuinely wires
+# an audio inpaint node into its graph; nothing here may fake that control.
+
 
 def _combo_values(field_spec: Any) -> list[str]:
     """Extract choices from current and older ComfyUI object-info shapes."""
@@ -236,7 +241,43 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
                     outputs.append(target)
         return outputs
 
+    def capabilities(self) -> dict[str, bool]:
+        """Deterministic capability flags for the installed workflows.
+
+        Derived only from the workflow JSON files on disk (no ComfyUI
+        probe), so the score studio can surface or hide advanced controls
+        without a live backend.  ``regional_audio_inpaint`` is true only
+        when every installed preset workflow references an audio inpaint
+        node; the bundled full-track workflows report false, which keeps
+        the score studio's "Repaint Selection" control hidden.
+        """
+        workflows: list[dict[str, Any]] = []
+        for preset in _ACE_WORKFLOW_NAMES:
+            try:
+                workflow, _ = self._resolve_workflow_files(preset)
+            except (BackendError, OSError, ValueError):
+                continue
+            workflows.append(workflow)
+        if not workflows:
+            return {"regional_audio_inpaint": False}
+
+        def references_inpaint(workflow: dict[str, Any]) -> bool:
+            for node in workflow.values():
+                if not isinstance(node, dict):
+                    continue
+                class_type = node.get("class_type")
+                if isinstance(class_type, str) and "inpaint" in class_type.lower():
+                    return True
+            return False
+
+        return {
+            "regional_audio_inpaint": all(
+                references_inpaint(workflow) for workflow in workflows
+            ),
+        }
+
     def readiness(self) -> dict[str, Any]:
+        capabilities = self.capabilities()
         health = self.health()
         if health.get("status") != "healthy":
             return {
@@ -245,6 +286,7 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
                 "sft": {"ready": False, "missing_nodes": [], "missing_files": []},
                 "combo_choices": {},
                 "duration_range": {"min": None, "max": None},
+                "capabilities": capabilities,
                 "error": health.get("error", {}).get("message", "ComfyUI is not healthy"),
             }
 
@@ -258,6 +300,7 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
                 "sft": {"ready": False, "missing_nodes": [], "missing_files": []},
                 "combo_choices": {},
                 "duration_range": {"min": None, "max": None},
+                "capabilities": capabilities,
                 "error": str(exc),
             }
 
@@ -313,6 +356,7 @@ class ACEStepComfyUIBackend(ComfyUIBackend):
             "sft": sft_ready,
             "combo_choices": combo_choices,
             "duration_range": duration_range,
+            "capabilities": capabilities,
             "error": None,
         }
 
