@@ -28,15 +28,26 @@
  *    shrinks a scene clip below a usable thumbnail width, so long projects
  *    scroll horizontally instead of collapsing into unreadable slivers.
  *
+ * Editorial Mode (video_mode === "editorial"): the screen stays a
+ * read-only composition and motion-event timeline built from the same
+ * effective, narration-retimed plan preview and export use (the snapshot's
+ * exact project-local timeline-plan URL; anything else is an honest
+ * unavailable state, never a request). No Edit Plan yet renders an empty
+ * state pointing at the Editorial workspace; editing stays owned by
+ * #/editorial. A timing badge above the viewport says whether the current
+ * plan is aligned to the active narration (word timings or the recorded
+ * scene clock) or still on the authored plan's clock ("Planned timing").
+ *
  * No data is invented; a track shows only what the backend reports.
  */
 
 import { el, fmtDuration, shortId } from "../dom.js";
 import { state, needsProject, latestAssetForScene } from "../state.js";
-import { getProject } from "../api.js";
+import { getProject, getEditorialTimelinePlan } from "../api.js";
 import { loadingState, emptyState, errorPanel, badge, stageChip, icon } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute, sceneEditorHash } from "../router.js";
+import { effectiveVideoMode } from "../video-mode.js";
 import { compiledShotSpans, compiledSpanSeconds, fmtSecs, shotSummary, staleReason } from "../shots.js";
 
 /** Width of the sticky label column: read from the shared CSS custom
@@ -108,6 +119,13 @@ function timelinePanel() {
     try {
       const snap = await getProject(state.config, state.currentProjectId);
       if (token !== inflight) return;
+      if (effectiveVideoMode(snap.project) === "editorial") {
+        await loadEditorialTimeline(region, snap, zoom, {
+          isStale: () => token !== inflight,
+          reload: () => load(region),
+        });
+        return;
+      }
       const scenes = (snap.scenes || []).sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
       if (!scenes.length) {
         region.replaceChildren(emptyState("No scenes yet", "Run planning from the Script screen to draft scenes."));
@@ -130,6 +148,502 @@ function timelinePanel() {
   registerLiveUpdate(() => load(body, { skeleton: false }));
   load(body);
   return panel;
+}
+
+/* ============================================================================
+ * Editorial Mode: read-only composition + motion-event timeline
+ *
+ * Built from the same effective, narration-retimed plan that preview,
+ * captions, and export render (GET .../editorial/timeline-plan), so the
+ * screen can never disagree with the actual render clock. Editing stays in
+ * the Editorial workspace; this screen only explains it.
+ * ==========================================================================*/
+
+/** Frame-grid tolerance when validating the stored composition geometry. */
+const TL_FRAME_TOL = 0.01;
+
+/** Readable names for the renderer-owned composition templates. */
+const COMP_TEMPLATE_LABELS = {
+  archiveCanvas: "Archive canvas",
+  documentReveal: "Document reveal",
+  comparisonCanvas: "Comparison canvas",
+  illustrationCanvas: "Illustration canvas",
+  bigTextReveal: "Big text reveal",
+};
+
+/** Template → CSS tint class. Unknown templates get a plain clip. */
+const COMP_TEMPLATE_CLASSES = {
+  archiveCanvas: "tpl-archiveCanvas",
+  documentReveal: "tpl-documentReveal",
+  comparisonCanvas: "tpl-comparisonCanvas",
+  illustrationCanvas: "tpl-illustrationCanvas",
+  bigTextReveal: "tpl-bigTextReveal",
+};
+
+/** Readable labels for the motion-primitive event actions. */
+const MOTION_ACTION_LABELS = {
+  fade: "Fade",
+  fadeUp: "Fade up",
+  slideInLeft: "Slide in left",
+  slideInRight: "Slide in right",
+  scaleIn: "Scale in",
+  slowPush: "Slow push",
+  paperSlide: "Paper slide",
+  underline: "Underline",
+  highlight: "Highlight",
+  drawLine: "Draw line",
+  staggerIn: "Stagger in",
+  dimOthers: "Dim others",
+  focusOne: "Focus one",
+  promoteNode: "Promote node",
+  collapseToBlack: "Collapse to black",
+  hardCut: "Hard cut",
+};
+
+/**
+ * Readable label for a motion action; unknown actions pass through so a
+ * malformed plan is still identifiable (they are rendered as text only and
+ * never become class names).
+ * @param {unknown} action
+ * @returns {string}
+ */
+function motionActionLabel(action) {
+  if (typeof action === "string" && MOTION_ACTION_LABELS[action]) return MOTION_ACTION_LABELS[action];
+  return (typeof action === "string" && action) ? action : "unknown";
+}
+
+/**
+ * The mounted project's timeline-plan URL, or null. Only the exact
+ * project-local path `/api/projects/{id}/editorial/timeline-plan` is
+ * trusted: whitespace, queries, fragments, backslashes, absolute URLs, and
+ * cross-project paths all degrade to an honest unavailable state instead of
+ * a request to an unknown target.
+ * @param {unknown} value — the snapshot's timeline_plan_url
+ * @param {string | null} projectId — the mounted project's id
+ * @returns {string | null}
+ */
+export function safeEditorialTimelinePlanUrl(value, projectId) {
+  if (typeof value !== "string" || value !== value.trim() || /\s/.test(value)
+    || value.includes("\\") || value.includes("?") || value.includes("#")) return null;
+  if (typeof projectId !== "string" || !projectId || /\s/.test(projectId)
+    || projectId.includes("\\") || projectId.includes("/")
+    || projectId.includes("?") || projectId.includes("#")) return null;
+  const expected = `/api/projects/${encodeURIComponent(projectId)}/editorial/timeline-plan`;
+  return value === expected ? value : null;
+}
+
+/** Timing bases the backend may report, in order of authority. */
+const TIMING_BASIS_LABELS = {
+  word_timings: "Narration aligned",
+  recorded_scene_clock: "Recorded narration clock",
+  authored_plan: "Planned timing",
+};
+
+/**
+ * The badge that tells whether the effective plan is actually aligned to
+ * the active narration. This is the authoritative statement: an active
+ * take's badge on the Voice screen only describes what that take contains.
+ * @param {"word_timings"|"recorded_scene_clock"|"authored_plan"} basis
+ * @returns {HTMLElement}
+ */
+function timingBasisBadge(basis) {
+  if (basis === "word_timings") {
+    const b = badge("good", "Narration aligned");
+    b.title = "Composition cuts follow the active narration's word timings - the same clock preview and export render.";
+    return b;
+  }
+  if (basis === "recorded_scene_clock") {
+    const b = badge("neutral", "Recorded narration clock");
+    b.title = "Compositions follow the recorded scene boundaries of the active narration - real audio, coarser than word-level alignment.";
+    return b;
+  }
+  const b = badge("warning", "Planned timing");
+  b.title = "Narration alignment is not current: compositions sit on the authored plan's clock. Align the narration (or record a take) and the timeline follows the real narration clock.";
+  return b;
+}
+
+/**
+ * Strictly validate the timeline-plan envelope and reduce it to safe rows.
+ * A composition row keeps only finite, non-negative start and positive,
+ * finite duration; the stored order is preserved and the geometry must stay
+ * contiguous (the domain requires contiguous compositions, so a break is an
+ * invalid plan, not an expected gap). Events with malformed numeric fields
+ * are ignored rather than emitted as invalid CSS; a valid event whose
+ * duration runs past the composition end is clamped at the end for display
+ * only - the source values are never mutated and no start is invented.
+ * Unknown templates/actions degrade to escaped text labels.
+ * @param {unknown} envelope — `{plan, timing_basis, narration_synced}`
+ * @returns {{ok: true, compositions: any[], total: number, timingBasis: string, narrationSynced: boolean} | {ok: false, error: string}}
+ */
+export function summarizeEditorialTimeline(envelope) {
+  if (!envelope || typeof envelope !== "object") {
+    return { ok: false, error: "The timeline-plan response is not an object." };
+  }
+  const plan = envelope.plan;
+  if (!plan || typeof plan !== "object" || !Array.isArray(plan.compositions)) {
+    return { ok: false, error: "The timeline-plan response has no composition list." };
+  }
+  const basis = envelope.timing_basis;
+  if (typeof basis !== "string" || !(basis in TIMING_BASIS_LABELS)) {
+    return { ok: false, error: `Unknown timing basis ${JSON.stringify(basis)}.` };
+  }
+  if (typeof envelope.narration_synced !== "boolean") {
+    return { ok: false, error: "The timeline-plan response is missing a strict narration_synced flag." };
+  }
+  const raw = /** @type {any[]} */ (plan.compositions);
+  const compositions = [];
+  let expectedStart = 0; // the first composition starts at zero on the frame grid
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (!c || typeof c !== "object") {
+      return { ok: false, error: `Composition ${i + 1} is not an object.` };
+    }
+    const start = c.start;
+    const duration = c.duration;
+    if (typeof start !== "number" || !Number.isFinite(start) || start < 0) {
+      return { ok: false, error: `Composition ${i + 1} has an invalid start time.` };
+    }
+    if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0) {
+      return { ok: false, error: `Composition ${i + 1} has an invalid duration.` };
+    }
+    if (i > 0 && Math.abs(start - expectedStart) > TL_FRAME_TOL) {
+      return { ok: false, error: `Composition ${i + 1} breaks the contiguous timeline geometry.` };
+    }
+    expectedStart = start + duration;
+    const events = [];
+    for (const e of (Array.isArray(c.events) ? c.events : [])) {
+      if (!e || typeof e !== "object") continue; // ignore malformed events
+      const time = e.time;
+      const dur = e.duration;
+      if (typeof time !== "number" || !Number.isFinite(time) || time < 0) continue;
+      if (typeof dur !== "number" || !Number.isFinite(dur) || dur < 0) continue;
+      if (time > duration + TL_FRAME_TOL) continue; // past the composition end
+      events.push({
+        time,
+        duration: Math.min(dur, Math.max(0, duration - time)), // display clamp only
+        action: (typeof e.action === "string" && e.action) || "unknown",
+        target: (typeof e.target === "string" && e.target) || "",
+      });
+    }
+    const template = (typeof c.template === "string" && c.template) || "unknown";
+    compositions.push({
+      index: i,
+      id: (typeof c.id === "string" && c.id) || `composition ${i + 1}`,
+      start,
+      duration,
+      template,
+      templateLabel: (typeof template === "string" && COMP_TEMPLATE_LABELS[template]) || template,
+      templateClass: COMP_TEMPLATE_CLASSES[template] || "",
+      assetCount: Array.isArray(c.assets) ? c.assets.length : 0,
+      elementCount: Array.isArray(c.elements) ? c.elements.length : 0,
+      eventCount: events.length,
+      events,
+    });
+  }
+  const total = compositions.reduce(
+    (max, c) => Math.max(max, c.start + c.duration), 0,
+  );
+  return {
+    ok: true,
+    compositions,
+    total,
+    timingBasis: /** @type {keyof typeof TIMING_BASIS_LABELS} */ (basis),
+    narrationSynced: /** @type {boolean} */ (envelope.narration_synced),
+  };
+}
+
+/**
+ * Load (or re-load) the Editorial timeline for one already-validated
+ * snapshot: empty state without a plan, honest unavailable state for an
+ * untrusted URL, then one strictly validated timeline-plan read. Stale
+ * loads are dropped via the `isStale` guard, so a slow first response can
+ * never paint over a later project or mode selection.
+ * @param {HTMLElement} region
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @param {{scale: number | null, userSet: boolean}} zoom — mutated in place
+ * @param {{isStale: () => boolean, reload: () => void}} hooks — the caller's
+ *   liveness check and the same load function (so Retry re-runs the panel
+ *   load from a fresh snapshot)
+ */
+async function loadEditorialTimeline(region, snap, zoom, hooks) {
+  const editorial = (snap.editorial && typeof snap.editorial === "object")
+    ? snap.editorial : {};
+  if (editorial.has_edit_plan !== true) {
+    region.replaceChildren(emptyState(
+      "No Edit Plan yet",
+      "The Editorial Edit Plan will define this timeline. Generate it in the Editorial workspace first - until then there are no compositions to lay out.",
+      [el("button", { class: "btn btn-primary", type: "button", onclick: () => navigate("#/editorial") },
+        "Open Editorial workspace")],
+    ));
+    return;
+  }
+  const url = safeEditorialTimelinePlanUrl(editorial.timeline_plan_url, state.currentProjectId);
+  if (!url) {
+    region.replaceChildren(errorPanel(new Error(
+      "The snapshot reports an Edit Plan, but its timeline-plan URL is not a usable project-local path, so this timeline cannot be read safely.",
+    )));
+    return;
+  }
+  let envelope;
+  try {
+    envelope = await getEditorialTimelinePlan(state.config, url);
+  } catch (err) {
+    if (hooks.isStale()) return;
+    region.replaceChildren(errorPanel(err, el("div", { class: "row" },
+      el("button", { class: "btn", type: "button", onclick: hooks.reload }, "Retry"),
+      el("button", { class: "btn btn-ghost", type: "button", onclick: () => navigate("#/editorial") },
+        "Open Editorial workspace"),
+    )));
+    return;
+  }
+  if (hooks.isStale()) return;
+  const summary = summarizeEditorialTimeline(envelope);
+  if (!summary.ok) {
+    region.replaceChildren(errorPanel(new Error(summary.error),
+      el("button", { class: "btn", type: "button", onclick: hooks.reload }, "Retry"),
+    ));
+    return;
+  }
+  if (!summary.compositions.length) {
+    region.replaceChildren(emptyState(
+      "No compositions",
+      "The Edit Plan has no readable compositions yet. Open the Editorial workspace to review it.",
+      [el("button", { class: "btn btn-primary", type: "button", onclick: () => navigate("#/editorial") },
+        "Open Editorial workspace")],
+    ));
+    return;
+  }
+  region.replaceChildren(buildEditorialTimeline(summary, snap, zoom));
+}
+
+/**
+ * The read-only Editorial timeline: a timing-basis badge, a compositions
+ * lane tinted by renderer-owned template, a motion-events lane, and the
+ * same stage lanes as the Classic view (Narration / Music / Captions), all
+ * on the effective plan's clock. Composition clips are clickable
+ * read-only affordances pointing at the Editorial workspace - nothing
+ * here mutates the plan.
+ * @param {{ok: true, compositions: any[], total: number, timingBasis: string, narrationSynced: boolean}} summary
+ * @param {import("../api.js").ProjectSnapshot} snap
+ * @param {{scale: number | null, userSet: boolean}} zoom — mutated in place
+ * @returns {HTMLElement}
+ */
+function buildEditorialTimeline(summary, snap, zoom) {
+  const total = summary.total;
+  const project = snap.project;
+  const stages = (snap.stage_state && /** @type {any} */ (snap.stage_state).stages) || {};
+  const target = (typeof project?.target_duration === "number" && project.target_duration > 0)
+    ? project.target_duration : 0;
+
+  const ruler = el("div", { class: "tl-ruler" });
+  const compLane = el("div", { class: "tl-lane tl-lane-scenes" });
+  const eventsLane = el("div", { class: "tl-lane tl-lane-overlays" });
+  const narrationLane = el("div", { class: "tl-lane tl-lane-audio" });
+  const musicLane = el("div", { class: "tl-lane tl-lane-audio" });
+  const captionsLane = el("div", { class: "tl-lane tl-lane-audio" });
+  const sizedLanes = [ruler, compLane, eventsLane, narrationLane, musicLane, captionsLane];
+
+  let rendered = false;
+
+  /** Apply one zoom level to every lane. @param {number} scale px per second */
+  function render(scale) {
+    zoom.scale = scale;
+    const width = Math.max(1, Math.round(total * scale));
+    for (const lane of sizedLanes) lane.style.width = `${width}px`;
+    renderRuler(ruler, total, scale);
+    renderCompositionLane(compLane, summary, scale);
+    renderEventsLane(eventsLane, summary, scale);
+    renderStageLane(narrationLane, stages, "narration", total, scale);
+    renderStageLane(musicLane, stages, "music", total, scale,
+      hasRecordedInput(snap.assets || [], "music"));
+    renderStageLane(captionsLane, stages, "subtitles", total, scale);
+    rendered = true;
+  }
+
+  /** Scale that fills the viewport but keeps composition clips readable. */
+  function fitScale() {
+    const viewportEl = /** @type {HTMLElement} */ (grid.parentElement);
+    const available = Math.max(240, viewportEl.clientWidth - LABEL_COL_PX - 2);
+    const fit = total > 0 ? available / total : 8;
+    const durations = summary.compositions.map((c) => c.duration).filter((d) => d > 0.25);
+    const minDur = durations.length ? Math.min(...durations) : 1;
+    return Math.max(fit, MIN_CLIP_PX / minDur, 0.5);
+  }
+
+  function applyFit() {
+    render(fitScale());
+    syncZoomControls();
+  }
+
+  function syncZoomControls() {
+    if (zoom.scale != null) {
+      zoomSlider.value = String(Math.round(zoom.scale * 2) / 2);
+      zoomValue.textContent = `${zoom.scale.toFixed(1)} px/s`;
+    }
+  }
+
+  const zoomSlider = el("input", {
+    type: "range", min: "0.5", max: "200", step: "0.5",
+    "aria-label": "Timeline zoom (pixels per second)",
+  });
+  zoomSlider.addEventListener("input", () => {
+    zoom.userSet = true;
+    render(parseFloat(zoomSlider.value));
+    syncZoomControls();
+  });
+  const zoomValue = el("span", { class: "tl-zoom-value" }, "");
+  const fitBtn = el("button", {
+    class: "btn btn-ghost btn-sm", type: "button",
+    title: "Reset the zoom so the whole timeline fits while composition clips stay readable.",
+  }, "Fit");
+  fitBtn.addEventListener("click", () => {
+    zoom.userSet = false;
+    applyFit();
+  });
+
+  const grid = el("div", { class: "tl-grid" },
+    el("span", { class: "tl-corner", "aria-hidden": "true" }),
+    ruler,
+    el("span", { class: "tl-label" }, "Compositions"),
+    compLane,
+    el("span", { class: "tl-label" }, "Motion events"),
+    eventsLane,
+    el("span", { class: "tl-label" }, "Narration"),
+    narrationLane,
+    el("span", { class: "tl-label" }, "Music"),
+    musicLane,
+    el("span", { class: "tl-label" }, "Captions"),
+    captionsLane,
+  );
+  const viewport = el("div", { class: "tl-viewport" }, grid);
+
+  // The viewport only has a real width once mounted; lay out on first measure
+  // and refit on container resizes until the user picks a zoom manually.
+  const ro = new ResizeObserver(() => {
+    if (zoom.userSet && rendered) {
+      syncZoomControls();
+      return;
+    }
+    if (zoom.userSet && zoom.scale) render(zoom.scale);
+    else applyFit();
+    syncZoomControls();
+  });
+  ro.observe(viewport);
+
+  /* --- totals + timing-basis QC ------------------------------------------ */
+  const gap = total - target;
+  const gapBadge = target <= 0
+    ? badge("neutral", "no target set")
+    : Math.abs(gap) < 0.5
+      ? badge("good", "matches target duration")
+      : gap < 0
+        ? badge("warning", `gap of ${fmtDuration(Math.abs(gap))} vs target`)
+        : badge("warning", `over target by ${fmtDuration(gap)}`);
+
+  return el("div", { class: "stack" },
+    el("div", { class: "row", style: { alignItems: "center" } },
+      el("span", { class: "small" },
+        `${summary.compositions.length} compositions · ${fmtDuration(total)} total`),
+      timingBasisBadge(summary.timingBasis),
+      gapBadge,
+      stageChip(stages.timeline, "Timeline"),
+      stageChip(stages.quality_control, "QC"),
+      el("span", { class: "spacer" }),
+      el("span", { class: "tl-zoom" },
+        el("span", { class: "muted small" }, "Zoom"),
+        zoomSlider,
+        zoomValue,
+        fitBtn,
+      ),
+    ),
+    viewport,
+    el("p", { class: "muted small" },
+      "Scroll horizontally to move through time. "
+      + "Compositions and motion events come from the same effective plan that preview and export render; open the Editorial workspace to edit them."),
+  );
+}
+
+/**
+ * Composition lane: one clip per validated composition, tinted by the
+ * renderer-owned template, clickable to the Editorial workspace (read-only
+ * here). Clips keep at least MIN_CLIP_PX of width where the layout allows.
+ * @param {HTMLElement} lane
+ * @param {{compositions: any[]}} summary
+ * @param {number} scale px per second
+ */
+function renderCompositionLane(lane, summary, scale) {
+  const parts = [];
+  for (const comp of summary.compositions) {
+    const left = comp.start * scale + 1;
+    const width = Math.max(2, comp.duration * scale - 2);
+    const tips = [
+      `C${comp.index + 1} · ${comp.templateLabel}`,
+      `${fmtDuration(comp.duration)} · ${comp.assetCount} assets · ${comp.elementCount} elements · ${comp.eventCount} motion events`,
+      "Opens the composition in the Editorial workspace.",
+    ];
+    const clip = el("div", {
+      class: `tl-clip tl-comp ${comp.templateClass}`.trim(),
+      role: "button",
+      tabindex: "0",
+      "aria-label": tips.join(" "),
+      title: tips.join("\n"),
+      style: { left: `${left}px`, width: `${width}px` },
+    },
+      el("span", { class: "tl-clip-info" },
+        el("span", { class: "tl-clip-name" }, `C${comp.index + 1}`),
+        el("span", { class: "tl-clip-dur" }, fmtDuration(comp.duration)),
+      ),
+    );
+    const openEditorial = () => navigate("#/editorial");
+    clip.addEventListener("click", openEditorial);
+    clip.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        openEditorial();
+      }
+    });
+    parts.push(clip);
+  }
+  // Boundary markers between compositions (not at the left edge).
+  for (let i = 1; i < summary.compositions.length; i += 1) {
+    const prev = summary.compositions[i - 1];
+    parts.push(el("div", {
+      class: "tl-clip-boundary",
+      style: { left: `${(prev.start + prev.duration) * scale}px` },
+      "aria-hidden": "true",
+    }));
+  }
+  // replaceChildren keeps re-renders (zoom / resize) from accumulating clips.
+  lane.replaceChildren(...parts);
+}
+
+/**
+ * Motion-events lane: one marker per validated event (action on target),
+ * positioned inside its composition and clamped at the composition end for
+ * display only. Events render as escaped text labels - malformed actions
+ * degrade to the raw string or "unknown", never to a class name.
+ * @param {HTMLElement} lane
+ * @param {{compositions: any[]}} summary
+ * @param {number} scale px per second
+ */
+function renderEventsLane(lane, summary, scale) {
+  const parts = [];
+  for (const comp of summary.compositions) {
+    for (const ev of comp.events) {
+      const left = (comp.start + ev.time) * scale;
+      const width = Math.max(3, ev.duration * scale);
+      const label = motionActionLabel(ev.action);
+      const caption = `${label} on ${ev.target || "composition"} · inside C${comp.index + 1} at ${fmtDuration(ev.time)}`;
+      parts.push(el("div", {
+        class: "tl-event",
+        title: caption,
+        "aria-label": caption,
+        style: { left: `${left}px`, width: `${width}px` },
+      }, el("span", { class: "tl-event-label" }, label)));
+    }
+  }
+  // replaceChildren keeps re-renders (zoom / resize) from accumulating markers.
+  lane.replaceChildren(...parts);
 }
 
 /* ============================================================================

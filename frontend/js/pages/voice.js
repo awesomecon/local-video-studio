@@ -12,6 +12,7 @@ import {
   clearGeminiKey, saveGeminiKey,
 } from "../api.js";
 import { loadingState, errorPanel, badge, icon, toast, toastError, confirm, field as sharedField } from "../ui.js";
+import { effectiveVideoMode } from "../video-mode.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
 const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
@@ -124,6 +125,8 @@ export function renderVoice(_route) {
 
 function build(snapshot, voices, models, narrations, tags, refresh) {
   const project = snapshot.project;
+  /** classic|editorial — drives the mode-aware timing badges and help text. */
+  const videoMode = effectiveVideoMode(project);
   const current = project.settings?.voice || {};
 
   const profileName = el("input", { type: "text", class: "input", placeholder: "My narrator" });
@@ -324,7 +327,14 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           + "model receives it in one request; longer scripts become two or more requests."),
         el("p", { class: "muted small" },
           "Example: a 35-second short with a 45-second limit becomes one request. A 70-second "
-          + "short becomes about two. This often sounds smoother, but scene timing is estimated."));
+          + "short becomes about two. This often sounds smoother, but scene timing is estimated."),
+        ...(videoMode === "editorial"
+          ? [el("p", { class: "muted small" },
+              "For Editorial projects, grouping only changes the TTS request boundaries. After "
+              + "word alignment, compositions and captions follow the active recorded narration "
+              + "rather than planned scene lengths; until alignment is ready, the Timeline shows "
+              + "Planned timing.")]
+          : []));
     } else {
       chunkingExplanation.replaceChildren(
         el("strong", {}, "Separately: every scene starts a new TTS request"),
@@ -870,7 +880,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         field("Minimum pause (ms)", pause,
           "Minimum silence between chunks; existing generated silence counts toward it."),
         field("Script override", script, hasPlannedNarration
-          ? "Blank uses planned scene narration and enables exact picture sync. Overrides are not mapped to scenes."
+          ? (videoMode === "editorial"
+            ? "Blank uses planned scene narration. An override is not mapped to scenes. After this take is selected and alignment rebuilds, Editorial cuts follow its narration clock; regenerate the Edit Plan when narration content changes."
+            : "Blank uses planned scene narration and enables exact picture sync. Overrides are not mapped to scenes.")
           : "This project has no planned narration yet. Enter text here or run planning from Script.")),
       breezeGrid,
       higgsNote,
@@ -885,7 +897,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     workerControlsPanel(models, refresh),
     takeLibraryPanel(
       project.id, narrations.takes || [], narrations.active_asset_id || null,
-      snapshot.stage_state?.stages?.narration, refresh,
+      snapshot.stage_state?.stages?.narration, refresh, videoMode,
     ));
 }
 
@@ -1273,7 +1285,7 @@ function section(title, ...children) {
     el("div", { class: "panel-body stack" }, ...children));
 }
 
-function takeLibraryPanel(projectId, takes, activeId, stage, refresh) {
+function takeLibraryPanel(projectId, takes, activeId, stage, refresh, videoMode) {
   if (!takes.length) {
     return el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "Narration takes"),
@@ -1297,10 +1309,54 @@ function takeLibraryPanel(projectId, takes, activeId, stage, refresh) {
           el("div", { class: "row" },
             el("strong", {}, providerLabel(provider)),
             el("span", { class: "muted small" }, `${providerTakes.length} take${providerTakes.length === 1 ? "" : "s"}`)),
-          ...providerTakes.map((take) => takeCard(projectId, take, take.id === activeId, refresh))))));
+          ...providerTakes.map((take) =>
+            takeCard(projectId, take, take.id === activeId, refresh, videoMode))))));
 }
 
-function takeCard(projectId, take, active, refresh) {
+/**
+ * Mode-aware timing badge for a narration take. The badge describes what
+ * the take *contains*, not whether an inactive take currently drives the
+ * render - the Timeline's timing-basis badge is the authoritative statement
+ * of whether the current plan is aligned to the active narration.
+ *
+ * | timing_mode        | Classic              | Editorial (active / inactive)      |
+ * |--------------------|----------------------|------------------------------------|
+ * | scene_audio_v1     | good `scene synced`  | good `scene timed`                 |
+ * | script_audio_v1    | neutral `combined scenes` | `Editorial narration` (accent/neutral) |
+ * | recorded_master_v1 | neutral `recorded master` | `Editorial narration` (accent/neutral) |
+ * | override           | neutral `script override` | neutral `script override`        |
+ * | missing/unknown    | warning `legacy timing` | warning `legacy timing`          |
+ *
+ * @param {"classic"|"editorial"} videoMode
+ * @param {string | undefined} timingMode
+ * @param {boolean} [active] — the take currently selected for the project
+ * @returns {HTMLElement}
+ */
+export function narrationTimingBadge(videoMode, timingMode, active = false) {
+  if (videoMode === "editorial") {
+    if (timingMode === "scene_audio_v1") {
+      const b = badge("good", "scene timed", false);
+      b.title = "Per-scene audio: composition cuts can follow this take's measured scene boundaries.";
+      return b;
+    }
+    if (timingMode === "recorded_master_v1" || timingMode === "script_audio_v1") {
+      const b = badge(active ? "accent" : "neutral", "Editorial narration", false);
+      b.title = active
+        ? "This is the active narration. After caption/word-timing rebuilds, Editorial composition cuts and captions follow this take's real clock; the Timeline's timing badge states the current alignment."
+        : "When selected, Editorial follows this take's narration clock after alignment rebuilds - exact word alignment may not exist yet, and selecting it rebuilds captions and downstream renders.";
+      return b;
+    }
+    if (timingMode === "override") return badge("neutral", "script override", false);
+    return badge("warning", "legacy timing", false);
+  }
+  if (timingMode === "scene_audio_v1") return badge("good", "scene synced", false);
+  if (timingMode === "recorded_master_v1") return badge("neutral", "recorded master", false);
+  if (timingMode === "script_audio_v1") return badge("neutral", "combined scenes", false);
+  if (timingMode === "override") return badge("neutral", "script override", false);
+  return badge("warning", "legacy timing", false);
+}
+
+function takeCard(projectId, take, active, refresh, videoMode) {
   const settings = take.settings || {};
   const request = settings.request || {};
   const choose = el("button", {
@@ -1378,11 +1434,7 @@ function takeCard(projectId, take, active, refresh) {
       el("div", { class: "row" },
         el("strong", {}, take.model || providerLabel(take.backend)),
         active ? badge("good", "active", false) : "",
-        settings.timing_mode === "scene_audio_v1"
-          ? badge("good", "scene synced", false)
-          : settings.timing_mode === "recorded_master_v1"
-            ? badge("neutral", "recorded master", false)
-            : badge("warning", "legacy timing", false),
+        narrationTimingBadge(videoMode, settings.timing_mode, active),
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, take.created_at ? fmtDate(take.created_at) : "—")),
       el("dl", { class: "kv" },
@@ -1403,25 +1455,30 @@ function takeCard(projectId, take, active, refresh) {
           el("span", { class: "hint" },
             "Boosts this full-take player and the active take in final renders. Lower it if audio distorts."),
           el("span", { class: "spacer" }), saveGain)) : "",
-      chunkList(projectId, take, refresh),
+      chunkList(projectId, take, refresh, videoMode),
       el("div", { class: "row" }, choose)));
 }
 
-function chunkList(projectId, take, refresh) {
+function chunkList(projectId, take, refresh, videoMode) {
   const chunks = take.chunks || [];
+  const timingMode = take.settings?.timing_mode;
   if (!chunks.length) {
     return el("p", { class: "muted small" },
-      "This older take has no recoverable chunk files. Generate a new take for scene-level syncing.");
+      videoMode === "editorial"
+        ? "This take has no per-scene files. When selected, scene cuts follow its recorded narration clock; captions and downstream renders rebuild from the new take, and the Timeline's timing badge reports the resulting alignment."
+        : "This older take has no recoverable chunk files. Generate a new take for scene-level syncing.");
   }
   return el("details", { class: "narration-chunks" },
     el("summary", {}, `${chunks.length} regenerable chunk${chunks.length === 1 ? "" : "s"}`),
-    take.settings?.timing_mode !== "scene_audio_v1"
+    timingMode !== "scene_audio_v1"
       ? el("p", { class: "muted small" },
-        "These chunks can be repaired individually, but generate one new full narration take to enable exact scene timing.")
+        videoMode === "editorial"
+          ? "Scene cuts follow this take's recorded narration clock rather than measured scene boundaries. Selecting or regenerating narration rebuilds captions and renders; the Timeline then shows whether the plan is aligned to the real narration clock."
+          : "These chunks can be repaired individually, but generate one new full narration take to enable exact scene timing.")
       : "",
     el("div", { class: "narration-chunk-list" },
       ...chunks.map((chunk) => chunkRow(
-        projectId, take.id, chunk, take.settings?.timing_mode, refresh))));
+        projectId, take.id, chunk, timingMode, refresh))));
 }
 
 function chunkRow(projectId, takeId, chunk, timingMode, refresh) {

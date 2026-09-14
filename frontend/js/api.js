@@ -1083,6 +1083,23 @@ export function getEditPlan(config, editPlanUrl, opts = {}) {
 }
 
 /**
+ * GET the snapshot-provided Editorial timeline-plan URL
+ * (`snap.editorial.timeline_plan_url`, e.g.
+ * "/api/projects/{id}/editorial/timeline-plan") — the effective, possibly
+ * narration-retimed Edit Plan envelope
+ * `{ plan, timing_basis, narration_synced }` that preview, captions, and
+ * export render. Read-only; the helper never re-issues the request on its
+ * own (a retry is a new explicit user action, like Refresh).
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} timelinePlanUrl — backend-provided path from the snapshot
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<Record<string, any>>} the timeline-plan envelope
+ */
+export function getEditorialTimelinePlan(config, timelinePlanUrl, opts = {}) {
+  return request(config, timelinePlanUrl, { timeoutMs: 30000, ...opts });
+}
+
+/**
  * Local Editorial composition path, built from the mounted snapshot's
  * project id plus a validated plan composition id. Every segment is
  * encodeURIComponent'd so a hostile id can never escape the project's

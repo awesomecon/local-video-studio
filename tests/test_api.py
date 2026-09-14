@@ -2535,3 +2535,286 @@ def test_retried_batch_requeues_children_canceled_with_parent(tmp_path: Path) ->
     assert all(jobs[c.id]["status"] == "completed" for c in children)
     snapshot = client.get(f"/api/projects/{pid}").json()
     assert all(scene["status"] == "generated" for scene in snapshot["scenes"])
+
+
+# ---------------------------------------------------------------------------
+# Editorial timeline-plan endpoint (the effective, narration-retimed plan)
+# ---------------------------------------------------------------------------
+
+_EDITORIAL_TIMING_WORDS = [
+    {"start_seconds": 0.0, "end_seconds": 0.5, "text": "The"},
+    {"start_seconds": 0.5, "end_seconds": 1.2, "text": "launch"},
+    {"start_seconds": 1.2, "end_seconds": 2.0, "text": "began."},
+    {"start_seconds": 3.0, "end_seconds": 3.5, "text": "Mars"},
+    {"start_seconds": 3.5, "end_seconds": 4.5, "text": "answered."},
+    {"start_seconds": 6.0, "end_seconds": 6.4, "text": "The"},
+    {"start_seconds": 6.4, "end_seconds": 7.1, "text": "archive"},
+    {"start_seconds": 7.1, "end_seconds": 7.6, "text": "holds"},
+    {"start_seconds": 7.6, "end_seconds": 7.9, "text": "the"},
+    {"start_seconds": 7.9, "end_seconds": 8.8, "text": "proof."},
+    {"start_seconds": 10.0, "end_seconds": 10.5, "text": "Every"},
+    {"start_seconds": 10.5, "end_seconds": 11.0, "text": "word"},
+    {"start_seconds": 11.0, "end_seconds": 11.2, "text": "is"},
+    {"start_seconds": 11.2, "end_seconds": 12.2, "text": "accounted"},
+    {"start_seconds": 12.2, "end_seconds": 13.4, "text": "for."},
+]
+
+# Word timings with a single sentence boundary: a three-composition plan
+# needs two internal cuts, so the word retime cannot map and the authored
+# plan must be reported instead.
+_FEW_BOUNDARY_WORDS = [
+    {"start_seconds": 0.0, "end_seconds": 1.0, "text": "The"},
+    {"start_seconds": 1.0, "end_seconds": 2.0, "text": "launch"},
+    {"start_seconds": 2.0, "end_seconds": 3.0, "text": "began."},
+    {"start_seconds": 4.0, "end_seconds": 6.0, "text": "continued"},
+    {"start_seconds": 6.0, "end_seconds": 8.0, "text": "steadily"},
+    {"start_seconds": 8.0, "end_seconds": 10.0, "text": "across"},
+    {"start_seconds": 10.0, "end_seconds": 11.0, "text": "the"},
+    {"start_seconds": 11.0, "end_seconds": 13.0, "text": "planet"},
+]
+
+
+def _editorial_api_app(tmp_path: Path):
+    app = create_app(
+        load_config(environ={}),
+        database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp",
+        mock_mode=True,
+    )
+    return app, TestClient(app), app.state.service
+
+
+def _create_editorial_project(client: TestClient, target_duration: int = 14) -> str:
+    created = client.post("/api/projects", json={
+        "title": "Timeline Plan", "topic": "Narration clock",
+        "target_duration": target_duration, "video_mode": "editorial",
+    })
+    assert created.status_code == 201
+    pid = created.json()["project"]["id"]
+    assert client.post(f"/api/projects/{pid}/plan", json={}).status_code == 200
+    return pid
+
+
+def _save_planned_clock_plan(service, pid: str) -> None:
+    """Save a three-composition plan on the planned clock (12s total).
+
+    The mock narration master is 14s long, so the plan sits off the recorded
+    clock and both retiming fallbacks have work to do. Each composition
+    references one distinct scene.
+    """
+    from backend.editorial import (
+        EditPlan,
+        EditorialComposition,
+        EditorialElement,
+        EditorialElementType,
+        EditorialTemplate,
+    )
+
+    scenes = service.database.list_scenes(pid)
+    compositions = [
+        EditorialComposition(
+            id=composition_id, start=start, duration=4,
+            template=EditorialTemplate.ARCHIVE_CANVAS,
+            elements=[EditorialElement(
+                id=f"{composition_id}-title", type=EditorialElementType.TEXT,
+                text=composition_id.upper(), role="year",
+            )],
+            narration_refs=[scenes[index].id],
+        )
+        for index, (composition_id, start) in enumerate(
+            [("c1", 0.0), ("c2", 4.0), ("c3", 8.0)],
+        )
+    ]
+    service.save_edit_plan(pid, EditPlan(
+        project_id=pid, width=1080, height=1920, fps=24,
+        compositions=compositions,
+    ))
+
+
+def _write_word_timings(service, project, words: list[dict]) -> None:
+    from backend.pipeline.service import PipelineService
+
+    root = service.store.project_path(project)
+    master = root / "narration" / "master.wav"
+    (root / "subtitles").mkdir(parents=True, exist_ok=True)
+    (root / "subtitles" / "word-timings.json").write_text(
+        json.dumps({
+            "input_audio_sha256": PipelineService._incremental_hash(master),
+            "words": words,
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_recorded_scene_clock(service, project) -> None:
+    """Record a scene-level take whose scene bounds cover the 14s master."""
+    from backend.tts.audio import wav_duration
+
+    root = service.store.project_path(project)
+    master = root / "narration" / "master.wav"
+    actual = wav_duration(master)
+    scenes = service.database.list_scenes(project.id)
+    share = actual / len(scenes)
+    (root / "narration").mkdir(parents=True, exist_ok=True)
+    (root / "narration" / "takes.json").write_text(
+        json.dumps({"active_file": "narration/master.wav"}), encoding="utf-8",
+    )
+    (root / "narration" / "master.json").write_text(
+        json.dumps({"settings": {
+            "timing_mode": "scene_audio_v1",
+            "duration": actual,
+            "scene_durations": [
+                {"scene_id": scene.id, "duration": share} for scene in scenes
+            ],
+        }}),
+        encoding="utf-8",
+    )
+
+
+def test_editorial_timeline_plan_uses_word_timings_and_shares_the_effective_plan(
+    tmp_path: Path,
+) -> None:
+    app, client, service = _editorial_api_app(tmp_path)
+    pid = _create_editorial_project(client)
+    _save_planned_clock_plan(service, pid)
+    project = service._project(pid)
+    service._ensure_narration(project, force=False)
+    _write_word_timings(service, project, _EDITORIAL_TIMING_WORDS)
+
+    stored = service.load_edit_plan(pid)
+    provenance = service.store.load_edit_plan_provenance(project.slug)
+
+    response = client.get(f"/api/projects/{pid}/editorial/timeline-plan")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timing_basis"] == "word_timings"
+    assert body["narration_synced"] is True
+
+    compositions = body["plan"]["compositions"]
+    # 223/24 is the frame-aligned cut after the second spoken sentence; the
+    # stored values are rounded to six decimals, so compare on the frame grid.
+    assert round(compositions[0]["start"] * 24) == 0
+    assert round(compositions[1]["start"] * 24) == round(5.0 * 24)
+    assert round(compositions[2]["start"] * 24) == 223
+    assert compositions[0]["duration"] == 5.0
+    assert abs(compositions[2]["start"] + compositions[2]["duration"] - 14.0) < 1 / 24
+
+    # The endpoint shares the exact effective plan preview and export use.
+    retimed = service.retimed_editorial_plan(pid)
+    assert retimed is not None
+    assert [(c.start, c.duration) for c in retimed.compositions] == [
+        (c["start"], c["duration"]) for c in compositions
+    ]
+
+    # Read-only: the stored authored plan and its provenance are untouched,
+    # and the authored edit-plan endpoint still serves the authored plan.
+    assert service.load_edit_plan(pid) == stored
+    assert service.store.load_edit_plan_provenance(project.slug) == provenance
+    authored = client.get(f"/api/projects/{pid}/editorial/edit-plan").json()
+    assert [c["start"] for c in authored["compositions"]] == [0.0, 4.0, 8.0]
+    assert authored["compositions"][0]["duration"] == 4
+
+
+def test_editorial_timeline_plan_falls_back_to_recorded_scene_clock(
+    tmp_path: Path,
+) -> None:
+    app, client, service = _editorial_api_app(tmp_path)
+    pid = _create_editorial_project(client)
+    _save_planned_clock_plan(service, pid)
+    project = service._project(pid)
+    service._ensure_narration(project, force=False)
+    _write_recorded_scene_clock(service, project)
+
+    response = client.get(f"/api/projects/{pid}/editorial/timeline-plan")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timing_basis"] == "recorded_scene_clock"
+    assert body["narration_synced"] is True
+
+    compositions = body["plan"]["compositions"]
+    # Each single-scene composition snaps onto its recorded scene bounds
+    # (frame grid at 24fps: 0, 112, 224 of 336 frames).
+    assert [round(comp["start"] * 24) for comp in compositions] == [0, 112, 224]
+    assert abs(compositions[2]["start"] + compositions[2]["duration"] - 14.0) < 1 / 24
+
+    # The effective plan is shared with the retimed-plan consumers.
+    retimed = service.retimed_editorial_plan(pid)
+    assert retimed is not None
+    assert [(c.start, c.duration) for c in retimed.compositions] == [
+        (c["start"], c["duration"]) for c in compositions
+    ]
+    stored = service.load_edit_plan(pid)
+    assert [c.start for c in stored.compositions] == [0.0, 4.0, 8.0]
+
+
+def test_editorial_timeline_plan_reports_authored_plan_without_a_usable_clock(
+    tmp_path: Path,
+) -> None:
+    app, client, service = _editorial_api_app(tmp_path)
+    pid = _create_editorial_project(client)
+    _save_planned_clock_plan(service, pid)
+    project = service._project(pid)
+    service._ensure_narration(project, force=False)
+
+    # A narration master alone is not a usable clock...
+    response = client.get(f"/api/projects/{pid}/editorial/timeline-plan")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timing_basis"] == "authored_plan"
+    assert body["narration_synced"] is False
+    stored = service.load_edit_plan(pid)
+    assert body["plan"] == stored.model_dump(mode="json")
+
+    # ...and word timings that cannot map the plan report it too.
+    _write_word_timings(service, project, _FEW_BOUNDARY_WORDS)
+    body = client.get(f"/api/projects/{pid}/editorial/timeline-plan").json()
+    assert body["timing_basis"] == "authored_plan"
+    assert body["narration_synced"] is False
+    assert body["plan"] == stored.model_dump(mode="json")
+
+
+def test_editorial_timeline_plan_error_contract(tmp_path: Path) -> None:
+    app, client, service = _editorial_api_app(tmp_path)
+
+    # Unknown project.
+    assert client.get("/api/projects/no-such-project/editorial/timeline-plan").status_code == 404
+
+    # Non-Editorial project: same 409 as the edit-plan endpoint.
+    classic = client.post("/api/projects", json={
+        "title": "Classic", "topic": "Scenes", "target_duration": 10,
+    })
+    classic_id = classic.json()["project"]["id"]
+    response = client.get(f"/api/projects/{classic_id}/editorial/timeline-plan")
+    assert response.status_code == 409
+    assert "Editorial" in response.json()["detail"]
+
+    # Editorial project without a stored plan: 404 like the edit-plan GET.
+    editorial = client.post("/api/projects", json={
+        "title": "No Plan", "topic": "Pending", "target_duration": 10,
+        "video_mode": "editorial",
+    })
+    editorial_id = editorial.json()["project"]["id"]
+    assert client.get(f"/api/projects/{editorial_id}/editorial/timeline-plan").status_code == 404
+
+    # An unreadable plan file is a structured 409, not a 500.
+    pid = _create_editorial_project(client)
+    root = service.store.project_path(service._project(pid))
+    plan_file = root / "editorial" / "edit-plan.json"
+    plan_file.write_text("{not valid edit plan json", encoding="utf-8")
+    response = client.get(f"/api/projects/{pid}/editorial/timeline-plan")
+    assert response.status_code == 409
+    assert isinstance(response.json()["detail"], str)
+
+
+def test_editorial_snapshot_advertises_the_timeline_plan_url(tmp_path: Path) -> None:
+    app, client, service = _editorial_api_app(tmp_path)
+    pid = _create_editorial_project(client)
+    _save_planned_clock_plan(service, pid)
+
+    snapshot = client.get(f"/api/projects/{pid}").json()
+    assert snapshot["editorial"]["timeline_plan_url"] == (
+        f"/api/projects/{pid}/editorial/timeline-plan"
+    )
+    # The authored-plan metadata stays available next to the new URL.
+    assert snapshot["editorial"]["edit_plan_url"].endswith("/editorial/edit-plan")

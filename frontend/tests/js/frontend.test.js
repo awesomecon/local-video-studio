@@ -106,6 +106,22 @@
  *                                labels and the preview aspect-ratio helper
  *                                degrade malformed input to readable
  *                                fallbacks.
+ *  14. Editorial-mode Timeline      - shared video-mode helper identity;
+ *                                the strict timeline-plan URL validator;
+ *                                the pure envelope summarizer (contiguous
+ *                                geometry, strict timing basis, event
+ *                                filtering + end-clamping); the screen's
+ *                                no-plan / untrusted-URL / plan / classic
+ *                                states, the timing-basis badge per basis,
+ *                                and exactly one timeline-plan read.
+ *  15. Voice timing badges          - mode- and format-aware take badges:
+ *                                known formats (scene timed / Editorial
+ *                                narration / script override) never read as
+ *                                "legacy timing"; only unknown formats do.
+ *  16. Mode-aware sidebar           - selecting an Editorial project hides
+ *                                the Storyboard nav item; Classic, legacy,
+ *                                and no-selection restore it; Timeline stays
+ *                                visible in every case.
  */
 
 import {
@@ -161,6 +177,13 @@ import {
   stageRerunLabel,
   stageRerunMessage,
 } from "../../js/pages/export.js";
+import {
+  renderTimeline,
+  safeEditorialTimelinePlanUrl,
+  summarizeEditorialTimeline,
+} from "../../js/pages/timeline.js";
+import { narrationTimingBadge } from "../../js/pages/voice.js";
+import { effectiveVideoMode as sharedEffectiveVideoMode } from "../../js/video-mode.js";
 
 const results = [];
 
@@ -2662,6 +2685,402 @@ record("stale: reused-media badge suggests re-import, not regeneration", () => {
     `re-import hint missing: ${node.title}`);
   assert(!node.title.includes("Regenerate this shot to clear"),
     `should not suggest regeneration: ${node.title}`);
+});
+
+/* --- 14. Editorial-mode Timeline --------------------------------------- */
+
+const TL_PROJECT = { ...LEGACY_PROJECT, id: "proj-tl", video_mode: "editorial" };
+const TL_CLASSIC_PROJECT = { ...LEGACY_PROJECT, id: "proj-tl-c", video_mode: "classic" };
+const TL_PLAN_URL = "/api/projects/proj-tl/editorial/timeline-plan";
+const TL_SNAP = projectSnapshot(TL_PROJECT, {
+  has_edit_plan: true,
+  plan_status: "current",
+  stale: false,
+  stale_reasons: [],
+  edit_plan_url: "/api/projects/proj-tl/editorial/edit-plan",
+  preview_url: "/api/projects/proj-tl/editorial/preview",
+  timeline_plan_url: TL_PLAN_URL,
+});
+const TL_NOPLAN_SNAP = projectSnapshot(TL_PROJECT, {
+  has_edit_plan: false,
+  timeline_plan_url: TL_PLAN_URL,
+});
+const TL_UNTRUSTED_SNAP = projectSnapshot(TL_PROJECT, {
+  has_edit_plan: true,
+  timeline_plan_url: "/api/projects/other/editorial/timeline-plan",
+});
+const TL_PLAN = {
+  plan: {
+    schema_version: 1,
+    project_id: "proj-tl",
+    compositions: [
+      {
+        id: "c1", start: 0, duration: 5, template: "bigTextReveal",
+        assets: [],
+        elements: [{ id: "e1", type: "text", text: "OPEN" }],
+        events: [
+          { time: 1, duration: 2, action: "fade", target: "canvas" },
+          { time: 3, duration: 4, action: "slowPush", target: "e1" },
+        ],
+      },
+      {
+        id: "c2", start: 5, duration: 5, template: "archiveCanvas",
+        assets: [{ id: "a1", type: "historical_photo", locked: true }],
+        elements: [],
+        events: [],
+      },
+    ],
+  },
+  timing_basis: "word_timings",
+  narration_synced: true,
+};
+const TL_CLASSIC_SNAP = {
+  project: TL_CLASSIC_PROJECT,
+  scenes: [
+    { id: "s1", index: 0, title: "A", duration: 5, status: "planned" },
+    { id: "s2", index: 1, title: "B", duration: 5, status: "planned" },
+  ],
+  assets: [], jobs: [], directory: "/tmp/lvs", stage_state: {},
+};
+
+// Poll (in virtual time) until `fn` is true or the budget runs out. The
+// timeline lanes are laid out by a ResizeObserver callback, which arrives
+// after the next rendering step, not within a microtask turn.
+async function waitFor(fn, budgetMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < budgetMs) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return fn();
+}
+
+record("video-mode: the shared module and the page re-export are one helper", () => {
+  eq(sharedEffectiveVideoMode({ video_mode: "editorial" }), "editorial");
+  eq(sharedEffectiveVideoMode(LEGACY_PROJECT), "classic", "legacy omission -> classic");
+  eq(sharedEffectiveVideoMode(null), "classic");
+  assert(sharedEffectiveVideoMode === effectiveVideoMode,
+    "pages/project.js re-exports the shared helper (no second copy)");
+});
+
+record("editorial-timeline: only the mounted project's exact timeline-plan URL is trusted", () => {
+  const url = TL_PLAN_URL;
+  eq(safeEditorialTimelinePlanUrl(url, "proj-tl"), url, "exact project-local path accepted");
+  eq(safeEditorialTimelinePlanUrl("http" + "s://remote.example/plan", "proj-tl"), null, "remote rejected");
+  eq(safeEditorialTimelinePlanUrl("//cdn.example.com/plan", "proj-tl"), null, "protocol-relative rejected");
+  eq(safeEditorialTimelinePlanUrl("/api/projects/other/editorial/timeline-plan", "proj-tl"), null, "cross-project rejected");
+  eq(safeEditorialTimelinePlanUrl("/api/projects/proj-tl/editorial/edit-plan", "proj-tl"), null, "wrong endpoint rejected");
+  eq(safeEditorialTimelinePlanUrl(url + "?ts=1", "proj-tl"), null, "query junk rejected");
+  eq(safeEditorialTimelinePlanUrl(url + "#f", "proj-tl"), null, "fragment rejected");
+  eq(safeEditorialTimelinePlanUrl("/\\host/plan", "proj-tl"), null, "backslash rejected");
+  eq(safeEditorialTimelinePlanUrl("  " + url, "proj-tl"), null, "surrounding whitespace rejected");
+  eq(safeEditorialTimelinePlanUrl(url, null), null, "no mounted project -> no plan read");
+  eq(safeEditorialTimelinePlanUrl(42, "proj-tl"), null, "non-string rejected");
+  eq(safeEditorialTimelinePlanUrl(url, "bad id"), null, "malformed project id rejected");
+});
+
+record("editorial-timeline: the envelope summarizer validates geometry strictly", () => {
+  const good = summarizeEditorialTimeline(TL_PLAN);
+  assert(good.ok, `unexpected reject: ${good.error}`);
+  eq(good.compositions.length, 2);
+  eq(good.total, 10);
+  eq(good.timingBasis, "word_timings");
+  eq(good.narrationSynced, true);
+  eq(good.compositions[0].events.length, 2);
+  eq(good.compositions[0].events[1].duration, 2,
+    "an event running past the composition end is display-clamped");
+  eq(good.compositions[1].templateLabel, "Archive canvas");
+  eq(good.compositions[1].templateClass, "tpl-archiveCanvas");
+
+  // Unknown templates stay identifiable and never get a tint class.
+  const unknownTpl = summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "z", start: 0, duration: 3, template: "invented" }] },
+    timing_basis: "authored_plan",
+    narration_synced: false,
+  });
+  assert(unknownTpl.ok);
+  eq(unknownTpl.compositions[0].templateLabel, "invented");
+  eq(unknownTpl.compositions[0].templateClass, "");
+
+  // Malformed events are ignored, never emitted as invalid geometry.
+  const messy = summarizeEditorialTimeline({
+    plan: { compositions: [{
+      id: "m", start: 0, duration: 4, template: "documentReveal",
+      events: [
+        { time: 1, duration: 1, action: "fade", target: "canvas" },
+        { time: -2, duration: 1, action: "fade" },
+        { duration: 1, action: "fade" },
+        { time: 9, duration: 1, action: "fade" }, // past the composition end
+        { time: 1, duration: NaN, action: "fade" },
+        "garbage",
+      ],
+    }] },
+    timing_basis: "recorded_scene_clock",
+    narration_synced: true,
+  });
+  assert(messy.ok);
+  eq(messy.compositions[0].events.length, 1, "only the valid event survives");
+});
+
+record("editorial-timeline: the summarizer rejects unrenderable envelopes", () => {
+  eq(summarizeEditorialTimeline(TL_PLAN.plan).ok, false, "bare plan (no basis) rejected");
+  eq(summarizeEditorialTimeline(null).ok, false, "non-object rejected");
+  eq(summarizeEditorialTimeline({ plan: {}, timing_basis: "word_timings", narration_synced: true }).ok,
+    false, "missing compositions rejected");
+  eq(summarizeEditorialTimeline({ ...TL_PLAN, timing_basis: "vibes" }).ok, false, "unknown basis rejected");
+  eq(summarizeEditorialTimeline({ ...TL_PLAN, narration_synced: "yes" }).ok, false, "non-strict flag rejected");
+  eq(summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
+                            { id: "b", start: 7, duration: 2, template: "x" }] },
+    timing_basis: "word_timings",
+    narration_synced: true,
+  }).ok, false, "a gap breaks the contiguous geometry");
+  eq(summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
+                            { id: "b", start: -1, duration: 2, template: "x" }] },
+    timing_basis: "word_timings",
+    narration_synced: true,
+  }).ok, false, "negative start rejected");
+  eq(summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "a", start: 0, duration: 0, template: "x" }] },
+    timing_basis: "word_timings",
+    narration_synced: true,
+  }).ok, false, "zero duration rejected");
+  // The frame-grid epsilon is tolerated, not snapped.
+  const epsilon = summarizeEditorialTimeline({
+    plan: { compositions: [{ id: "a", start: 0, duration: 5, template: "x" },
+                            { id: "b", start: 5.005, duration: 2, template: "x" }] },
+    timing_basis: "authored_plan",
+    narration_synced: false,
+  });
+  assert(epsilon.ok, `epsilon contiguity accepted: ${epsilon.error}`);
+});
+
+record("voice: mode-aware take badges name the format, not an alignment promise", () => {
+  // Editorial: known formats get mode-appropriate labels...
+  let b = narrationTimingBadge("editorial", "scene_audio_v1");
+  assert(b.textContent.includes("scene timed"), `scene timed: ${b.textContent}`);
+  assert(b.className.includes("badge-good"));
+  b = narrationTimingBadge("editorial", "recorded_master_v1", true);
+  assert(b.textContent.includes("Editorial narration"), `active take: ${b.textContent}`);
+  assert(b.className.includes("badge-accent"), "active take reads accent");
+  b = narrationTimingBadge("editorial", "recorded_master_v1", false);
+  assert(b.textContent.includes("Editorial narration"), `inactive take: ${b.textContent}`);
+  assert(b.className.includes("badge-neutral"), "inactive take reads neutral");
+  b = narrationTimingBadge("editorial", "script_audio_v1", true);
+  assert(b.textContent.includes("Editorial narration"), "combined take (active)");
+  assert(b.className.includes("badge-accent"));
+  b = narrationTimingBadge("editorial", "override");
+  assert(b.textContent.includes("script override"));
+  assert(b.className.includes("badge-neutral"));
+  // ...and only genuinely unknown/missing formats read as legacy.
+  b = narrationTimingBadge("editorial", "weird_mode_1999");
+  assert(b.className.includes("badge-warning"));
+  assert(b.textContent.includes("legacy timing"));
+  b = narrationTimingBadge("editorial", undefined);
+  assert(b.textContent.includes("legacy timing"), "missing format is legacy");
+  // The active format explains the follow-the-narration contract...
+  b = narrationTimingBadge("editorial", "script_audio_v1", true);
+  assert(b.title.includes("active narration"), `active title: ${b.title}`);
+  assert(b.title.includes("Timeline"), "defers alignment authority to the Timeline");
+  // ...without claiming alignment as a fact of the take itself.
+  assert(!b.textContent.includes("aligned"), "the take badge never claims alignment");
+  // Classic wording is preserved.
+  b = narrationTimingBadge("classic", "scene_audio_v1");
+  assert(b.textContent.includes("scene synced"));
+  assert(b.className.includes("badge-good"));
+  b = narrationTimingBadge("classic", "recorded_master_v1");
+  assert(b.textContent.includes("recorded master"));
+  assert(b.className.includes("badge-neutral"));
+  b = narrationTimingBadge("classic", "script_audio_v1");
+  assert(b.textContent.includes("combined scenes"));
+  assert(b.className.includes("badge-neutral"));
+  b = narrationTimingBadge("classic", "override");
+  assert(b.textContent.includes("script override"));
+});
+
+await recordAsync("editorial-timeline: the effective plan renders compositions, events, and the timing badge", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl";
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_SNAP };
+    }
+    if (call.method === "GET" && call.url === TL_PLAN_URL) {
+      return { payload: TL_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderTimeline({ name: "timeline" });
+  document.body.append(screen);
+  await flush();
+  await waitFor(() => screen.querySelectorAll(".tl-comp").length === 2);
+  eq(calls.filter((c) => c.url === TL_PLAN_URL).length, 1,
+    "exactly one timeline-plan read per load");
+  assert(screen.textContent.includes("Narration aligned"),
+    "word_timings basis announces real narration alignment");
+  assert(screen.textContent.includes("Compositions"), "composition lane label");
+  assert(screen.textContent.includes("Motion events"), "event lane label");
+  const comps = screen.querySelectorAll(".tl-comp");
+  assert(comps[1].className.includes("tpl-archiveCanvas"), "template tint class applied");
+  const events = screen.querySelectorAll(".tl-event");
+  eq(events.length, 2, "both validated events render");
+  // The second event's stored duration (4s) runs past its composition end
+  // (5s total, event at 3s): the drawn width is clamped to the 2s that
+  // remains, never to the stored 4s.
+  const scale = (parseFloat(comps[0].style.width) + 2) / 5;
+  const w = parseFloat(events[1].style.width);
+  assert(Math.abs(w - Math.max(3, 2 * scale)) <= 1, `clamped event width ${w}px`);
+  assert(w < 4 * scale, "the stored 4s is not drawn past the composition end");
+  // Composition clips are read-only pointers into the workspace.
+  comps[0].dispatchEvent(new Event("click", { bubbles: true }));
+  eq(window.location.hash, "#/editorial", "clip click opens the Editorial workspace");
+  window.location.hash = "#/";
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-timeline: without a plan the screen points at the workspace and fetches nothing", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl";
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_NOPLAN_SNAP };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderTimeline({ name: "timeline" });
+  await flush();
+  assert(screen.textContent.includes("No Edit Plan yet"), "no-plan state shown");
+  assert(screen.textContent.includes("Open Editorial workspace"), "points at the workspace");
+  eq(calls.length, 1, "only the snapshot read");
+  assert(!screen.querySelector(".tl-comp"), "no invented compositions");
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-timeline: an untrusted timeline_plan_url degrades without a fetch", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl";
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_UNTRUSTED_SNAP };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderTimeline({ name: "timeline" });
+  await flush();
+  assert(screen.textContent.includes("not a usable project-local path"),
+    `honest state shown`);
+  eq(calls.filter((c) => c.url.includes("/editorial/")).length, 0,
+    "no timeline-plan traffic for a cross-project URL");
+  assert(!screen.querySelector(".tl-comp"));
+  screen.remove();
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-timeline: authored and recorded clocks get their own badges", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl";
+  let payload = { ...TL_PLAN, timing_basis: "authored_plan", narration_synced: false };
+  stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_SNAP };
+    }
+    if (call.method === "GET" && call.url === TL_PLAN_URL) {
+      return { payload: payload };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  let screen = renderTimeline({ name: "timeline" });
+  await flush();
+  // The timing badge lives in the panel header, which is built synchronously
+  // once the plan read lands - no layout pass needed to assert it.
+  assert(screen.textContent.includes("Planned timing"),
+    "authored_plan says the narration clock is not current");
+  assert(!screen.textContent.includes("Narration aligned"));
+  screen.remove();
+  window.location.hash = "#/";
+
+  payload = { ...TL_PLAN, timing_basis: "recorded_scene_clock", narration_synced: true };
+  stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl") {
+      return { payload: TL_SNAP };
+    }
+    if (call.method === "GET" && call.url === TL_PLAN_URL) {
+      return { payload: payload };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  screen = renderTimeline({ name: "timeline" });
+  await flush();
+  assert(screen.textContent.includes("Recorded narration clock"),
+    "recorded_scene_clock names the real (coarser) clock");
+  assert(!screen.textContent.includes("Planned timing"));
+  screen.remove();
+  window.location.hash = "#/";
+  state.currentProjectId = null;
+});
+
+await recordAsync("editorial-timeline: classic projects keep the scene timeline and never read the plan", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-tl-c";
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-tl-c") {
+      return { payload: TL_CLASSIC_SNAP };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderTimeline({ name: "timeline" });
+  await flush();
+  assert(screen.textContent.includes("Scenes"), "classic scene lane label");
+  assert(!screen.textContent.includes("Narration aligned"));
+  assert(!screen.textContent.includes("Planned timing"));
+  assert(!screen.querySelector(".tl-comp"), "no composition lane for classic projects");
+  assert(!calls.some((c) => c.url.includes("/editorial/")),
+    "no timeline-plan traffic for classic projects");
+  screen.remove();
+  window.location.hash = "#/";
+  state.currentProjectId = null;
+});
+
+/* --- 16. Mode-aware sidebar navigation ---------------------------------- */
+
+await recordAsync("nav: selecting an Editorial project hides Storyboard; Classic/no-project restores it; Timeline stays", async () => {
+  const app = await import("../../js/app.js");
+  // The shell renders during module init (which already ran on import);
+  // wait for the sidebar before asserting anything about it.
+  await waitFor(() =>
+    document.querySelector(".sidebar .nav-item[data-route='storyboard']"), 5000);
+  const nav = document.querySelector(".sidebar");
+  assert(nav, "the app shell sidebar rendered");
+  const storyboard = nav.querySelector(".nav-item[data-route='storyboard']");
+  const timeline = nav.querySelector(".nav-item[data-route='timeline']");
+  assert(storyboard && timeline, "both mode-relevant nav items exist");
+
+  state.projects = [
+    { id: "nav-ed", video_mode: "editorial" },
+    { id: "nav-cl", video_mode: "classic" },
+    { id: "nav-lg" }, // legacy: omitted video_mode
+  ];
+
+  state.currentProjectId = "nav-ed";
+  app.syncModeAwareNavigation();
+  assert(storyboard.hidden === true, "Editorial selection hides Storyboard");
+  assert(timeline.hidden !== true, "Timeline stays visible for Editorial");
+
+  state.currentProjectId = "nav-cl";
+  app.syncModeAwareNavigation();
+  assert(storyboard.hidden !== true, "Classic selection restores Storyboard");
+
+  state.currentProjectId = "nav-lg";
+  app.syncModeAwareNavigation();
+  assert(storyboard.hidden !== true, "legacy (omitted video_mode) reads Classic");
+
+  state.currentProjectId = null;
+  app.syncModeAwareNavigation();
+  assert(storyboard.hidden !== true, "no selection shows Storyboard");
+  state.projects = [];
 });
 
 /* --- report -------------------------------------------------------------- */

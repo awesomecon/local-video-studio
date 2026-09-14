@@ -51,6 +51,34 @@ def test_storyboard_batch_cancel_wording_matches_cascade() -> None:
     assert "every scene job it created" in source
 
 
+def test_storyboard_route_is_a_safe_pointer_for_editorial_projects() -> None:
+    """Editorial projects never see the Classic scene controls on this route.
+
+    The Edit Plan owns an Editorial project's picture, text, evidence, and
+    motion, so the Storyboard route renders a pointer to the Editorial
+    workspace (and the Script, for narration text) instead of scene cards,
+    the batch bar, and Cancel-all. The decision is re-evaluated on every
+    accepted snapshot load (after the stale-response token guard), so a
+    switch to a Classic project restores the scene grid on the same panel
+    and a late Editorial response cannot repaint it.
+    """
+    source = STORYBOARD.read_text(encoding="utf-8")
+    # Mode awareness comes from the shared, dependency-neutral helper.
+    assert 'import { effectiveVideoMode } from "../video-mode.js";' in source
+    assert 'effectiveVideoMode(snap.project) === "editorial"' in source
+    # The pointer replaces the grid and hides the Classic controls...
+    assert "region.replaceChildren(editorialPointerState())" in source
+    assert "introEl.hidden = true" in source
+    assert "cancelAllBtn.hidden = true" in source
+    assert "batchBar.replaceChildren()" in source
+    # ...and the Classic view restores them on the next accepted load.
+    assert "introEl.hidden = false" in source
+    # The pointer points at the real owners of the content.
+    pointer = source.split("function editorialPointerState()", 1)[1].split("\n}", 1)[0]
+    assert 'navigate("#/editorial")' in pointer
+    assert 'navigate("#/script")' in pointer
+
+
 def test_storyboard_offers_krea_and_ideogram_model_batches() -> None:
     source = STORYBOARD.read_text(encoding="utf-8")
     assert 'krea: "Krea 2 stills"' in source

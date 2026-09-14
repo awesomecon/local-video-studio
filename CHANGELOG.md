@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Editorial-mode screens are now truthful and mode-aware.**
+  - The **Timeline** screen is a read-only composition and motion-event
+    timeline for Editorial projects, built from the *effective*
+    narration-retimed plan — the same plan preview, captions, and export
+    render — via the new read-only
+    `GET /api/projects/{id}/editorial/timeline-plan` endpoint, which
+    returns `{plan, timing_basis, narration_synced}` (`word_timings`,
+    `recorded_scene_clock`, or `authored_plan`) and never persists the
+    retimed copy or touches plan provenance. A timing badge above the
+    viewport states the alignment honestly: **Narration aligned**,
+    **Recorded narration clock**, or **Planned timing** (warning).
+    Composition clips are read-only pointers into the Editorial workspace;
+    Classic and legacy projects keep the existing scene timeline unchanged.
+  - **Voice** take badges are mode- and format-aware: known formats (scene
+    timing, Editorial narration, script override, combined scenes) are
+    labeled by what the take contains, and only genuinely unknown legacy
+    formats read as *legacy timing*. The combined-scene and script-override
+    help explain that Editorial follows the active narration's clock after
+    alignment rebuilds, without promising that every saved or inactive take
+    is already synchronized.
+  - The shared `effectiveVideoMode` helper moved to
+    `frontend/js/video-mode.js` so the app shell and every page agree on
+    one compatibility rule (missing/unknown `video_mode` reads as Classic).
+
+### Fixed
+
+- **The Classic Storyboard screen no longer applies to Editorial projects.**
+  The Storyboard nav item is hidden while an Editorial project is selected
+  (Timeline stays visible in both modes), and a direct `#/storyboard`
+  route renders a safe pointer to the Editorial workspace and Script
+  instead of scene cards, jobs, and batch controls. A project switch back
+  to Classic restores the scene board on the same panel, and a late
+  response for the previous project can never repaint it.
+
 ## v0.2.0 — 2026-09-11
 
 Cross-platform core support plus voice/pipeline improvements since `v0.1.0`

@@ -61,8 +61,8 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { effectiveVideoMode } from "../video-mode.js";
 import {
-  effectiveVideoMode,
   editorialPlanState,
   projectEditorialApiPath,
   safeEditPlanDownloadUrl,

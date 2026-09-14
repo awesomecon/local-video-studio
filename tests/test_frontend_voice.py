@@ -77,6 +77,47 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
     assert "result.script.tag_count" not in source
 
 
+def test_narration_timing_badges_are_mode_and_format_aware() -> None:
+    """Known timing formats get honest labels; only unknown ones read legacy.
+
+    Classic projects describe what the take provides (scene synced /
+    recorded master / combined scenes / script override). Editorial
+    projects describe what the mode does with the take (scene timed /
+    Editorial narration), and the combined-scene help explains the
+    follow-the-narration behavior without promising every take is word-level
+    synced. The authoritative alignment statement lives on the Timeline
+    screen, so the take badge never claims narration alignment itself.
+    """
+    source = VOICE_JS.read_text(encoding="utf-8")
+    # The pure badge builder covers every known timing_mode in both modes.
+    assert "export function narrationTimingBadge(videoMode, timingMode" in source
+    badge = source.split("export function narrationTimingBadge(", 1)[1].split(
+        "\n}", 1,
+    )[0]
+    for mode in ("scene_audio_v1", "recorded_master_v1", "script_audio_v1", "override"):
+        assert f'"{mode}"' in badge, f"{mode} handled by the badge builder"
+    # Known formats: mode-appropriate labels, never a "legacy timing" warning.
+    assert 'badge("good", "scene timed", false)' in badge
+    assert '"Editorial narration"' in badge
+    assert 'badge("neutral", "script override", false)' in badge
+    # The warning is reserved for genuinely unknown/missing values.
+    assert 'badge("warning", "legacy timing", false)' in badge
+    # Classic wording is preserved (compatibility literals).
+    assert 'badge("good", "scene synced", false)' in badge
+    assert 'badge("neutral", "recorded master", false)' in badge
+    assert 'badge("neutral", "combined scenes", false)' in badge
+    # The take card renders the mode-aware badge instead of a hardcoded chain.
+    assert "narrationTimingBadge(videoMode, settings.timing_mode, active)" in source
+    # The combined-scene help explains the Editorial follow behavior...
+    assert "grouping only changes the TTS request boundaries" in source
+    assert "follow the active recorded narration" in source
+    assert "the Timeline shows" in source
+    assert "Planned timing" in source
+    # ...without promising every take is synced, and the classic wording
+    # (timing estimated) is preserved.
+    assert "This often sounds smoother, but scene timing is estimated" in source
+
+
 def test_saved_voices_can_be_deleted_from_the_shared_library() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
     api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")

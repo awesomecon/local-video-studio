@@ -51,7 +51,6 @@ def test_editorial_workspace_reuses_the_strict_shared_builders() -> None:
     imports = source.split('from "./project.js";', 1)[0]
     imported = imports[imports.rindex("import {"):]
     for helper in (
-        "effectiveVideoMode",
         "editorialPlanState",
         "projectEditorialApiPath",
         "safeEditPlanDownloadUrl",
@@ -65,6 +64,10 @@ def test_editorial_workspace_reuses_the_strict_shared_builders() -> None:
         "createEditorialController",
     ):
         assert helper in imported, f"{helper} must come from the shared builders"
+    # The video-mode helper lives in the dependency-neutral shared module so
+    # the app shell can use it without importing the page modules (which
+    # import the shell's live-update hook back).
+    assert 'import { effectiveVideoMode } from "../video-mode.js";' in source
     # No second, drift-prone copy of the motion/template allowlists.
     assert "MOTION_PRIMITIVES" not in source
     assert "EDITORIAL_TEMPLATES" not in source

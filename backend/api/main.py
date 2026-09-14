@@ -1088,6 +1088,24 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
 
+    @application.get("/api/projects/{project_id}/editorial/timeline-plan")
+    def get_editorial_timeline_plan(project_id: str) -> dict[str, Any]:
+        """Effective (possibly narration-retimed) Edit Plan for the Timeline.
+
+        Read-only: the same plan preview, captions, and final-render
+        validation render, plus the timing basis ("word_timings",
+        "recorded_scene_clock", or "authored_plan") actually used. Nothing
+        is persisted and plan provenance is untouched.
+        """
+        try:
+            return service.editorial_timeline_plan(project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
     @application.put("/api/projects/{project_id}/editorial/edit-plan")
     def put_editorial_edit_plan(project_id: str, request: EditPlan) -> dict[str, Any]:
         try:
