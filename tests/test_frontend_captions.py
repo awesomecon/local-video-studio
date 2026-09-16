@@ -7,6 +7,10 @@ Whisper alignment model visible on the Captions screen:
   - the screen fetches GET /api/captions/models and renders the model
     identity and readiness entirely from the response (no hardcoded model
     names, versions, or paths);
+  - caption assets are grouped into alignment generations (one per run, keyed
+    by the fingerprint of the narration audio they aligned against) and
+    rendered as a current generation plus collapsed history, each run
+    labelled with the narration take it was aligned against;
   - the word-timings output (role "caption_timing") and its provenance are
     shown;
   - the API helper and typedef exist.
@@ -45,7 +49,8 @@ def test_captions_screen_shows_the_word_timings_output() -> None:
     # The alignment output is recorded with role "caption_timing" and must be
     # collected and rendered, not filtered out with the other assets.
     assert 'role === "caption_timing"' in source
-    assert "timingBlock(" in source
+    # Assets render as grouped generations, not one panel per asset.
+    assert "export function groupCaptionGenerations(" in source
     # Provenance rows are data-driven from the recorded asset settings.
     assert "settings.input_audio" in source
     assert "settings.input_audio_sha256" in source
@@ -54,9 +59,10 @@ def test_captions_screen_shows_the_word_timings_output() -> None:
 
 def test_captions_assets_show_quantization_and_workflow() -> None:
     source = _js("pages/captions.js")
-    # SRT/ASS blocks surface the alignment model's quantization and workflow.
-    assert source.count('el("dt", {}, "Quantization")') >= 2
-    assert source.count('el("dt", {}, "Workflow")') >= 2
+    # The generation card surfaces the alignment model's quantization and
+    # workflow once per run (shared provenance of its files).
+    assert source.count('el("dt", {}, "Quantization")') >= 1
+    assert source.count('el("dt", {}, "Workflow")') >= 1
 
 
 def test_captions_models_api_helper_exists() -> None:
@@ -74,3 +80,18 @@ def test_captions_can_be_aligned_directly_from_the_screen() -> None:
     assert "generateCaptions(state.config, state.currentProjectId)" in source
     assert "export function generateCaptions(config, projectId" in api
     assert "/captions/generate" in api
+
+
+def test_captions_screen_groups_assets_into_generations() -> None:
+    source = _js("pages/captions.js")
+    # One alignment run is one "generation": SRT + ASS + word timings keyed
+    # by the fingerprint of the narration audio they aligned against, so
+    # the screen shows the current run plus labelled history instead of one
+    # panel per asset.
+    assert "export function groupCaptionGenerations(" in source
+    assert 'import { providerLabel } from "./voice.js"' in source
+    assert 'role === "narration_take"' in source
+    assert "Current captions" in source
+    assert "Aligned to:" in source
+    assert "previous generation" in source
+    assert "settings.archived_at" in source

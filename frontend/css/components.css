@@ -715,6 +715,9 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   font-size: var(--text-sm);
 }
 .chunking-explainer p { margin: 5px 0 0; }
+.caption-file-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.caption-history summary { cursor: pointer; font-weight: 650; font-size: var(--text-sm); }
+.caption-history-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); }
 .consent-warning {
   display: flex; gap: 10px; align-items: flex-start;
   background: var(--critical-ink);

@@ -1515,7 +1515,7 @@ function chunkRow(projectId, takeId, chunk, timingMode, refresh) {
     el("div", { class: "row" }, regenerate));
 }
 
-function providerLabel(provider) {
+export function providerLabel(provider) {
   return ({
     qwen_tts: "Qwen3-TTS",
     step_audio_editx: "Step-Audio-EditX",

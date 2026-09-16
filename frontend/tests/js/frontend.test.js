@@ -122,6 +122,14 @@
  *                                the Storyboard nav item; Classic, legacy,
  *                                and no-selection restore it; Timeline stays
  *                                visible in every case.
+ *  17. Caption generation grouping  - caption assets group into alignment
+ *                                generations keyed by the fingerprint of
+ *                                the narration audio they aligned against;
+ *                                the newest run is current and history is
+ *                                newest-first; each run is labelled with
+ *                                the narration take whose hash matches the
+ *                                fingerprint; un-fingerprinted (mock)
+ *                                assets each stand alone.
  */
 
 import {
@@ -146,6 +154,7 @@ import {
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { performancePanel } from "../../js/pages/voice.js";
+import { groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
 import {
   effectiveVideoMode,
@@ -3298,6 +3307,103 @@ await recordAsync("nav: selecting an Editorial project hides Storyboard; Classic
   app.syncModeAwareNavigation();
   assert(storyboard.hidden !== true, "no selection shows Storyboard");
   state.projects = [];
+});
+
+/* --- 17. Caption generation grouping ----------------------------------- */
+
+const captionAsset = (id, kind, sha, created, extra = {}) => ({
+  id,
+  filepath: kind === "srt" ? "subtitles/captions.srt"
+    : kind === "ass" ? "subtitles/captions.ass" : "subtitles/word-timings.json",
+  created_at: created,
+  settings: Object.assign({
+    role: kind === "timings" ? "caption_timing" : "captions",
+    input_audio: "narration/master.wav",
+    input_audio_sha256: sha,
+  }, extra),
+});
+
+record("caption-generations: files of one run group under the audio fingerprint", () => {
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("a-srt", "srt", "sha-a", "2026-09-01T10:00:00+00:00"),
+      captionAsset("a-ass", "ass", "sha-a", "2026-09-01T10:00:00+00:00"),
+      captionAsset("b-srt", "srt", "sha-b", "2026-09-03T09:00:00+00:00"),
+      captionAsset("b-ass", "ass", "sha-b", "2026-09-03T09:00:00+00:00"),
+    ],
+    [
+      captionAsset("a-wt", "timings", "sha-a", "2026-09-01T10:00:00+00:00"),
+      captionAsset("b-wt", "timings", "sha-b", "2026-09-03T09:00:00+00:00"),
+    ],
+  );
+  eq(history.length, 1, "the older run is history");
+  eq(current.key, "sha-b", "the fingerprint keys the generation");
+  eq(current.srt && current.srt.id, "b-srt", "the run's SRT");
+  eq(current.ass && current.ass.id, "b-ass", "the run's ASS");
+  eq(current.timings && current.timings.id, "b-wt", "the run's word timings");
+  eq(current.audioSha256, "sha-b", "the run keeps the audio fingerprint");
+  eq(current.take, null, "no take is attached without narration-take assets");
+});
+
+record("caption-generations: the newest run is current, history is newest first", () => {
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("a-srt", "srt", "sha-a", "2026-09-01T10:00:00+00:00"),
+      captionAsset("b-srt", "srt", "sha-b", "2026-09-03T09:00:00+00:00"),
+      captionAsset("c-srt", "srt", "sha-c", "2026-09-05T08:00:00+00:00"),
+    ],
+    [],
+  );
+  eq(current.key, "sha-c", "newest run is current");
+  eq(history.map((g) => g.key), ["sha-b", "sha-a"], "history is newest first");
+});
+
+record("caption-generations: the narration take is matched by hash and labelled by provider", () => {
+  const { current } = groupCaptionGenerations(
+    [captionAsset("b-srt", "srt", "sha-b", "2026-09-03T09:00:00+00:00")],
+    [],
+    [
+      { id: "take-1", hash: "sha-b", created_at: "2026-09-02T12:00:00+00:00",
+        settings: { provider: "qwen_tts" }, backend: "qwen_tts" },
+      { id: "take-2", hash: "other", created_at: "2026-08-01T00:00:00+00:00",
+        settings: { provider: "fish_s2_pro" }, backend: "fish_s2_pro" },
+    ],
+  );
+  eq(current.take.label, "Qwen3-TTS", "the take is labelled by its provider");
+  eq(current.take.createdAt, "2026-09-02T12:00:00+00:00", "the take's created date is kept");
+});
+
+record("caption-generations: un-fingerprinted (mock) assets each stand alone", () => {
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("m-srt", "srt", null, "2026-09-01T10:00:00+00:00"),
+      captionAsset("m-ass", "ass", null, "2026-09-02T10:00:00+00:00"),
+    ],
+    [],
+  );
+  eq(current.key, "asset:m-ass", "each mock asset is its own generation");
+  eq(history.length, 1, "the other mock asset is history");
+  eq(current.audioSha256, null, "no fingerprint is invented");
+  eq(current.take, null, "no take can be matched without a fingerprint");
+});
+
+record("caption-generations: empty input yields no current and no history", () => {
+  const { current, history } = groupCaptionGenerations([], []);
+  eq(current, null, "no current generation");
+  eq(history.length, 0, "no history");
+});
+
+record("caption-generations: archived records flag the generation", () => {
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("a-srt", "srt", "sha-a", "2026-09-01T10:00:00+00:00",
+        { archived_at: "2026-09-03T09:00:01+00:00" }),
+      captionAsset("b-srt", "srt", "sha-b", "2026-09-03T09:00:00+00:00"),
+    ],
+    [],
+  );
+  eq(current.archived, false, "the current run is live");
+  eq(history[0].archived, true, "the superseded run is marked archived");
 });
 
 /* --- report -------------------------------------------------------------- */

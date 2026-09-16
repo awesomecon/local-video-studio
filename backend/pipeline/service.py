@@ -9254,9 +9254,12 @@ class PipelineService:
             return self._subtitle_cues(project)
 
         def operation() -> tuple[list[SubtitleCue], list[Path]]:
-            self._archive_output(project, srt)
-            self._archive_output(project, ass)
-            self._archive_output(project, word_timings)
+            # Archiving re-points the superseded asset records at their
+            # archive files, so the Captions screen can mark the current
+            # generation and keep every previous one openable.
+            self._archive_caption_output(project, srt, AssetType.SUBTITLE, "captions")
+            self._archive_caption_output(project, ass, AssetType.SUBTITLE, "captions")
+            self._archive_caption_output(project, word_timings, AssetType.METADATA, "caption_timing")
             if self.mock_mode:
                 cues = self._subtitle_cues(project)
                 result = GenerationResult(
@@ -10475,6 +10478,34 @@ class PipelineService:
             project.slug,
             path.relative_to(self.store.project_path(project)),
         )
+
+    def _archive_caption_output(
+        self, project: Project, path: Path, asset_type: AssetType, role: str,
+    ) -> None:
+        """Archive one live caption output and keep its asset record resolvable.
+
+        Caption assets accumulate one record per alignment run against the same
+        live path (unlike scene outputs, which are re-recorded in place).
+        Re-pointing the superseded record at its archive file and stamping
+        ``archived_at`` keeps every historical SRT/ASS/word-timings file
+        openable and lets the Captions screen mark the current generation.
+        Mirrors the music-master archival pattern (``_archive_music_master``).
+        """
+        destination = self._archive_output(project, path)
+        if destination is None:
+            return
+        root = self.store.project_path(project)
+        relative = path.relative_to(root)
+        archived_relative = destination.relative_to(root)
+        stamp = utc_now().isoformat()
+        for asset in self.database.list_assets(project.id):
+            if asset.type == asset_type and asset.settings.get("role") == role \
+                    and Path(asset.filepath) == relative \
+                    and "archived_at" not in asset.settings:
+                self.database.save_asset(asset.model_copy(update={
+                    "filepath": archived_relative,
+                    "settings": {**asset.settings, "archived_at": stamp},
+                }))
 
     def _archive_music_master(self, project: Project, path: Path) -> Path | None:
         """Archive the live soundtrack and keep its asset record resolvable."""
