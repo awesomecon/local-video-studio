@@ -833,10 +833,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
 
   return el("div", { class: "stack" },
     el("div", { class: "consent-warning" }, icon("alert", 18),
-      el("span", {}, "Only clone a voice you own or have permission to use. Audio remains local."),
-      el("div", { class: "hint", style: { marginTop: "4px" } },
-        "Breeze TTS 2 note: its model weights (and self-hosted outputs) are licensed for "
-        + "non-commercial use — fine for this channel today; re-check before monetizing.")),
+      el("span", {}, "Only clone a voice you own or have permission to use. Audio remains local.")),
     section("1. Reference voice",
       el("div", { class: "source-grid" }, recordCard, importCard, reference),
       previewBox,
@@ -1515,7 +1512,7 @@ function chunkRow(projectId, takeId, chunk, timingMode, refresh) {
     el("div", { class: "row" }, regenerate));
 }
 
-function providerLabel(provider) {
+export function providerLabel(provider) {
   return ({
     qwen_tts: "Qwen3-TTS",
     step_audio_editx: "Step-Audio-EditX",

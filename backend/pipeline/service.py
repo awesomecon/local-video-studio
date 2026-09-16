@@ -9252,11 +9252,15 @@ class PipelineService:
         word_timings = root / "word-timings.json"
         if not force and self._stage_complete(project, "subtitles"):
             return self._subtitle_cues(project)
+        generation_id = str(uuid.uuid4())
 
         def operation() -> tuple[list[SubtitleCue], list[Path]]:
-            self._archive_output(project, srt)
-            self._archive_output(project, ass)
-            self._archive_output(project, word_timings)
+            # Archiving re-points the superseded asset records at their
+            # archive files, so the Captions screen can mark the current
+            # generation and keep every previous one openable.
+            self._archive_caption_output(project, srt, AssetType.SUBTITLE, "captions")
+            self._archive_caption_output(project, ass, AssetType.SUBTITLE, "captions")
+            self._archive_caption_output(project, word_timings, AssetType.METADATA, "caption_timing")
             if self.mock_mode:
                 cues = self._subtitle_cues(project)
                 result = GenerationResult(
@@ -9275,6 +9279,16 @@ class PipelineService:
                 result = self._align_narration(project, word_timings)
                 cues = self._audio_derived_cues(word_timings)
                 outputs = [word_timings, srt, ass]
+            metadata = dict(result.metadata)
+            metadata["settings"] = {
+                **dict(metadata.get("settings", {})),
+                "caption_generation_id": generation_id,
+            }
+            result = GenerationResult(
+                outputs=result.outputs,
+                metadata=metadata,
+                peak_vram_gb=result.peak_vram_gb,
+            )
             write_srt(cues, srt)
             write_ass(cues, ass, width=project.resolution[0], height=project.resolution[1])
             for output in (srt, ass):
@@ -10475,6 +10489,51 @@ class PipelineService:
             project.slug,
             path.relative_to(self.store.project_path(project)),
         )
+
+    def _archive_caption_output(
+        self, project: Project, path: Path, asset_type: AssetType, role: str,
+    ) -> None:
+        """Archive one live caption output and keep its asset record resolvable.
+
+        Caption assets accumulate one record per alignment run against the same
+        live path (unlike scene outputs, which are re-recorded in place).
+        The newest record whose digest matches the live bytes is re-pointed at
+        the archive. Ambiguous legacy rows are marked unavailable rather than
+        being linked to bytes from a different run. This mirrors the
+        music-master archival pattern (``_archive_music_master``).
+        """
+        if not path.is_file():
+            return
+        root = self.store.project_path(project)
+        relative = path.relative_to(root)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        candidates = [
+            asset for asset in self.database.list_assets(project.id)
+            if asset.type == asset_type
+            and asset.settings.get("role") == role
+            and Path(asset.filepath) == relative
+            and "archived_at" not in asset.settings
+        ]
+        matching = [asset for asset in candidates if asset.hash == digest]
+        previous = max(matching, key=lambda asset: asset.created_at) if matching else None
+        destination = self.store.archive_variant(project.slug, relative)
+        archived_relative = destination.relative_to(root)
+        stamp = utc_now().isoformat()
+        for asset in candidates:
+            available = previous is not None and asset.id == previous.id
+            filepath = (
+                archived_relative
+                if available
+                else Path("variants/archive") / f"unavailable-{asset.id}{relative.suffix}"
+            )
+            self.database.save_asset(asset.model_copy(update={
+                "filepath": filepath,
+                "settings": {
+                    **asset.settings,
+                    "archived_at": stamp,
+                    "archive_available": available,
+                },
+            }))
 
     def _archive_music_master(self, project: Project, path: Path) -> Path | None:
         """Archive the live soundtrack and keep its asset record resolvable."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from backend.captions import (
@@ -135,6 +136,12 @@ def test_completed_mock_subtitles_keep_deterministic_fallback(tmp_path: Path) ->
         "outputs"
     ]
     assert outputs == ["subtitles/captions.srt", "subtitles/captions.ass"]
+    assets = [
+        asset for asset in service.database.list_assets(project.id)
+        if asset.settings.get("role") == "captions"
+    ]
+    assert len(assets) == 2
+    assert len({asset.settings.get("caption_generation_id") for asset in assets}) == 1
 
 
 def test_real_alignment_uses_word_timings_and_records_audio_hash(tmp_path: Path) -> None:
@@ -221,3 +228,122 @@ def test_real_alignment_uses_word_timings_and_records_audio_hash(tmp_path: Path)
         for asset in caption_assets
     )
     assert any(asset.type is AssetType.METADATA and asset.settings.get("role") == "caption_timing" for asset in assets)
+
+
+def test_second_alignment_run_archives_and_repoints_superseded_assets(tmp_path: Path) -> None:
+    class FakeWhisper:
+        def descriptor(self) -> BackendDescriptor:
+            return BackendDescriptor(
+                backend_name="whisper",
+                model_name="Fake Whisper",
+                model_version="test",
+                device="cpu",
+                capabilities=frozenset({Capability.SPEECH_TO_TEXT}),
+            )
+
+        def load(self) -> None:
+            return None
+
+        def unload(self) -> None:
+            return None
+
+        def generate(self, request) -> GenerationResult:
+            output = request.output_dir / "word-timings.json"
+            output.write_text(json.dumps({"words": [
+                {"start_seconds": 0.1, "end_seconds": 0.5, "text": "hello"},
+                {"start_seconds": 0.6, "end_seconds": 1.0, "text": "world"},
+            ]}), encoding="utf-8")
+            return GenerationResult(
+                outputs=(output,),
+                metadata={
+                    "backend": "whisper",
+                    "model": "Fake Whisper",
+                    "model_version": "test",
+                    "seed": 0,
+                    "settings": {"audio_derived": True},
+                },
+            )
+
+    config = load_config(environ={})
+    config.backends.whisper.enabled = True
+    config.hardware.preferred_device = "cpu"
+    service = PipelineService(
+        config,
+        database_path=tmp_path / "app" / "studio.sqlite3",
+        project_root=tmp_path / "projects",
+        temp_root=tmp_path / "app" / "tmp",
+        mock_mode=True,
+    )
+    project = service.create_project(ProjectCreate(title="Archive", topic="test", target_duration=2))
+    service.ensure_plan(project.id)
+    for scene, narration in zip(
+        service.database.list_scenes(project.id),
+        ("Hello, world.", "How are you?", "Fine, thanks!"), strict=True,
+    ):
+        service.update_scene(scene.id, {"narration": narration})
+    service._ensure_narration(project, force=False)
+    service.mock_mode = False
+    service.registry.register(FakeWhisper(), name="whisper", replace=True)
+
+    service._ensure_subtitles(project, force=False)  # first generation
+    first_assets = service.database.list_assets(project.id)
+    first_srt = next(
+        asset for asset in first_assets
+        if asset.settings.get("role") == "captions" and asset.filepath.suffix == ".srt"
+    )
+    service.database.save_asset(first_srt.model_copy(update={
+        "id": "legacy-stale-srt",
+        "hash": "0" * 64,
+        "created_at": first_srt.created_at - timedelta(seconds=1),
+        "settings": {
+            key: value for key, value in first_srt.settings.items()
+            if key != "caption_generation_id"
+        },
+    }))
+    service._ensure_subtitles(project, force=True)   # second generation archives the first
+
+    root = service.store.project_path(project)
+    assets = service.database.list_assets(project.id)
+
+    def assert_archived_pair(role: str, live_path: str) -> None:
+        records = [asset for asset in assets if asset.settings.get("role") == role]
+        suffix = Path(live_path).suffix
+        # as_posix(): str(Path) yields backslash separators on Windows.
+        live = [asset for asset in records if asset.filepath.as_posix() == live_path]
+        archived = [
+            asset for asset in records
+            if asset.filepath.as_posix().startswith("variants/archive/")
+            and asset.filepath.as_posix().endswith(suffix)
+            and asset.settings.get("archive_available") is not False
+        ]
+        assert len(live) == 1, f"exactly one live {live_path} record: {[a.filepath for a in records]}"
+        assert len(archived) == 1, f"exactly one superseded {live_path} record: {[a.filepath for a in records]}"
+        assert live[0].settings.get("archived_at") is None, "the current record stays un-archived"
+        assert archived[0].settings.get("archived_at"), "the superseded record carries the archive stamp"
+        assert (root / archived[0].filepath).is_file(), "the archived file stays openable"
+
+    assert_archived_pair("captions", "subtitles/captions.srt")
+    assert_archived_pair("captions", "subtitles/captions.ass")
+    assert_archived_pair("caption_timing", "subtitles/word-timings.json")
+    stale = service.database.get_asset("legacy-stale-srt")
+    assert stale is not None
+    assert stale.settings.get("archive_available") is False
+    assert stale.settings.get("archived_at")
+    assert stale.filepath.as_posix().startswith("variants/archive/unavailable-")
+    assert not (root / stale.filepath).exists()
+
+    generations = {
+        asset.settings.get("caption_generation_id")
+        for asset in assets
+        if asset.settings.get("caption_generation_id")
+    }
+    assert len(generations) == 2
+    for generation_id in generations:
+        generation = [
+            asset for asset in assets
+            if asset.settings.get("caption_generation_id") == generation_id
+        ]
+        assert len(generation) == 3
+        assert {asset.settings.get("input_audio_sha256") for asset in generation} == {
+            next(iter(generation)).settings.get("input_audio_sha256")
+        }
