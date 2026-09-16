@@ -37,17 +37,20 @@
  *                                state, failure restores the button with the
  *                                standard error surfaces, and live refreshes
  *                                never trigger generation.
- *   8. Editorial plan provenance  - current plans keep the good state with a
- *                                small Current note; stale plans warn with
- *                                readable reasons (project / script /
- *                                word_timings, multiple allowed); untracked
- *                                plans get a neutral note and are never
- *                                called stale or broken; missing/malformed
- *                                plan_status degrades to the classic state;
- *                                Open Preview survives every plan state, no
- *                                Generate button appears once a plan exists,
- *                                and rendering these states issues no
- *                                network calls.
+ *   8. Editorial plan provenance  - the readiness statement is plain
+ *                                English per plan state: current says the
+ *                                render is up to date and Export can render
+ *                                it; stale names the changed inputs
+ *                                readably (project / script / word_timings,
+ *                                multiple allowed) and says to regenerate,
+ *                                with no warning badge or banner; untracked
+ *                                plans get a neutral available note and are
+ *                                never called stale or broken;
+ *                                missing/malformed plan_status degrades to
+ *                                the available note; Open Preview survives
+ *                                every plan state, no Generate button
+ *                                appears once a plan exists, and rendering
+ *                                these states issues no network calls.
  *   9. Export mode presentation   - classic and legacy screens keep the
  *                                original wording, readiness rows, chips,
  *                                and confirmation text; editorial screens
@@ -173,6 +176,7 @@ import {
   buildPatchBody,
   setInputs,
   editorialPreviewSection,
+  editorialReadinessStatement,
   renderEditorialRegion,
   buildEditorialDisplayControls,
   summarizeEditPlanCompositions,
@@ -587,13 +591,13 @@ record("editorial-preview: editorial project without a plan shows the empty stat
   assert(node.textContent.includes("Edit Plan"), "explains the missing Edit Plan");
 });
 
-record("editorial-preview: editorial project with a plan shows status + Open Preview", () => {
+record("editorial-preview: editorial project with a plan shows the readiness statement + Open Preview", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, EDIT_PLAN_META));
   assert(node, "the section renders");
   eq(node.querySelector(".panel-title").textContent, "Editorial Preview");
   assert(!node.querySelector(".empty-state"), "no empty state once the plan exists");
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("Edit Plan available"), "status badge present");
+  assert(!node.querySelector(".badge"), "no status badge in the plain-English presentation");
+  assert(node.textContent.includes("An Edit Plan is available"), "readiness statement present");
   const link = node.querySelector("a");
   assert(link && link.textContent === "Open Preview", "Open Preview link present");
 });
@@ -671,8 +675,8 @@ record("editorial-generate: editorial project with a plan keeps the preview link
   const node = editorialPreviewSection(
     projectSnapshot(EDITORIAL_PROJECT, { ...EDIT_PLAN_META, generate_url: GENERATE_URL }));
   assert(node, "the section renders");
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("Edit Plan available"), "status badge remains");
+  assert(!node.querySelector(".badge"), "no status badge in the plain-English presentation");
+  assert(node.textContent.includes("An Edit Plan is available"), "readiness statement remains");
   const link = node.querySelector("a");
   assert(link && link.textContent === "Open Preview", "Open Preview link remains");
   assert(!findGenerateButton(node), "no Generate button once a plan exists");
@@ -698,7 +702,7 @@ await recordAsync("editorial-generate: one click issues exactly one bodyless POS
   eq(posts[0].body, null, "no request body and no force flag");
 });
 
-await recordAsync("editorial-generate: success refreshes the panel to Edit Plan available", async () => {
+await recordAsync("editorial-generate: success refreshes the panel to the available-plan state", async () => {
   state.config = { apiBase: "", mediaBase: null };
   const withPlan = projectSnapshot(
     EDITORIAL_PROJECT, { ...EDIT_PLAN_META, generate_url: GENERATE_URL });
@@ -713,7 +717,7 @@ await recordAsync("editorial-generate: success refreshes the panel to Edit Plan 
   assert(btn, "Generate button present before the click");
   btn.click();
   await flush();
-  assert(region.textContent.includes("Edit Plan available"), "plan badge after refresh");
+  assert(region.textContent.includes("Edit Plan is available"), "readiness statement after refresh");
   const link = region.querySelector("a");
   assert(link && link.textContent === "Open Preview", "Open Preview after refresh");
   assert(!findGenerateButton(region), "Generate button gone after refresh");
@@ -829,24 +833,47 @@ const UNTRACKED_PLAN_META = {
   preview_url: EDIT_PLAN_META.preview_url,
 };
 
-record("editorial-provenance: current plan keeps the good state with a small Current note", () => {
+record("editorial-provenance: the readiness statement is plain English per plan state", () => {
+  eq(editorialReadinessStatement({ kind: "current", reasons: [] }),
+    "This project's render is up to date — Export can render the current Edit Plan.");
+  eq(editorialReadinessStatement({
+    kind: "stale",
+    reasons: ["the narration or script changed since the plan was generated"],
+  }), "This Edit Plan is stale — the narration or script changed since the plan was generated. " +
+    "Export would still render the last generated plan; regenerate the Edit Plan from the " +
+    "Editorial workspace to reflect the changes.");
+  eq(editorialReadinessStatement({ kind: "stale", reasons: [] }),
+    "This Edit Plan is stale — tracked inputs changed since the plan was generated. " +
+    "Export would still render the last generated plan; regenerate the Edit Plan from the " +
+    "Editorial workspace to reflect the changes.");
+  eq(editorialReadinessStatement({ kind: "untracked", reasons: [] }),
+    "An Edit Plan is available — Export can render it. " +
+    "It may predate freshness tracking, so its freshness can't be verified.");
+  eq(editorialReadinessStatement({ kind: "unknown", reasons: [] }),
+    "An Edit Plan is available — Export can render it.");
+  eq(editorialReadinessStatement(null),
+    "An Edit Plan is available — Export can render it.", "malformed planState degrades safely");
+});
+
+record("editorial-provenance: current plan says the render is up to date", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, CURRENT_PLAN_META));
   assert(node, "the section renders");
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("Edit Plan available"), "good status badge kept");
-  assert(badge.classList.contains("badge-good"), "badge keeps the good tone");
-  assert(node.textContent.includes("Current"), "small Current indication present");
+  assert(!node.querySelector(".badge"), "no status badge in the plain-English presentation");
+  assert(!node.querySelector(".banner"), "no warning banner");
+  assert(node.textContent.includes("This project's render is up to date"), "current statement present");
+  assert(node.textContent.includes("Export can render the current Edit Plan"), "says what can be exported");
   const link = node.querySelector("a");
   assert(link && link.textContent === "Open Preview", "Open Preview kept");
   assert(!findGenerateButton(node), "no Generate button for a current plan");
 });
 
-record("editorial-provenance: stale plan shows a warning and the project reason", () => {
+record("editorial-provenance: stale plan names what changed and what to do", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, stalePlanMeta(["project"])));
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("stale"), "warning status says stale");
-  assert(badge.classList.contains("badge-warning"), "badge uses the warning tone");
+  assert(!node.querySelector(".badge"), "no stale warning badge");
+  assert(!node.querySelector(".banner"), "no stale warning banner");
+  assert(node.textContent.includes("This Edit Plan is stale"), "stale statement present");
   assert(node.textContent.includes("settings changed"), "project reason explained readably");
+  assert(node.textContent.includes("regenerate the Edit Plan"), "says what the user should do");
   assert(!findGenerateButton(node), "no Generate button for a stale plan");
 });
 
@@ -867,39 +894,35 @@ record("editorial-provenance: multiple stale reasons are all listed", () => {
   assert(node.textContent.includes("settings changed"), "project reason listed");
   assert(node.textContent.includes("narration or script changed"), "script reason listed");
   assert(node.textContent.includes("word timings changed"), "word_timings reason listed");
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("stale"), "still a single stale warning");
+  assert(!node.querySelector(".badge"), "no stale warning badge");
 });
 
 record("editorial-provenance: untracked plan is neutral, never stale or broken", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, UNTRACKED_PLAN_META));
   assert(node, "the section renders");
-  const badge = node.querySelector(".badge");
-  assert(badge && badge.textContent.includes("Edit Plan available"), "plan availability still shown");
-  assert(badge.classList.contains("badge-neutral"), "neutral tone for unknown freshness");
+  assert(!node.querySelector(".badge"), "no status badge in the plain-English presentation");
+  assert(node.textContent.includes("An Edit Plan is available"), "plan availability still stated");
   assert(node.textContent.includes("predat"), "explains the plan may predate tracking");
   assert(!/stale/i.test(node.textContent), "never labeled stale");
   assert(!/broken/i.test(node.textContent), "never labeled broken");
 });
 
-record("editorial-provenance: missing or unknown plan_status falls back to Edit Plan available", () => {
+record("editorial-provenance: missing or unknown plan_status keeps the available note", () => {
   const legacy = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, EDIT_PLAN_META));
-  const legacyBadge = legacy.querySelector(".badge");
-  assert(legacyBadge && legacyBadge.textContent.includes("Edit Plan available"),
-    "older backend without plan_status keeps the classic state");
+  assert(legacy.textContent.includes("An Edit Plan is available"),
+    "older backend without plan_status keeps the available note");
+  assert(!legacy.querySelector(".badge"), "no badge in the plain-English presentation");
   const weird = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
     ...EDIT_PLAN_META, plan_status: "exploded", stale: "yes", stale_reasons: { project: true },
   }));
-  const weirdBadge = weird.querySelector(".badge");
-  assert(weirdBadge && weirdBadge.textContent.includes("Edit Plan available"),
-    "unknown plan_status keeps the classic state");
+  assert(weird.textContent.includes("An Edit Plan is available"),
+    "unknown plan_status keeps the available note");
   assert(!weird.querySelector(".empty-state"), "preview never hidden by malformed metadata");
   const nonString = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, {
     ...EDIT_PLAN_META, plan_status: 42,
   }));
-  const nonStringBadge = nonString.querySelector(".badge");
-  assert(nonStringBadge && nonStringBadge.textContent.includes("Edit Plan available"),
-    "non-string plan_status keeps the classic state");
+  assert(nonString.textContent.includes("An Edit Plan is available"),
+    "non-string plan_status keeps the available note");
 });
 
 record("editorial-provenance: stale and untracked plans retain Open Preview", () => {

@@ -184,6 +184,44 @@ def test_project_details_links_into_the_workspace() -> None:
     assert 'href: "#/editorial"' in section
 
 
+def test_project_details_editorial_preview_states_plain_english_readiness() -> None:
+    """The Project panel leads with a plain-English export-readiness
+    statement instead of the old jargon-heavy stale warning.
+
+    The dedicated workspace screen (editorial.js) keeps its own banner;
+    only the Project Details presentation changed.
+    """
+    source = _js("pages/project.js")
+    section = source.split("export function editorialPreviewSection", 1)[1].split(
+        "\n}\n", 1,
+    )[0]
+    # The old presentation is gone from the Project panel…
+    assert "badge(" not in section
+    assert "banner(" not in section
+    assert 'badge("warning", "Edit Plan is stale")' not in section
+    assert "Stale plans are preserved on purpose" not in section
+    # …replaced by the plain-English readiness statement derived from the
+    # shared (defensively parsed) plan state.
+    assert "editorialPlanState(editorial)" in section
+    assert "editorialReadinessStatement(planState)" in section
+    # The statement itself stays plain English for every plan state.
+    assert "export function editorialReadinessStatement(planState) {" in source
+    for statement in (
+        "This project's render is up to date — Export can render the current Edit Plan.",
+        "This Edit Plan is stale — ",
+        "regenerate the Edit Plan from the Editorial workspace",
+        "An Edit Plan is available — Export can render it.",
+    ):
+        assert statement in source
+    # The module doc no longer describes the old stale warning behaviour.
+    assert 'stale plan shows a warning naming the changed inputs' not in source
+    assert "plain-English" in source
+    # The dedicated workspace screen keeps its own banner (untouched).
+    workspace = _js("pages/editorial.js")
+    assert 'badge("warning", "Edit Plan is stale")' in workspace
+    assert "Stale plans are preserved on purpose" in workspace
+
+
 def test_motion_primitive_allowlist_matches_the_backend_contract() -> None:
     source = _js("pages/project.js")
     block = source.split("export const MOTION_PRIMITIVES = [", 1)[1].split("];", 1)[0]
