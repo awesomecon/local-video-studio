@@ -229,3 +229,12 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     api_source = api_js.read_text(encoding="utf-8")
     assert "export function saveGeminiKey(config" in api_source
     assert "export function clearGeminiKey(config" in api_source
+
+
+def test_voice_consent_note_is_neutral_and_provider_free() -> None:
+    source = VOICE_JS.read_text(encoding="utf-8")
+    # The clone-consent sentence stays…
+    assert "Only clone a voice you own or have permission to use. Audio remains local." in source
+    # …without per-provider licensing commentary.
+    assert "Breeze TTS 2 note" not in source
+    assert "non-commercial use" not in source
