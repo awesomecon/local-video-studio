@@ -130,6 +130,16 @@
  *                                the narration take whose hash matches the
  *                                fingerprint; un-fingerprinted (mock)
  *                                assets each stand alone.
+ *  18. TTS worker controls          - ttsWorkerStatus() is the honest state
+ *                                table behind the Unload controls: healthy
+ *                                splits on a strict `loaded` boolean
+ *                                (loaded / running without weights /
+ *                                reachable but unreported), a downed worker
+ *                                reads "not reachable", the managed
+ *                                auto-start and not-configured branches are
+ *                                kept, and only a confirmed load is
+ *                                unloadable — every disabled state gets a
+ *                                title that explains why.
  */
 
 import {
@@ -192,7 +202,7 @@ import {
   safeEditorialTimelinePlanUrl,
   summarizeEditorialTimeline,
 } from "../../js/pages/timeline.js";
-import { narrationTimingBadge } from "../../js/pages/voice.js";
+import { narrationTimingBadge, ttsWorkerStatus } from "../../js/pages/voice.js";
 import { effectiveVideoMode as sharedEffectiveVideoMode } from "../../js/video-mode.js";
 
 const results = [];
@@ -3460,6 +3470,50 @@ record("caption-generations: only verified archives expose historical links", ()
   eq(captionAssetOpenable(live, true), false, "a legacy historical live path stays closed");
   eq(captionAssetOpenable(archived, true), true, "a verified archive opens");
   eq(captionAssetOpenable(unavailable, true), false, "an unavailable archive stays closed");
+});
+
+/* --- 18. TTS worker controls (honest loaded states) ---------------------- */
+
+record("voice-worker: the status table distinguishes every loaded state", () => {
+  const cases = [
+    // [entry, expected message, expected canUnload]
+    [null, "This provider is not registered on the backend.", false],
+    [{ health: { status: "healthy", loaded: true } }, "Loaded and ready.", true],
+    [{ health: { status: "healthy", loaded: false } }, "Worker running — model loads on first use.", false],
+    [{ health: { status: "healthy", loaded: undefined } }, "Worker reachable.", false],
+    [{ health: { status: "healthy" } }, "Worker reachable.", false],
+    [{ health: { status: "healthy", loaded: "yes" } }, "Worker reachable.", false],
+    [{ health: { status: "healthy" }, managed: true }, "Worker reachable.", false],
+    [{ health: { status: "unhealthy", error: { message: "connection refused" } } }, "Worker not reachable.", false],
+    [{ health: { status: "unhealthy" }, managed: true }, "Configured for automatic worker startup — first use will load the model.", false],
+    [{ health: { status: "not_configured" } }, "Not configured. Set managed=true and the worker details in config.", false],
+    [{ health: { status: "not_configured" }, managed: true }, "Configured for automatic worker startup — first use will load the model.", false],
+    [{ health: "corrupted" }, "Not configured. Set managed=true and the worker details in config.", false],
+  ];
+  for (const [entry, message, canUnload] of cases) {
+    const view = ttsWorkerStatus(entry);
+    eq(view.message, message, `message for ${JSON.stringify(entry)}`);
+    eq(view.canUnload, canUnload, `canUnload for ${JSON.stringify(entry)}`);
+  }
+});
+
+record("voice-worker: only a confirmed load is unloadable, and titles explain why", () => {
+  const loaded = ttsWorkerStatus({ health: { status: "healthy", loaded: true } });
+  eq(loaded.canUnload, true, "a loaded worker is unloadable");
+  assert(loaded.unloadTitle.startsWith("Unload"), "the enabled title describes the action");
+  for (const entry of [
+    null,
+    { health: { status: "healthy", loaded: false } },
+    { health: { status: "healthy" } },
+    { health: { status: "unhealthy" } },
+    { health: { status: "not_configured" } },
+    { health: { status: "not_configured" }, managed: true },
+  ]) {
+    const view = ttsWorkerStatus(entry);
+    eq(view.canUnload, false, `not unloadable for ${JSON.stringify(entry)}`);
+    assert(view.unloadTitle.startsWith("Nothing to unload"),
+      `disabled title explains why for ${JSON.stringify(entry)}: ${view.unloadTitle}`);
+  }
 });
 
 /* --- report -------------------------------------------------------------- */

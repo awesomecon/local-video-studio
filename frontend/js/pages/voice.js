@@ -979,21 +979,72 @@ function modelOption(value, label, models) {
     `${label} — ${suffix}`);
 }
 
-function modelStatusLine(provider, models) {
-  const entry = models[provider] || null;
-  if (!entry) {
-    return el("span", { class: "muted small" },
-      "This provider is not registered on the backend.");
+/**
+ * Honest worker status for the Worker controls panel. Reduces one
+ * /api/tts/models entry to the status line text, whether "Unload model from
+ * memory" applies, and the button's title.
+ *
+ * `loaded` is trusted only as a strict boolean: isolated TTS workers and the
+ * mock backend report it (`true` = weights in memory, `false` = process
+ * running without weights); ComfyUI-backed adapters omit it, so a healthy
+ * entry without the flag reads "reachable" and is never claimed as loaded.
+ * A worker whose process is down reports unhealthy (no `loaded` key at all).
+ * `canUnload` is true only for a confirmed load — there is nothing to unload
+ * while the worker is down, unconfigured, or running without weights.
+ *
+ * @param {Object | null | undefined} entry — one /api/tts/models entry
+ * @returns {{message: string, canUnload: boolean, unloadTitle: string}}
+ */
+export function ttsWorkerStatus(entry) {
+  if (!entry || typeof entry !== "object") {
+    return {
+      message: "This provider is not registered on the backend.",
+      canUnload: false,
+      unloadTitle: "Nothing to unload — this provider is not registered on the backend.",
+    };
   }
-  if (entry.health?.status === "healthy") {
-    return el("span", { class: "muted small" }, "Loaded and ready.");
+  const health = (entry.health && typeof entry.health === "object") ? entry.health : null;
+  const status = (health && typeof health.status === "string") ? health.status : null;
+  if (status === "healthy") {
+    if (health.loaded === true) {
+      return {
+        message: "Loaded and ready.",
+        canUnload: true,
+        unloadTitle: "Unload the loaded model weights and stop this Studio's worker process.",
+      };
+    }
+    if (health.loaded === false) {
+      return {
+        message: "Worker running — model loads on first use.",
+        canUnload: false,
+        unloadTitle: "Nothing to unload — no model weights are loaded in this worker.",
+      };
+    }
+    return {
+      message: "Worker reachable.",
+      canUnload: false,
+      unloadTitle: "Nothing to unload — this worker does not report whether its model is loaded.",
+    };
   }
   if (entry.managed) {
-    return el("span", { class: "muted small" },
-      "Configured for automatic worker startup — first use will load the model.");
+    return {
+      message: "Configured for automatic worker startup — first use will load the model.",
+      canUnload: false,
+      unloadTitle: "Nothing to unload — the worker starts automatically on first use.",
+    };
   }
-  return el("span", { class: "muted small" },
-    "Not configured. Set managed=true and the worker details in config.");
+  if (status === "unhealthy") {
+    return {
+      message: "Worker not reachable.",
+      canUnload: false,
+      unloadTitle: "Nothing to unload — the worker is not reachable.",
+    };
+  }
+  return {
+    message: "Not configured. Set managed=true and the worker details in config.",
+    canUnload: false,
+    unloadTitle: "Nothing to unload — the worker is not configured.",
+  };
 }
 
 function workerControlsPanel(models, refresh) {
@@ -1002,14 +1053,21 @@ function workerControlsPanel(models, refresh) {
   const provider = el("select", { class: "input" },
     ...Object.keys(localModels).map((name) =>
       el("option", { value: name }, providerLabel(name))));
-  const status = el("div", { class: "hint" }, modelStatusLine(provider.value, localModels));
+  const status = el("div", { class: "hint" });
   const unload = el("button", {
     class: "btn btn-ghost btn-sm", type: "button",
   }, "Unload model from memory");
-  const refreshStatus = () => {
-    status.replaceChildren(modelStatusLine(provider.value, localModels));
+  // One honest view drives both the status line and the Unload button, so
+  // provider changes — and the rebuilt page after the post-unload refresh()
+  // re-reads the models snapshot — always agree.
+  const applyWorkerStatus = () => {
+    const view = ttsWorkerStatus(localModels[provider.value] || null);
+    status.replaceChildren(el("span", { class: "muted small" }, view.message));
+    unload.disabled = !view.canUnload;
+    unload.title = view.unloadTitle;
   };
-  provider.onchange = refreshStatus;
+  provider.onchange = applyWorkerStatus;
+  applyWorkerStatus();
   unload.onclick = async () => {
     if (!localModels[provider.value]) {
       toast("critical", "Unknown provider",
