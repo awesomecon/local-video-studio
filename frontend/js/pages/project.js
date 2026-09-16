@@ -734,7 +734,7 @@ export function editorialPlanState(editorial) {
  * Plain-English export-readiness statement for the Editorial Preview panel,
  * derived from editorialPlanState() — what the user can export right now,
  * without warning jargon:
- *   current   — the render is up to date; Export renders the current plan.
+ *   current   — the Edit Plan is up to date; Export can render it.
  *   stale     — names the changed inputs in plain words (the readable
  *               stale reasons, or a generic line when none are reported)
  *               and says what to do (regenerate the Edit Plan).
@@ -749,7 +749,7 @@ export function editorialReadinessStatement(planState) {
   const kind = (planState && typeof planState.kind === "string") ? planState.kind : "unknown";
   const reasons = (planState && Array.isArray(planState.reasons)) ? planState.reasons : [];
   if (kind === "current") {
-    return "This project's render is up to date — Export can render the current Edit Plan.";
+    return "This Edit Plan is up to date — Export can render it.";
   }
   if (kind === "stale") {
     const changed = reasons.length ? reasons.join("; ")
@@ -1799,7 +1799,7 @@ async function loadCompositions(planUrl, target, button, retry, ctrl, projectId,
  * has_edit_plan=false, and a missing/malformed generate_url simply omits
  * the Generate button. Once a plan exists the panel leads with the
  * plain-English export-readiness statement (editorialReadinessStatement()
- * over editorialPlanState()) — current says the render is up to date,
+ * over editorialPlanState()) — current says the Edit Plan is up to date,
  * stale names the changed inputs in plain words and points at regenerating,
  * untracked and missing/malformed plan_status get the neutral available
  * note — followed by the Open Preview link, the display-setting switches,

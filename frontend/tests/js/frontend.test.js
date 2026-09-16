@@ -39,7 +39,7 @@
  *                                never trigger generation.
  *   8. Editorial plan provenance  - the readiness statement is plain
  *                                English per plan state: current says the
- *                                render is up to date and Export can render
+ *                                Edit Plan is up to date and Export can render
  *                                it; stale names the changed inputs
  *                                readably (project / script / word_timings,
  *                                multiple allowed) and says to regenerate,
@@ -140,9 +140,10 @@
  *                                reachable but unreported), a downed worker
  *                                reads "not reachable", the managed
  *                                auto-start and not-configured branches are
- *                                kept, and only a confirmed load is
- *                                unloadable — every disabled state gets a
- *                                title that explains why.
+ *                                kept; a reachable worker with unreported
+ *                                residency remains unloadable so ComfyUI can
+ *                                release cached weights, and every disabled
+ *                                state gets a title that explains why.
  */
 
 import {
@@ -835,7 +836,7 @@ const UNTRACKED_PLAN_META = {
 
 record("editorial-provenance: the readiness statement is plain English per plan state", () => {
   eq(editorialReadinessStatement({ kind: "current", reasons: [] }),
-    "This project's render is up to date — Export can render the current Edit Plan.");
+    "This Edit Plan is up to date — Export can render it.");
   eq(editorialReadinessStatement({
     kind: "stale",
     reasons: ["the narration or script changed since the plan was generated"],
@@ -855,13 +856,13 @@ record("editorial-provenance: the readiness statement is plain English per plan 
     "An Edit Plan is available — Export can render it.", "malformed planState degrades safely");
 });
 
-record("editorial-provenance: current plan says the render is up to date", () => {
+record("editorial-provenance: current plan says the Edit Plan is up to date", () => {
   const node = editorialPreviewSection(projectSnapshot(EDITORIAL_PROJECT, CURRENT_PLAN_META));
   assert(node, "the section renders");
   assert(!node.querySelector(".badge"), "no status badge in the plain-English presentation");
   assert(!node.querySelector(".banner"), "no warning banner");
-  assert(node.textContent.includes("This project's render is up to date"), "current statement present");
-  assert(node.textContent.includes("Export can render the current Edit Plan"), "says what can be exported");
+  assert(node.textContent.includes("This Edit Plan is up to date"), "current statement present");
+  assert(node.textContent.includes("Export can render it"), "says what can be exported");
   const link = node.querySelector("a");
   assert(link && link.textContent === "Open Preview", "Open Preview kept");
   assert(!findGenerateButton(node), "no Generate button for a current plan");
@@ -3503,10 +3504,10 @@ record("voice-worker: the status table distinguishes every loaded state", () => 
     [null, "This provider is not registered on the backend.", false],
     [{ health: { status: "healthy", loaded: true } }, "Loaded and ready.", true],
     [{ health: { status: "healthy", loaded: false } }, "Worker running — model loads on first use.", false],
-    [{ health: { status: "healthy", loaded: undefined } }, "Worker reachable.", false],
-    [{ health: { status: "healthy" } }, "Worker reachable.", false],
-    [{ health: { status: "healthy", loaded: "yes" } }, "Worker reachable.", false],
-    [{ health: { status: "healthy" }, managed: true }, "Worker reachable.", false],
+    [{ health: { status: "healthy", loaded: undefined } }, "Worker reachable.", true],
+    [{ health: { status: "healthy" } }, "Worker reachable.", true],
+    [{ health: { status: "healthy", loaded: "yes" } }, "Worker reachable.", true],
+    [{ health: { status: "healthy" }, managed: true }, "Worker reachable.", true],
     [{ health: { status: "unhealthy", error: { message: "connection refused" } } }, "Worker not reachable.", false],
     [{ health: { status: "unhealthy" }, managed: true }, "Configured for automatic worker startup — first use will load the model.", false],
     [{ health: { status: "not_configured" } }, "Not configured. Set managed=true and the worker details in config.", false],
@@ -3520,14 +3521,17 @@ record("voice-worker: the status table distinguishes every loaded state", () => 
   }
 });
 
-record("voice-worker: only a confirmed load is unloadable, and titles explain why", () => {
+record("voice-worker: confirmed or possibly cached weights are unloadable", () => {
   const loaded = ttsWorkerStatus({ health: { status: "healthy", loaded: true } });
   eq(loaded.canUnload, true, "a loaded worker is unloadable");
   assert(loaded.unloadTitle.startsWith("Unload"), "the enabled title describes the action");
+  const unreported = ttsWorkerStatus({ health: { status: "healthy" } });
+  eq(unreported.canUnload, true, "a reachable worker with unknown residency is unloadable");
+  assert(unreported.unloadTitle.startsWith("Request release"),
+    "the unknown-residency title describes the safe request without claiming a load");
   for (const entry of [
     null,
     { health: { status: "healthy", loaded: false } },
-    { health: { status: "healthy" } },
     { health: { status: "unhealthy" } },
     { health: { status: "not_configured" } },
     { health: { status: "not_configured" }, managed: true },

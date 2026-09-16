@@ -207,7 +207,7 @@ def test_project_details_editorial_preview_states_plain_english_readiness() -> N
     # The statement itself stays plain English for every plan state.
     assert "export function editorialReadinessStatement(planState) {" in source
     for statement in (
-        "This project's render is up to date — Export can render the current Edit Plan.",
+        "This Edit Plan is up to date — Export can render it.",
         "This Edit Plan is stale — ",
         "regenerate the Edit Plan from the Editorial workspace",
         "An Edit Plan is available — Export can render it.",

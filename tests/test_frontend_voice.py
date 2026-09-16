@@ -237,8 +237,9 @@ def test_worker_controls_report_honest_loaded_states() -> None:
     Isolated TTS workers (and the mock backend) report `loaded` in their
     /health payload; ComfyUI-backed adapters omit it. The status line must
     distinguish loaded / running-without-weights / reachable-but-unreported /
-    worker-down, and the Unload button is disabled whenever there is nothing
-    to unload (a title explains why).
+    worker-down. Reachable ComfyUI adapters with unreported residency remain
+    unloadable so their `/free` endpoint can release cached weights; confirmed
+    unloaded or unreachable workers stay disabled (a title explains why).
     """
     source = VOICE_JS.read_text(encoding="utf-8")
 
@@ -251,17 +252,19 @@ def test_worker_controls_report_honest_loaded_states() -> None:
     assert '"Loaded and ready."' in block
     assert 'health.loaded === false' in block
     assert '"Worker running — model loads on first use."' in block
-    # …and a healthy entry without the flag is never claimed as loaded.
+    # …and a healthy entry without the flag is never claimed as loaded, while
+    # remaining unloadable because ComfyUI may still hold cached weights.
     assert '"Worker reachable."' in block
     # A downed worker is "not reachable", not "Loaded and ready".
     assert '"Worker not reachable."' in block
     # The managed auto-start and not-configured branches are kept.
     assert "Configured for automatic worker startup — first use will load the model." in block
     assert "Not configured. Set managed=true and the worker details in config." in block
-    # Only a confirmed load is unloadable.
-    assert block.count("canUnload: true") == 1
+    # Confirmed and potentially cached weights are unloadable.
+    assert block.count("canUnload: true") == 2
     assert "health.loaded === true" in block.split("canUnload: true", 1)[0]
-    assert block.count("canUnload: false") == 6
+    assert "Request release of any cached model weights" in block
+    assert block.count("canUnload: false") == 5
 
     # The panel binds the status line and the Unload button to the same view,
     # re-applies it on provider change, and re-reads the snapshot after the

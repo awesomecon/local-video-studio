@@ -987,10 +987,11 @@ function modelOption(value, label, models) {
  * `loaded` is trusted only as a strict boolean: isolated TTS workers and the
  * mock backend report it (`true` = weights in memory, `false` = process
  * running without weights); ComfyUI-backed adapters omit it, so a healthy
- * entry without the flag reads "reachable" and is never claimed as loaded.
- * A worker whose process is down reports unhealthy (no `loaded` key at all).
- * `canUnload` is true only for a confirmed load — there is nothing to unload
- * while the worker is down, unconfigured, or running without weights.
+ * entry without the flag reads "reachable" and is never claimed as loaded,
+ * but remains unloadable because ComfyUI can still release cached weights via
+ * `/free`. A worker whose process is down reports unhealthy (no `loaded` key
+ * at all). `canUnload` is false only when the backend confirms there are no
+ * weights to unload, or the provider cannot currently accept the request.
  *
  * @param {Object | null | undefined} entry — one /api/tts/models entry
  * @returns {{message: string, canUnload: boolean, unloadTitle: string}}
@@ -1022,8 +1023,8 @@ export function ttsWorkerStatus(entry) {
     }
     return {
       message: "Worker reachable.",
-      canUnload: false,
-      unloadTitle: "Nothing to unload — this worker does not report whether its model is loaded.",
+      canUnload: true,
+      unloadTitle: "Request release of any cached model weights; this worker does not report whether a model is loaded.",
     };
   }
   if (entry.managed) {
