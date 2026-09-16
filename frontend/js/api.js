@@ -267,6 +267,20 @@ import { apiUrl } from "./config.js";
  */
 
 /**
+ * One entry of `GET /api/projects/{id}/render-history`: a superseded final
+ * render preserved in the project's `renders/history/` directory.
+ * @typedef {Object} RenderHistoryEntry
+ * @property {string} id — the asset id; DELETE target for removal
+ * @property {string} filepath — project-relative history file path
+ * @property {string} filename — the history file name
+ * @property {string} created_at — when the render was preserved (ISO)
+ * @property {string | null} hash — sha256 of the preserved file
+ * @property {number | null} size_bytes — file size when available, else null
+ * @property {boolean} available — the file currently exists on disk
+ * @property {string | null} url — local playback/download URL when available
+ */
+
+/**
  * `POST /api/projects/{id}/plan` and `.../script` response (ProjectPlan).
  * @typedef {Object} ProjectPlan
  * @property {string} project_id
@@ -1449,6 +1463,41 @@ export function renderStage(config, projectId, stage, { force = false, signal, t
     config,
     `/api/projects/${encodeURIComponent(projectId)}/render/stages/${encodeURIComponent(stage)}`,
     { method: "POST", body: { force }, timeoutMs, signal },
+  );
+}
+
+/**
+ * GET /api/projects/{id}/render-history — the project's superseded final
+ * renders, newest first. Every re-render preserves the previous final MP4 in
+ * the project's render history; the live final render is not listed here.
+ * Entries whose file no longer exists stay listed with `available: false`
+ * and no `url` so a stray record can still be cleaned up.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{project_id: string, renders: RenderHistoryEntry[]}>}
+ */
+export function getRenderHistory(config, projectId, opts = {}) {
+  return request(config, `/api/projects/${encodeURIComponent(projectId)}/render-history`, {
+    timeoutMs: 10000, ...opts,
+  });
+}
+
+/**
+ * DELETE /api/projects/{id}/render-history/{assetId} — delete one
+ * superseded final render (its history file and index row). The current
+ * final video is protected (409); unknown projects or entries are 404.
+ * @param {import("./config.js").LvsConfig} config
+ * @param {string} projectId
+ * @param {string} assetId — the history entry's asset id
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{deleted: boolean, asset_id: string, filepath: string, removed_file: boolean}>}
+ */
+export function deleteRenderHistoryEntry(config, projectId, assetId, opts = {}) {
+  return request(
+    config,
+    `/api/projects/${encodeURIComponent(projectId)}/render-history/${encodeURIComponent(assetId)}`,
+    { method: "DELETE", timeoutMs: 15000, ...opts },
   );
 }
 

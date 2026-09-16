@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Final-render history with deletion.** Every time a final video is
+  re-rendered, the previous `renders/final.mp4` is preserved in the
+  project's human-readable `renders/history/` directory (instead of the
+  generic variant archive) and indexed as a `final_render_history` asset.
+  The Export screen's Final output panel now lists that render history
+  (newest first) with completion time, size, a local playback/download
+  link, and a Delete action per entry, via the new
+  `GET /api/projects/{id}/render-history` and
+  `DELETE /api/projects/{id}/render-history/{asset_id}` endpoints. Only
+  superseded renders are deletable; the live final render stays protected
+  at `renders/final.mp4` and is replaced by re-rendering.
 - **Editorial-mode screens are now truthful and mode-aware.**
   - The **Timeline** screen is a read-only composition and motion-event
     timeline for Editorial projects, built from the *effective*

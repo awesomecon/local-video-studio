@@ -500,6 +500,80 @@ class PipelineService:
             snapshot["recovery"] = recovery
         return snapshot
 
+    def render_history(self, project_id: str) -> dict[str, Any]:
+        """List the project's superseded final renders, newest first.
+
+        Every time a re-render replaces ``renders/final.mp4``, the previous
+        export is preserved in ``renders/history/`` and recorded as a
+        ``final_render_history`` asset. Those preserved renders form the
+        history returned here; the live final render stays at
+        ``renders/final.mp4`` and is not part of it. Entries whose file no
+        longer exists on disk are still listed (``available`` is false) so a
+        stray record can be cleaned up instead of going stale forever.
+        """
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        entries: list[dict[str, Any]] = []
+        for asset in self.database.list_assets(project_id):
+            if asset.settings.get("role") != "final_render_history":
+                continue
+            try:
+                path = resolve_asset_path(root, asset.filepath)
+            except ValueError:
+                path = None
+            available = path is not None and path.is_file()
+            entries.append({
+                "id": asset.id,
+                "filepath": Path(asset.filepath).as_posix(),
+                "filename": Path(asset.filepath).name,
+                "created_at": asset.created_at.isoformat(),
+                "hash": asset.hash,
+                "size_bytes": path.stat().st_size if available else None,
+                "available": available,
+                "url": (
+                    f"/api/projects/{project.id}/assets/{asset.id}/file"
+                    if available else None
+                ),
+            })
+        entries.sort(
+            key=lambda entry: (entry["created_at"], entry["id"]), reverse=True,
+        )
+        return {"project_id": project.id, "renders": entries}
+
+    def delete_render_history_entry(self, project_id: str, asset_id: str) -> dict[str, Any]:
+        """Delete one superseded final render (its history file and index row).
+
+        Only ``final_render_history`` entries are deletable. The live
+        ``renders/final.mp4`` and its ``final_render`` asset record are never
+        touched by this operation; replace the current export by re-rendering
+        instead.
+        """
+        project = self._project(project_id)
+        asset = self.database.get_asset(asset_id)
+        if asset is None or asset.project_id != project.id:
+            raise KeyError(f"render history entry not found: {asset_id}")
+        if asset.settings.get("role") != "final_render_history":
+            raise ValueError(
+                "only superseded final renders can be deleted from the history; "
+                "the current final video is protected"
+            )
+        removed_file = False
+        root = self.store.project_path(project)
+        try:
+            path = resolve_asset_path(root, asset.filepath)
+        except ValueError:
+            path = None
+        if path is not None and path.is_file():
+            path.unlink()
+            removed_file = True
+        self.database.delete_asset(asset.id)
+        return {
+            "deleted": True,
+            "asset_id": asset.id,
+            "filepath": Path(asset.filepath).as_posix(),
+            "removed_file": removed_file,
+        }
+
     def save_edit_plan(self, project_id: str, plan: EditPlan) -> EditPlan:
         """Validate project ownership/mode and atomically publish an edit plan."""
         with self._lock:
@@ -9675,7 +9749,16 @@ class PipelineService:
         def operation() -> tuple[Path, list[Path]]:
             timeline = self._build_timeline(project)
             if output.is_file():
-                self.store.copy_to_archive(project.slug, output.relative_to(self.store.project_path(project)))
+                # Preserve the superseded export in the project's render
+                # history (renders/history/) and keep an index row for it so
+                # the history stays listable and deletable through the API.
+                history_path = self.store.archive_final_render(
+                    project.slug,
+                    output.relative_to(self.store.project_path(project)),
+                )
+                self._record_render_asset(
+                    project, history_path, role="final_render_history",
+                )
             info = self.renderer.render_final(
                 timeline,
                 output,

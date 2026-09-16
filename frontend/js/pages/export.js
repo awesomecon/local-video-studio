@@ -16,11 +16,25 @@
  *    has no read endpoint, so only its path and completion are shown.
  *  - A completed, recorded final-render asset has a project-scoped local
  *    download link.
+ *  - Every re-render preserves the previous final MP4 in the project's
+ *    render history (GET /api/projects/{id}/render-history). The history
+ *    section lists those superseded renders newest first, with playback /
+ *    download links and a Delete action
+ *    (DELETE /api/projects/{id}/render-history/{assetId}). The current
+ *    final video is never deletable from the history.
  */
 
 import { el, fmtDate, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
-import { getProject, getThumbnails, renderProject, renderStage, cancelJob } from "../api.js";
+import {
+  getProject,
+  getThumbnails,
+  renderProject,
+  renderStage,
+  cancelJob,
+  getRenderHistory,
+  deleteRenderHistoryEntry,
+} from "../api.js";
 import {
   loadingState,
   errorPanel,
@@ -199,9 +213,10 @@ function exportPanel() {
     const token = ++inflight;
     if (skeleton) region.replaceChildren(loadingState(4));
     try {
-      const [snap, thumbnails] = await Promise.all([
+      const [snap, thumbnails, history] = await Promise.all([
         getProject(state.config, state.currentProjectId),
         getThumbnails(state.config, state.currentProjectId),
+        getRenderHistory(state.config, state.currentProjectId),
       ]);
       if (token !== inflight) return;
       const stages = (snap.stage_state && /** @type {any} */ (snap.stage_state).stages) || {};
@@ -213,7 +228,7 @@ function exportPanel() {
       );
       const active = jobs.find((j) => !TERMINAL.includes(j.status)) || null;
       const last = jobs.slice().sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0] || null;
-      region.replaceChildren(build(snap, stages, active, last, thumbnails));
+      region.replaceChildren(build(snap, stages, active, last, thumbnails, history));
       hasContent = true;
     } catch (err) {
       if (token !== inflight || hasContent) return;
@@ -235,9 +250,11 @@ function exportPanel() {
  * @param {Record<string, {status?: string, outputs?: string[], completed_at?: string}>} stages
  * @param {import("../api.js").GenerationJob|null} active
  * @param {import("../api.js").GenerationJob|null} last
+ * @param {import("../api.js").ThumbnailStudioSnapshot} thumbnails
+ * @param {{renders?: import("../api.js").RenderHistoryEntry[]}|null} history
  * @returns {HTMLElement}
  */
-function build(snap, stages, active, last, thumbnails) {
+function build(snap, stages, active, last, thumbnails, history) {
   const project = snap.project;
   const mode = exportVideoMode(project);
   const parts = [];
@@ -390,6 +407,7 @@ function build(snap, stages, active, last, thumbnails) {
         finalDone && !(finalAsset && finalAsset.url)
           ? el("p", { class: "muted small" }, "The final file is recorded but not currently available through the local API.")
           : null,
+        renderHistorySection(history),
       ),
     ),
   );
@@ -443,6 +461,134 @@ function lastJobNote(job) {
     jobStatusBadge(job.status),
     el("span", { class: "muted small" }, `last render: ${job.status}${err ? ` — ${err}` : ""}`),
   );
+}
+
+/**
+ * Render history section of the Final output panel: the superseded final
+ * renders preserved in the project's `renders/history/`, newest first (the
+ * backend returns them sorted). Each row shows the preserved file, when it
+ * was kept, and its size, plus Download (only for project-scoped local URLs,
+ * mirroring the thumbnail rules) and a Delete action with confirmation.
+ * Entries whose file is missing stay listed so the stale record can be
+ * cleaned up; deletion never touches the current final video.
+ * @param {{renders?: import("../api.js").RenderHistoryEntry[]}|null} history
+ * @returns {HTMLElement}
+ */
+function renderHistorySection(history) {
+  const renders = (history && Array.isArray(history.renders)) ? history.renders : [];
+  const rows = renders.map((entry) => historyRow(entry));
+  return el("div", { class: "mt" },
+    el("div", { class: "row" },
+      el("span", { class: "panel-title" }, "Render history"),
+      el("span", { class: "spacer" }),
+      el("span", { class: "muted small" },
+        renders.length
+          ? `${renders.length} past render${renders.length === 1 ? "" : "s"}`
+          : "empty"),
+    ),
+    rows.length
+      ? el("div", { class: "stack mt" }, ...rows)
+      : el("p", { class: "muted small mt" },
+          "No past renders yet — re-rendering the final video preserves the previous MP4 here."),
+  );
+}
+
+/**
+ * One history row. Unknown/missing fields degrade to placeholders; only a
+ * project-scoped local `url` becomes a download link.
+ * @param {import("../api.js").RenderHistoryEntry} entry
+ * @returns {HTMLElement}
+ */
+function historyRow(entry) {
+  const view = renderHistoryEntry(entry);
+  const children = [
+    el("span", { class: "mono small" }, view.name),
+    el("span", { class: "muted small" }, `saved ${view.when}`),
+    el("span", { class: "muted small" }, view.size),
+    el("span", { class: "spacer" }),
+  ];
+  if (view.downloadUrl) {
+    children.push(el("a", {
+      class: "btn btn-sm",
+      href: view.downloadUrl,
+    }, "Download"));
+  } else {
+    children.push(el("span", { class: "muted small" }, "file missing"));
+  }
+  const deleteBtn = el("button", {
+    class: "btn btn-danger btn-sm",
+    type: "button",
+    title: `Delete ${view.name}`,
+  }, "Delete");
+  deleteBtn.onclick = () => doDeleteRender(entry);
+  children.push(deleteBtn);
+  return el("div", { class: "row" }, ...children);
+}
+
+/**
+ * Pure presentation reducer for one superseded final render (history entry).
+ * Missing or malformed fields degrade to placeholders instead of throwing:
+ * the screen must never blank because of one bad record.
+ * @param {any} entry
+ * @returns {{name: string, when: string, size: string, downloadUrl: string|null}}
+ */
+export function renderHistoryEntry(entry) {
+  const value = (entry && typeof entry === "object" && !Array.isArray(entry)) ? entry : {};
+  const name = (typeof value.filename === "string" && value.filename)
+    ? value.filename
+    : "final render";
+  const when = (typeof value.created_at === "string" && value.created_at)
+    ? fmtDate(value.created_at)
+    : "—";
+  const size = (typeof value.size_bytes === "number" && Number.isFinite(value.size_bytes)
+    && value.size_bytes >= 0)
+    ? fmtBytes(value.size_bytes)
+    : "—";
+  const downloadUrl = (typeof value.url === "string" && value.url.startsWith("/api/projects/"))
+    ? `${value.url}?download=true`
+    : null;
+  return { name, when, size, downloadUrl };
+}
+
+/**
+ * Human file size for history rows; negative or non-numeric input is
+ * rejected by the caller.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function fmtBytes(bytes) {
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * Delete one superseded final render after confirmation. The current final
+ * video is protected by the backend (409), so only history entries reach
+ * here.
+ * @param {import("../api.js").RenderHistoryEntry} entry
+ */
+async function doDeleteRender(entry) {
+  const view = renderHistoryEntry(entry);
+  const ok = await confirm({
+    title: "Delete this past render?",
+    message: `${view.name} will be removed from the project. The current final video is not affected.`,
+    confirmLabel: "Delete render",
+  });
+  if (!ok) return;
+  try {
+    await deleteRenderHistoryEntry(state.config, state.currentProjectId, entry.id);
+    toast("good", "Past render deleted", view.name);
+    renderExportRefresh();
+  } catch (err) {
+    toastError(err, "delete past render");
+  }
 }
 
 /**
