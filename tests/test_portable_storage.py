@@ -5,6 +5,7 @@ filesystem tests. No existing projects or external services are used.
 """
 
 import json
+import re
 import shutil
 from pathlib import Path, PurePath, PureWindowsPath
 
@@ -78,6 +79,30 @@ def test_native_resolution_and_archive_accept_foreign_relative_separators(tmp_pa
     archived = store.archive_variant(project.slug, r"scenes\frame.png")
     assert archived.read_bytes() == b"frame"
     assert not source.exists()
+
+
+def test_archive_final_render_keeps_live_final_and_uses_history_names(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    project = make_project()
+    root = store.create_project(project)
+    final = root / "renders" / "final.mp4"
+    final.write_bytes(b"final render bytes")
+
+    archived = store.archive_final_render(project.slug, "renders/final.mp4")
+
+    # The superseded export is copied into renders/history/ with the portable
+    # timestamped name; the live final.mp4 stays in place (a new render will
+    # replace it atomically).
+    assert archived.parent == (root / "renders" / "history").resolve()
+    assert re.fullmatch(r"final-\d{8}T\d{6}-[0-9a-f]{8}\.mp4", archived.name)
+    assert archived.read_bytes() == b"final render bytes"
+    assert final.is_file()
+    # The generic variant archive is left untouched by final-render history.
+    assert list((root / "variants" / "archive").iterdir()) == []
+
+    # A missing source is rejected like any other archive input.
+    with pytest.raises(ValueError, match="existing file"):
+        store.archive_final_render(project.slug, "renders/never-there.mp4")
 
 
 def test_copied_project_resolves_media_under_its_new_root(tmp_path: Path) -> None:

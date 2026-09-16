@@ -1980,6 +1980,34 @@ def create_app(
         )
         return job.model_dump(mode="json")
 
+    @application.get("/api/projects/{project_id}/render-history")
+    def get_render_history(project_id: str) -> dict[str, Any]:
+        """List the project's superseded final renders, newest first.
+
+        Each re-render preserves the previous ``renders/final.mp4`` in
+        ``renders/history/``; those preserved exports are the entries here.
+        The live final render is not part of the history.
+        """
+        try:
+            return service.render_history(project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @application.delete("/api/projects/{project_id}/render-history/{asset_id}")
+    def delete_render_history_entry(project_id: str, asset_id: str) -> dict[str, Any]:
+        """Delete one superseded final render (its history file and index row).
+
+        Only ``final_render_history`` entries are deletable; the current
+        final video (``final_render``) is protected with 409. 404 for an
+        unknown project or entry.
+        """
+        try:
+            return service.delete_render_history_entry(project_id, asset_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
     @application.post(
         "/api/projects/{project_id}/render/stages/{stage}",
         status_code=status.HTTP_202_ACCEPTED,

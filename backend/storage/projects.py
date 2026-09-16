@@ -37,8 +37,9 @@ def slugify(value: str) -> str:
 class ProjectStore:
     DIRECTORY_NAMES = (
         "script", "references", "narration", "music", "scenes", "subtitles",
-        "thumbnails", "renders", "variants/archive", "voices", "audio/qwen",
-        "audio/step", "audio/chatterbox", "benchmark", "editorial/compositions",
+        "thumbnails", "renders", "renders/history", "variants/archive",
+        "voices", "audio/qwen", "audio/step", "audio/chatterbox", "benchmark",
+        "editorial/compositions",
     )
 
     def __init__(self, root: str | Path):
@@ -331,6 +332,24 @@ class ProjectStore:
         source = self._archive_source(project_dir, relative_path)
         destination = resolve_project_path(
             project_dir, f"variants/archive/{self._archive_name(source)}",
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return destination
+
+    def archive_final_render(self, slug: str, relative_path: str | Path) -> Path:
+        """Preserve a superseded final render in the project's render history.
+
+        Final exports keep their own human-readable history under
+        ``renders/history/`` (separate from the generic variant archive) so
+        past renders are easy to find, compare, and clean up. The live
+        ``renders/final.mp4`` is left in place until the new render replaces
+        it, mirroring :meth:`copy_to_archive`.
+        """
+        project_dir = self.project_path(slug).resolve()
+        source = self._archive_source(project_dir, relative_path)
+        destination = resolve_project_path(
+            project_dir, f"renders/history/{self._archive_name(source)}",
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)

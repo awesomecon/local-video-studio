@@ -176,6 +176,7 @@ import {
   renderStageLabel,
   stageRerunLabel,
   stageRerunMessage,
+  renderHistoryEntry,
 } from "../../js/pages/export.js";
 import {
   renderTimeline,
@@ -919,9 +920,11 @@ await recordAsync("editorial-provenance: rendering plan states performs no netwo
 
 /* --- 9. Export screen mode presentation ---------------------------------- */
 
-// The Export screen fetches exactly two things (project snapshot + thumbnail
-// studio state); the stub answers only those, and any other call fails loudly.
+// The Export screen fetches exactly three things (project snapshot +
+// thumbnail studio state + render history); the stubs answer only those,
+// and any other call fails loudly.
 const THUMBNAILS_EMPTY = { plan: {}, candidates: [], selection: null, legacy_frames: [], jobs: [] };
+const RENDER_HISTORY_EMPTY = { project_id: null, renders: [] };
 
 const CLASSIC_EXPORT_PROJECT = { ...LEGACY_PROJECT, id: "proj-xc", video_mode: "classic" };
 const LEGACY_EXPORT_PROJECT = { ...LEGACY_PROJECT, id: "proj-xl" }; // video_mode omitted
@@ -948,10 +951,14 @@ function exportSnapshot(project, editorial, { stages = {}, scenes = [], assets =
   return snap;
 }
 
-async function renderExportScreen(projectId, snap) {
+async function renderExportScreen(projectId, snap, history = RENDER_HISTORY_EMPTY) {
   const calls = stubFetch((call) => {
     if (call.method === "GET" && call.url === `/api/projects/${projectId}`) return { payload: snap };
     if (call.method === "GET" && call.url === `/api/projects/${projectId}/thumbnails`) return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}/render-history`) return { payload: history };
+    if (call.method === "DELETE" && call.url.startsWith(`/api/projects/${projectId}/render-history/`)) {
+      return { payload: { deleted: true, asset_id: call.url.split("/").pop(), filepath: "", removed_file: true } };
+    }
     return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
   });
   state.config = { apiBase: "", mediaBase: null };
@@ -1035,6 +1042,50 @@ record("export: editorialPlanSummary degrades missing and malformed metadata", (
     "classic summary unchanged");
 });
 
+record("export: renderHistoryEntry formats a complete history entry", () => {
+  const view = renderHistoryEntry({
+    id: "asset-1",
+    filepath: "renders/history/final-20260916T103000-ab12cd34.mp4",
+    filename: "final-20260916T103000-ab12cd34.mp4",
+    created_at: "2026-09-16T10:30:00.123456+00:00",
+    hash: "abc123",
+    size_bytes: 2_500_000,
+    available: true,
+    url: "/api/projects/proj-1/assets/asset-1/file",
+  });
+  eq(view.name, "final-20260916T103000-ab12cd34.mp4");
+  assert(typeof view.when === "string" && view.when.length > 0 && view.when !== "—",
+    "a valid ISO timestamp formats to a readable date");
+  eq(view.size, "2.4 MiB");
+  eq(view.downloadUrl, "/api/projects/proj-1/assets/asset-1/file?download=true");
+});
+
+record("export: renderHistoryEntry degrades missing and malformed fields", () => {
+  // No entry at all: placeholders, no download link.
+  for (const bad of [undefined, null, "corrupt", 42, ["entry"], {}]) {
+    const view = renderHistoryEntry(bad);
+    eq(view.name, "final render", `name degrades for ${JSON.stringify(bad)}`);
+    eq(view.when, "—", "date degrades");
+    eq(view.size, "—", "size degrades");
+    eq(view.downloadUrl, null, "no download link without a local URL");
+  }
+  // Only a project-scoped local URL becomes a download link.
+  eq(renderHistoryEntry({ url: "ftp://remote-cdn/final.mp4" }).downloadUrl, null,
+    "non-local URLs are never rendered as local links");
+  eq(renderHistoryEntry({ url: "/api/jobs/1/file" }).downloadUrl, null,
+    "non-project API paths are not trusted");
+  eq(renderHistoryEntry({ url: null }).downloadUrl, null, "null URL degrades");
+  // Malformed sizes degrade; zero is a valid (if odd) size.
+  eq(renderHistoryEntry({ size_bytes: "2 MiB" }).size, "—", "string size degrades");
+  eq(renderHistoryEntry({ size_bytes: -5 }).size, "—", "negative size degrades");
+  eq(renderHistoryEntry({ size_bytes: NaN }).size, "—", "NaN size degrades");
+  eq(renderHistoryEntry({ size_bytes: 0 }).size, "0 B");
+  eq(renderHistoryEntry({ size_bytes: 1023 }).size, "1023 B");
+  eq(renderHistoryEntry({ size_bytes: 1024 }).size, "1.0 KiB");
+  eq(renderHistoryEntry({ size_bytes: 5 * 1024 * 1024 }).size, "5.0 MiB");
+  eq(renderHistoryEntry({ size_bytes: 1_200_000_000 }).size, "1.1 GiB");
+});
+
 record("export: editorial_visual stage gets a readable label", () => {
   eq(renderStageLabel("editorial_visual"), "Rendering Editorial canvas");
   eq(renderStageLabel("timeline"), "Building timeline", "classic stages unchanged");
@@ -1065,8 +1116,8 @@ await recordAsync("export: classic screen keeps the unchanged presentation", asy
     "Final render: Pending", "Thumbnails: Pending",
   ], "no editorial canvas chip on classic screens");
   eq(calls.map((c) => `${c.method} ${c.url}`),
-    ["GET /api/projects/proj-xc", "GET /api/projects/proj-xc/thumbnails"],
-    "only the snapshot and thumbnail fetches");
+    ["GET /api/projects/proj-xc", "GET /api/projects/proj-xc/thumbnails", "GET /api/projects/proj-xc/render-history"],
+    "only the snapshot, thumbnail, and history fetches");
 });
 
 await recordAsync("export: legacy project (omitted video_mode) keeps the classic presentation", async () => {
@@ -1101,7 +1152,7 @@ await recordAsync("export: editorial screen shows the additive workflow (current
     "Quality check: Pending", "Final render: Pending", "Thumbnails: Pending",
   ], "editorial canvas chip leads the stage row");
   eq(calls.map((c) => `${c.method} ${c.url}`),
-    ["GET /api/projects/proj-xe", "GET /api/projects/proj-xe/thumbnails"],
+    ["GET /api/projects/proj-xe", "GET /api/projects/proj-xe/thumbnails", "GET /api/projects/proj-xe/render-history"],
     "the page renders from the existing snapshot only (no Edit Plan fetch)");
 });
 
@@ -1186,6 +1237,7 @@ await recordAsync("export: editorial force-render confirmation explains the addi
   const calls = stubFetch((call) => {
     if (call.method === "GET" && call.url === "/api/projects/proj-xe") return { payload: snap };
     if (call.method === "GET" && call.url === "/api/projects/proj-xe/thumbnails") return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "GET" && call.url === "/api/projects/proj-xe/render-history") return { payload: RENDER_HISTORY_EMPTY };
     if (call.method === "POST" && call.url === "/api/projects/proj-xe/render") {
       return { payload: {
         id: "job-xe2", project_id: "proj-xe", scene_id: null, stage: "render", backend: "ffmpeg",
@@ -1230,6 +1282,7 @@ await recordAsync("export: classic force-render confirmation is unchanged", asyn
   const calls = stubFetch((call) => {
     if (call.method === "GET" && call.url === "/api/projects/proj-xc") return { payload: snap };
     if (call.method === "GET" && call.url === "/api/projects/proj-xc/thumbnails") return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "GET" && call.url === "/api/projects/proj-xc/render-history") return { payload: RENDER_HISTORY_EMPTY };
     return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
   });
   state.config = { apiBase: "", mediaBase: null };
@@ -1253,6 +1306,119 @@ await recordAsync("export: classic force-render confirmation is unchanged", asyn
   await flush();
   eq(calls.filter((c) => c.method === "POST").length, 0, "canceling issues no render request");
   closeModals();
+});
+
+/* --- 9c. Export render history -------------------------------------------- */
+
+const HISTORY_ENTRIES = [
+  {
+    id: "as-h2",
+    filepath: "renders/history/final-20260102T000000-abcd1234.mp4",
+    filename: "final-20260102T000000-abcd1234.mp4",
+    created_at: "2026-01-02T00:00:00Z",
+    hash: "abc",
+    size_bytes: 2_048_000,
+    available: true,
+    url: "/api/projects/proj-xc/assets/as-h2/file",
+  },
+  {
+    id: "as-h1",
+    filepath: "renders/history/final-20260101T000000-9876efab.mp4",
+    filename: "final-20260101T000000-9876efab.mp4",
+    created_at: "2026-01-01T00:00:00Z",
+    hash: "def",
+    size_bytes: null,
+    available: false,
+    url: null,
+  },
+];
+
+function finalOutputPanel(screen) {
+  const panel = [...screen.querySelectorAll(".panel")].find(
+    (p) => (p.querySelector(".panel-title")?.textContent || "") === "Final output",
+  );
+  assert(panel, "the final output panel rendered");
+  return panel;
+}
+
+await recordAsync("export: render history lists past renders with download and delete", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen } = await renderExportScreen(
+    CLASSIC_EXPORT_PROJECT.id, snap,
+    { project_id: CLASSIC_EXPORT_PROJECT.id, renders: HISTORY_ENTRIES },
+  );
+  const panel = finalOutputPanel(screen);
+  assert(panel.textContent.includes("Render history"), "history section present");
+  assert(panel.textContent.includes("2 past renders"), "count shown");
+  assert(panel.textContent.includes(HISTORY_ENTRIES[0].filename), "newest entry named");
+  assert(panel.textContent.includes(HISTORY_ENTRIES[1].filename), "older entry named");
+  const download = panel.querySelector('a.btn[href="/api/projects/proj-xc/assets/as-h2/file?download=true"]');
+  assert(download && download.textContent === "Download", "available entry gets a local download link");
+  assert(!panel.querySelector('a[href*="/api/projects/proj-xc/assets/as-h1/"]'),
+    "the missing entry gets no link");
+  assert(panel.textContent.includes("file missing"), "the missing entry is labeled");
+  const deleteButtons = [...panel.querySelectorAll("button")]
+    .filter((b) => b.textContent === "Delete" && b.classList.contains("btn-danger"));
+  eq(deleteButtons.length, 2, "every history entry is deletable");
+});
+
+await recordAsync("export: deleting a past render confirms, then issues one DELETE", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen, calls } = await renderExportScreen(
+    CLASSIC_EXPORT_PROJECT.id, snap,
+    { project_id: CLASSIC_EXPORT_PROJECT.id, renders: [HISTORY_ENTRIES[0]] },
+  );
+  const panel = finalOutputPanel(screen);
+  const deleteBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Delete");
+  assert(deleteBtn, "delete action present");
+  deleteBtn.click();
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation dialog opened");
+  eq(modal.querySelector(".modal-head h2").textContent, "Delete this past render?");
+  assert(modal.querySelector(".modal-body").textContent.includes(HISTORY_ENTRIES[0].filename),
+    "names the preserved file");
+  assert(modal.querySelector(".modal-body").textContent.includes("current final video is not affected"),
+    "scopes the deletion");
+  const confirmBtn = [...modal.querySelectorAll(".modal-foot button")]
+    .find((b) => b.textContent === "Delete render");
+  assert(confirmBtn, "confirm action present");
+  confirmBtn.click();
+  await flush();
+  const deletes = calls.filter((c) => c.method === "DELETE");
+  eq(deletes.length, 1, "one DELETE after confirmation");
+  eq(deletes[0].url, "/api/projects/proj-xc/render-history/as-h2", "targets the history entry");
+  closeModals();
+});
+
+await recordAsync("export: canceling the history deletion issues no DELETE", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen, calls } = await renderExportScreen(
+    CLASSIC_EXPORT_PROJECT.id, snap,
+    { project_id: CLASSIC_EXPORT_PROJECT.id, renders: [HISTORY_ENTRIES[0]] },
+  );
+  const deleteBtn = [...finalOutputPanel(screen).querySelectorAll("button")]
+    .find((b) => b.textContent === "Delete");
+  deleteBtn.click();
+  await flush();
+  const modal = document.querySelector("dialog.modal");
+  assert(modal, "confirmation dialog opened");
+  const cancelBtn = [...modal.querySelectorAll(".modal-foot button")].find((b) => b.textContent === "Cancel");
+  assert(cancelBtn, "cancel action present");
+  cancelBtn.click();
+  await flush();
+  eq(calls.filter((c) => c.method === "DELETE").length, 0, "canceling issues no DELETE");
+  closeModals();
+});
+
+await recordAsync("export: empty history states that re-rendering preserves the previous MP4", async () => {
+  const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
+  const { screen } = await renderExportScreen(CLASSIC_EXPORT_PROJECT.id, snap);
+  const panel = finalOutputPanel(screen);
+  assert(panel.textContent.includes("Render history"), "history section present");
+  assert(panel.textContent.includes("No past renders yet"), "empty state explains the feature");
+  eq([...panel.querySelectorAll("button")].filter((b) => b.textContent === "Delete").length, 0,
+    "nothing to delete");
 });
 
 // Leave shared app state the way later screens expect it.
@@ -1284,6 +1450,7 @@ async function renderRerunControls(projectId, snap) {
   const calls = stubFetch((call) => {
     if (call.method === "GET" && call.url === `/api/projects/${projectId}`) return { payload: snap };
     if (call.method === "GET" && call.url === `/api/projects/${projectId}/thumbnails`) return { payload: THUMBNAILS_EMPTY };
+    if (call.method === "GET" && call.url === `/api/projects/${projectId}/render-history`) return { payload: RENDER_HISTORY_EMPTY };
     if (call.method === "POST" && /\/render\/stages\//.test(call.url)) {
       return { payload: {
         id: "job-rs", project_id: projectId, scene_id: null, stage: "render_stage", backend: "ffmpeg",

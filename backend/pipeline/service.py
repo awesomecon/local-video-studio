@@ -500,6 +500,80 @@ class PipelineService:
             snapshot["recovery"] = recovery
         return snapshot
 
+    def render_history(self, project_id: str) -> dict[str, Any]:
+        """List the project's superseded final renders, newest first.
+
+        Every time a re-render replaces ``renders/final.mp4``, the previous
+        export is preserved in ``renders/history/`` and recorded as a
+        ``final_render_history`` asset. Those preserved renders form the
+        history returned here; the live final render stays at
+        ``renders/final.mp4`` and is not part of it. Entries whose file no
+        longer exists on disk are still listed (``available`` is false) so a
+        stray record can be cleaned up instead of going stale forever.
+        """
+        project = self._project(project_id)
+        root = self.store.project_path(project)
+        entries: list[dict[str, Any]] = []
+        for asset in self.database.list_assets(project_id):
+            if asset.settings.get("role") != "final_render_history":
+                continue
+            try:
+                path = resolve_asset_path(root, asset.filepath)
+            except ValueError:
+                path = None
+            available = path is not None and path.is_file()
+            entries.append({
+                "id": asset.id,
+                "filepath": Path(asset.filepath).as_posix(),
+                "filename": Path(asset.filepath).name,
+                "created_at": asset.created_at.isoformat(),
+                "hash": asset.hash,
+                "size_bytes": path.stat().st_size if available else None,
+                "available": available,
+                "url": (
+                    f"/api/projects/{project.id}/assets/{asset.id}/file"
+                    if available else None
+                ),
+            })
+        entries.sort(
+            key=lambda entry: (entry["created_at"], entry["id"]), reverse=True,
+        )
+        return {"project_id": project.id, "renders": entries}
+
+    def delete_render_history_entry(self, project_id: str, asset_id: str) -> dict[str, Any]:
+        """Delete one superseded final render (its history file and index row).
+
+        Only ``final_render_history`` entries are deletable. The live
+        ``renders/final.mp4`` and its ``final_render`` asset record are never
+        touched by this operation; replace the current export by re-rendering
+        instead.
+        """
+        project = self._project(project_id)
+        asset = self.database.get_asset(asset_id)
+        if asset is None or asset.project_id != project.id:
+            raise KeyError(f"render history entry not found: {asset_id}")
+        if asset.settings.get("role") != "final_render_history":
+            raise ValueError(
+                "only superseded final renders can be deleted from the history; "
+                "the current final video is protected"
+            )
+        removed_file = False
+        root = self.store.project_path(project)
+        try:
+            path = resolve_asset_path(root, asset.filepath)
+        except ValueError:
+            path = None
+        if path is not None and path.is_file():
+            path.unlink()
+            removed_file = True
+        self.database.delete_asset(asset.id)
+        return {
+            "deleted": True,
+            "asset_id": asset.id,
+            "filepath": Path(asset.filepath).as_posix(),
+            "removed_file": removed_file,
+        }
+
     def save_edit_plan(self, project_id: str, plan: EditPlan) -> EditPlan:
         """Validate project ownership/mode and atomically publish an edit plan."""
         with self._lock:
@@ -1955,12 +2029,20 @@ class PipelineService:
                         # scene.json files so a planned project is not reported
                         # with zero scenes.
                         scene_result = self._reindex_scenes_from_disk(disk)
+                        history_result = self._reindex_render_history_from_disk(disk)
                         if scene_result["total"] > 0 and scene_result["failed"] > 0:
                             recovery.append({
                                 "type": "partial_recovery",
                                 "slug": disk.slug,
                                 "project_id": disk.id,
                                 "detail": f"recovered {scene_result['succeeded']} of {scene_result['total']} scenes; {scene_result['failed']} failed",
+                            })
+                        if history_result["failed"] > 0:
+                            recovery.append({
+                                "type": "partial_recovery",
+                                "slug": disk.slug,
+                                "project_id": disk.id,
+                                "detail": f"recovered {history_result['succeeded']} of {history_result['total']} render-history entries; {history_result['failed']} failed",
                             })
                     except Exception:
                         recovery.append({
@@ -2028,6 +2110,7 @@ class PipelineService:
                 return None, []
             recovery: list[dict[str, Any]] = []
             scene_result = self._reindex_scenes_from_disk(disk)
+            history_result = self._reindex_render_history_from_disk(disk)
             if scene_result["failed"] > 0:
                 recovery.append({
                     "type": "partial_recovery",
@@ -2036,6 +2119,17 @@ class PipelineService:
                     "detail": (
                         f"recovered {scene_result['succeeded']} of "
                         f"{scene_result['total']} scenes; {scene_result['failed']} failed"
+                    ),
+                })
+            if history_result["failed"] > 0:
+                recovery.append({
+                    "type": "partial_recovery",
+                    "slug": disk.slug,
+                    "project_id": disk.id,
+                    "detail": (
+                        f"recovered {history_result['succeeded']} of "
+                        f"{history_result['total']} render-history entries; "
+                        f"{history_result['failed']} failed"
                     ),
                 })
             return disk, recovery
@@ -2091,6 +2185,40 @@ class PipelineService:
             for stale in self.database.list_shots(project.id, scene.id):
                 if stale.id not in known_ids:
                     self.database.delete_shot(stale.id)
+        return result
+
+    def _reindex_render_history_from_disk(self, project: Project) -> dict[str, int]:
+        """Rebuild final-render history assets from the portable media directory."""
+        result = {"total": 0, "succeeded": 0, "failed": 0}
+        root = self.store.project_path(project)
+        directory = root / "renders" / "history"
+        if not directory.is_dir():
+            return result
+        known = {
+            Path(asset.filepath).as_posix()
+            for asset in self.database.list_assets(project.id)
+            if asset.settings.get("role") == "final_render_history"
+        }
+        for entry in sorted(directory.iterdir()):
+            if entry.is_symlink() or not entry.is_file() or entry.suffix.lower() != ".mp4":
+                continue
+            relative = entry.relative_to(root).as_posix()
+            if relative in known:
+                continue
+            result["total"] += 1
+            try:
+                resolved = resolve_asset_path(root, relative)
+                self._record_render_asset(
+                    project,
+                    resolved,
+                    role="final_render_history",
+                    record_attempt=False,
+                )
+            except Exception:
+                result["failed"] += 1
+                continue
+            known.add(relative)
+            result["succeeded"] += 1
         return result
 
     def update_project(self, project_id: str, changes: dict[str, Any]) -> tuple[Project, set[str]]:
@@ -9674,19 +9802,48 @@ class PipelineService:
 
         def operation() -> tuple[Path, list[Path]]:
             timeline = self._build_timeline(project)
+            history_path: Path | None = None
             if output.is_file():
-                self.store.copy_to_archive(project.slug, output.relative_to(self.store.project_path(project)))
-            info = self.renderer.render_final(
-                timeline,
-                output,
-                RenderOptions(
-                    width=project.resolution[0],
-                    height=project.resolution[1],
-                    fps=project.fps,
-                    burn_subtitles=True,
-                    embed_subtitle_track=True,
-                ),
-            )
+                # Stage the previous publication before FFmpeg atomically
+                # replaces it. It becomes history only if replacement succeeds.
+                history_path = self.store.archive_final_render(
+                    project.slug,
+                    output.relative_to(self.store.project_path(project)),
+                )
+            try:
+                info = self.renderer.render_final(
+                    timeline,
+                    output,
+                    RenderOptions(
+                        width=project.resolution[0],
+                        height=project.resolution[1],
+                        fps=project.fps,
+                        burn_subtitles=True,
+                        embed_subtitle_track=True,
+                    ),
+                )
+            except Exception:
+                if history_path is not None:
+                    try:
+                        publication_unchanged = (
+                            output.is_file()
+                            and compute_sha256(output) == compute_sha256(history_path)
+                        )
+                    except OSError:
+                        publication_unchanged = False
+                    if publication_unchanged:
+                        history_path.unlink(missing_ok=True)
+                    else:
+                        # Publication happened before a later validation failed;
+                        # retain the only copy of the superseded final.
+                        self._record_render_asset(
+                            project, history_path, role="final_render_history",
+                        )
+                raise
+            if history_path is not None:
+                self._record_render_asset(
+                    project, history_path, role="final_render_history",
+                )
             self.database.record_render_metadata(
                 project.id, output.relative_to(self.store.project_path(project)).as_posix(),
                 self._jsonable(asdict(info)), utc_now(),
@@ -10131,7 +10288,14 @@ class PipelineService:
             )
         return asset
 
-    def _record_render_asset(self, project: Project, output: Path, *, role: str) -> Asset:
+    def _record_render_asset(
+        self,
+        project: Project,
+        output: Path,
+        *,
+        role: str,
+        record_attempt: bool = True,
+    ) -> Asset:
         result = GenerationResult(
             outputs=(output,),
             metadata={
@@ -10151,6 +10315,7 @@ class PipelineService:
             AssetType.VIDEO,
             result,
             role=role,
+            record_attempt=record_attempt,
         )
 
     def _execute_stage(
