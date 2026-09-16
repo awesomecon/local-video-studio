@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from backend.captions import (
@@ -135,6 +136,12 @@ def test_completed_mock_subtitles_keep_deterministic_fallback(tmp_path: Path) ->
         "outputs"
     ]
     assert outputs == ["subtitles/captions.srt", "subtitles/captions.ass"]
+    assets = [
+        asset for asset in service.database.list_assets(project.id)
+        if asset.settings.get("role") == "captions"
+    ]
+    assert len(assets) == 2
+    assert len({asset.settings.get("caption_generation_id") for asset in assets}) == 1
 
 
 def test_real_alignment_uses_word_timings_and_records_audio_hash(tmp_path: Path) -> None:
@@ -279,6 +286,20 @@ def test_second_alignment_run_archives_and_repoints_superseded_assets(tmp_path: 
     service.registry.register(FakeWhisper(), name="whisper", replace=True)
 
     service._ensure_subtitles(project, force=False)  # first generation
+    first_assets = service.database.list_assets(project.id)
+    first_srt = next(
+        asset for asset in first_assets
+        if asset.settings.get("role") == "captions" and asset.filepath.suffix == ".srt"
+    )
+    service.database.save_asset(first_srt.model_copy(update={
+        "id": "legacy-stale-srt",
+        "hash": "0" * 64,
+        "created_at": first_srt.created_at - timedelta(seconds=1),
+        "settings": {
+            key: value for key, value in first_srt.settings.items()
+            if key != "caption_generation_id"
+        },
+    }))
     service._ensure_subtitles(project, force=True)   # second generation archives the first
 
     root = service.store.project_path(project)
@@ -293,6 +314,7 @@ def test_second_alignment_run_archives_and_repoints_superseded_assets(tmp_path: 
             asset for asset in records
             if asset.filepath.as_posix().startswith("variants/archive/")
             and asset.filepath.as_posix().endswith(suffix)
+            and asset.settings.get("archive_available") is not False
         ]
         assert len(live) == 1, f"exactly one live {live_path} record: {[a.filepath for a in records]}"
         assert len(archived) == 1, f"exactly one superseded {live_path} record: {[a.filepath for a in records]}"
@@ -303,3 +325,25 @@ def test_second_alignment_run_archives_and_repoints_superseded_assets(tmp_path: 
     assert_archived_pair("captions", "subtitles/captions.srt")
     assert_archived_pair("captions", "subtitles/captions.ass")
     assert_archived_pair("caption_timing", "subtitles/word-timings.json")
+    stale = service.database.get_asset("legacy-stale-srt")
+    assert stale is not None
+    assert stale.settings.get("archive_available") is False
+    assert stale.settings.get("archived_at")
+    assert stale.filepath.as_posix().startswith("variants/archive/unavailable-")
+    assert not (root / stale.filepath).exists()
+
+    generations = {
+        asset.settings.get("caption_generation_id")
+        for asset in assets
+        if asset.settings.get("caption_generation_id")
+    }
+    assert len(generations) == 2
+    for generation_id in generations:
+        generation = [
+            asset for asset in assets
+            if asset.settings.get("caption_generation_id") == generation_id
+        ]
+        assert len(generation) == 3
+        assert {asset.settings.get("input_audio_sha256") for asset in generation} == {
+            next(iter(generation)).settings.get("input_audio_sha256")
+        }

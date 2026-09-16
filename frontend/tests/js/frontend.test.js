@@ -154,7 +154,7 @@ import {
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { performancePanel } from "../../js/pages/voice.js";
-import { groupCaptionGenerations } from "../../js/pages/captions.js";
+import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
 import {
   effectiveVideoMode,
@@ -3323,7 +3323,7 @@ const captionAsset = (id, kind, sha, created, extra = {}) => ({
   }, extra),
 });
 
-record("caption-generations: files of one run group under the audio fingerprint", () => {
+record("caption-generations: legacy files group by audio fingerprint and ordered file set", () => {
   const { current, history } = groupCaptionGenerations(
     [
       captionAsset("a-srt", "srt", "sha-a", "2026-09-01T10:00:00+00:00"),
@@ -3337,12 +3337,32 @@ record("caption-generations: files of one run group under the audio fingerprint"
     ],
   );
   eq(history.length, 1, "the older run is history");
-  eq(current.key, "sha-b", "the fingerprint keys the generation");
+  eq(current.key, "legacy:sha-b:0", "the fingerprint scopes the legacy generation");
   eq(current.srt && current.srt.id, "b-srt", "the run's SRT");
   eq(current.ass && current.ass.id, "b-ass", "the run's ASS");
   eq(current.timings && current.timings.id, "b-wt", "the run's word timings");
   eq(current.audioSha256, "sha-b", "the run keeps the audio fingerprint");
   eq(current.take, null, "no take is attached without narration-take assets");
+});
+
+record("caption-generations: persisted run ids separate reruns of identical audio", () => {
+  const first = { caption_generation_id: "run-a" };
+  const second = { caption_generation_id: "run-b" };
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("a-srt", "srt", "same-sha", "2026-09-01T10:00:00+00:00", first),
+      captionAsset("a-ass", "ass", "same-sha", "2026-09-01T10:00:01+00:00", first),
+      captionAsset("b-srt", "srt", "same-sha", "2026-09-03T09:00:00+00:00", second),
+      captionAsset("b-ass", "ass", "same-sha", "2026-09-03T09:00:01+00:00", second),
+    ],
+    [
+      captionAsset("a-wt", "timings", "same-sha", "2026-09-01T10:00:02+00:00", first),
+      captionAsset("b-wt", "timings", "same-sha", "2026-09-03T09:00:02+00:00", second),
+    ],
+  );
+  eq(current.key, "generation:run-b", "the live rerun stays distinct");
+  eq(history.map((generation) => generation.key), ["generation:run-a"]);
+  eq(history[0].timings && history[0].timings.id, "a-wt");
 });
 
 record("caption-generations: the newest run is current, history is newest first", () => {
@@ -3354,8 +3374,9 @@ record("caption-generations: the newest run is current, history is newest first"
     ],
     [],
   );
-  eq(current.key, "sha-c", "newest run is current");
-  eq(history.map((g) => g.key), ["sha-b", "sha-a"], "history is newest first");
+  eq(current.key, "legacy:sha-c:0", "newest run is current");
+  eq(history.map((g) => g.key), ["legacy:sha-b:0", "legacy:sha-a:0"],
+    "history is newest first");
 });
 
 record("caption-generations: the narration take is matched by hash and labelled by provider", () => {
@@ -3373,18 +3394,37 @@ record("caption-generations: the narration take is matched by hash and labelled 
   eq(current.take.createdAt, "2026-09-02T12:00:00+00:00", "the take's created date is kept");
 });
 
-record("caption-generations: un-fingerprinted (mock) assets each stand alone", () => {
+record("caption-generations: un-fingerprinted mock files form one run", () => {
   const { current, history } = groupCaptionGenerations(
     [
       captionAsset("m-srt", "srt", null, "2026-09-01T10:00:00+00:00"),
-      captionAsset("m-ass", "ass", null, "2026-09-02T10:00:00+00:00"),
+      captionAsset("m-ass", "ass", null, "2026-09-01T10:00:01+00:00"),
     ],
     [],
   );
-  eq(current.key, "asset:m-ass", "each mock asset is its own generation");
-  eq(history.length, 1, "the other mock asset is history");
+  eq(current.srt && current.srt.id, "m-srt", "the mock SRT is current");
+  eq(current.ass && current.ass.id, "m-ass", "the matching mock ASS is current");
+  eq(history.length, 0, "one mock run does not invent history");
   eq(current.audioSha256, null, "no fingerprint is invented");
   eq(current.take, null, "no take can be matched without a fingerprint");
+});
+
+record("caption-generations: legacy repeated file kinds start another run", () => {
+  const { current, history } = groupCaptionGenerations(
+    [
+      captionAsset("old-srt", "srt", "same-sha", "2026-09-01T10:00:00+00:00",
+        { archived_at: "2026-09-02T10:00:00+00:00" }),
+      captionAsset("old-ass", "ass", "same-sha", "2026-09-01T10:00:01+00:00",
+        { archived_at: "2026-09-02T10:00:00+00:00" }),
+      captionAsset("new-srt", "srt", "same-sha", "2026-09-02T10:00:01+00:00"),
+      captionAsset("new-ass", "ass", "same-sha", "2026-09-02T10:00:02+00:00"),
+    ],
+    [],
+  );
+  eq(current.srt && current.srt.id, "new-srt");
+  eq(current.ass && current.ass.id, "new-ass");
+  eq(history.length, 1, "the older same-audio run remains history");
+  eq(history[0].srt && history[0].srt.id, "old-srt");
 });
 
 record("caption-generations: empty input yields no current and no history", () => {
@@ -3404,6 +3444,22 @@ record("caption-generations: archived records flag the generation", () => {
   );
   eq(current.archived, false, "the current run is live");
   eq(history[0].archived, true, "the superseded run is marked archived");
+});
+
+record("caption-generations: only verified archives expose historical links", () => {
+  const live = captionAsset("live", "srt", "sha", "2026-09-03T09:00:00+00:00");
+  live.url = "/assets/live";
+  const archived = captionAsset("archived", "srt", "sha", "2026-09-01T09:00:00+00:00",
+    { archived_at: "2026-09-03T09:00:00+00:00", archive_available: true });
+  archived.url = "/assets/archived";
+  const unavailable = captionAsset("missing", "srt", "sha", "2026-08-01T09:00:00+00:00",
+    { archived_at: "2026-09-03T09:00:00+00:00", archive_available: false });
+  unavailable.url = "/assets/missing";
+
+  eq(captionAssetOpenable(live), true, "the current live asset opens");
+  eq(captionAssetOpenable(live, true), false, "a legacy historical live path stays closed");
+  eq(captionAssetOpenable(archived, true), true, "a verified archive opens");
+  eq(captionAssetOpenable(unavailable, true), false, "an unavailable archive stays closed");
 });
 
 /* --- report -------------------------------------------------------------- */

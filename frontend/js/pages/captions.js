@@ -9,10 +9,10 @@
  *  - Every alignment run rewrites the same live files and archives the
  *    previous run's (the superseded asset records are re-pointed at the
  *    archive files with settings.archived_at), so each run leaves a
- *    fingerprint: settings.input_audio_sha256, the hash of the narration
- *    audio the run aligned against. The screen groups the assets into those
- *    runs — "generations" — and shows the most recent one (the files a render
- *    consumes) as the current captions plus a collapsed history. Each run is
+ *    stable settings.caption_generation_id shared by every output. The screen
+ *    groups the assets into those runs — "generations" — and shows the live
+ *    one (the files a render consumes) as the current captions plus a
+ *    collapsed history. Each run is
  *    labelled with the narration take it was aligned against (matched by the
  *    take asset's hash) so it is clear which captions belong to which voice.
  *  - The "Alignment model" panel shows the configured caption-alignment model
@@ -223,12 +223,11 @@ function buildAlignment(info) {
  * Group caption assets into alignment runs ("generations").
  *
  * One run writes SRT + ASS (and, in a real render, word timings) against the
- * same live paths and archives the previous run's files; every asset of a run
- * records the fingerprint of the narration audio it aligned against
- * (settings.input_audio_sha256), which is the run's identity. Assets without
- * a fingerprint (mock timings) each form their own generation. The most
- * recent generation is the current one — its files are the live caption
- * files a render consumes — the rest are history, newest first.
+ * same live paths and archives the previous run's files. New assets carry a
+ * shared settings.caption_generation_id. Legacy records are reconstructed in
+ * creation order, starting another run whenever a file kind repeats, so
+ * repeated alignments against identical narration remain separate. The live
+ * generation is current and the rest are history, newest first.
  *
  * @param {import("../api.js").Asset[]} captions — role "captions" (SRT/ASS)
  * @param {import("../api.js").Asset[]} timings — role "caption_timing"
@@ -243,12 +242,32 @@ export function groupCaptionGenerations(captions, timings, narrationTakes = []) 
     narrationTakes
       .filter((take) => typeof take.hash === "string" && take.hash)
       .map((take) => [take.hash, take]));
+  /** @type {Map<string, CaptionGeneration[]>} */
+  const legacyBySource = new Map();
   const place = (asset) => {
     const settings = asset.settings || {};
     const sha = typeof settings.input_audio_sha256 === "string" && settings.input_audio_sha256
       ? settings.input_audio_sha256
       : null;
-    const key = sha || `asset:${asset.id}`;
+    const persistedId = typeof settings.caption_generation_id === "string"
+      && settings.caption_generation_id ? settings.caption_generation_id : null;
+    const kind = settings.role === "caption_timing" ? "timings"
+      : (asset.filepath || "").toLowerCase().endsWith(".srt") ? "srt"
+      : (asset.filepath || "").toLowerCase().endsWith(".ass") ? "ass"
+      : null;
+    if (!kind) return;
+    const legacySource = sha || `mock:${settings.input_audio || "captions"}`;
+    const legacyRuns = legacyBySource.get(legacySource) || [];
+    let key = persistedId ? `generation:${persistedId}` : null;
+    if (!key) {
+      let legacy = legacyRuns.at(-1);
+      if (!legacy || legacy[kind]) {
+        key = `legacy:${legacySource}:${legacyRuns.length}`;
+        legacy = null;
+      } else {
+        key = legacy.key;
+      }
+    }
     let generation = byKey.get(key);
     if (!generation) {
       generation = {
@@ -261,6 +280,10 @@ export function groupCaptionGenerations(captions, timings, narrationTakes = []) 
         take: null,
       };
       byKey.set(key, generation);
+      if (!persistedId) {
+        legacyRuns.push(generation);
+        legacyBySource.set(legacySource, legacyRuns);
+      }
       if (sha) {
         const take = takeByHash.get(sha);
         generation.take = take
@@ -268,19 +291,18 @@ export function groupCaptionGenerations(captions, timings, narrationTakes = []) 
           : null;
       }
     }
-    const kind = settings.role === "caption_timing" ? "timings"
-      : (asset.filepath || "").toLowerCase().endsWith(".srt") ? "srt"
-      : (asset.filepath || "").toLowerCase().endsWith(".ass") ? "ass"
-      : null;
-    if (kind) generation[kind] = asset;
+    generation[kind] = asset;
     if ((asset.created_at || "") > generation.createdAt) generation.createdAt = asset.created_at || "";
     generation.archived = generation.archived || Boolean(settings.archived_at);
   };
-  for (const asset of [...captions, ...timings]) place(asset);
+  const assets = [...captions, ...timings];
+  assets.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  for (const asset of assets) place(asset);
   const generations = [...byKey.values()];
   generations.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  const [current, ...history] = generations;
-  return { current: current || null, history };
+  const current = generations.find((generation) => !generation.archived) || null;
+  const history = generations.filter((generation) => generation !== current);
+  return { current, history };
 }
 
 /**
@@ -368,6 +390,19 @@ function alignedToLine(generation) {
 }
 
 /**
+ * A current asset can use its live URL. A historical asset is openable only
+ * when the backend confirmed that its own bytes were archived; legacy rows
+ * that still point at a reused live path must not open a newer generation.
+ * @param {import("../api.js").Asset | null} asset
+ * @param {boolean} historical
+ * @returns {boolean}
+ */
+export function captionAssetOpenable(asset, historical = false) {
+  if (!asset?.url || asset.settings?.archive_available === false) return false;
+  return !historical || Boolean(asset.settings?.archived_at);
+}
+
+/**
  * One file row of a generation: kind tag, path, created, Open link.
  * @param {string} label — "SRT" | "ASS" | "Word timings"
  * @param {import("../api.js").Asset | null} asset
@@ -385,7 +420,7 @@ function captionFileRow(label, asset) {
     el("span", { class: "mono small" }, asset.filepath || "—"),
     el("span", { class: "muted small" }, asset.created_at ? fmtDate(asset.created_at) : ""),
     el("span", { class: "spacer" }),
-    asset.url
+    captionAssetOpenable(asset)
       ? el("a", { class: "btn btn-ghost btn-sm", href: asset.url, target: "_blank", rel: "noopener" }, `Open ${label}`)
       : el("span", { class: "muted small" }, "file not available"),
   );
@@ -437,9 +472,9 @@ function historyPanel(history) {
       el("span", { class: "spacer" }),
       ...files.map(([name, asset]) => !asset
         ? null
-        : asset.url
+        : captionAssetOpenable(asset, true)
           ? el("a", { class: "btn btn-ghost btn-sm", href: asset.url, target: "_blank", rel: "noopener" }, `Open ${name}`)
-          : el("span", { class: "muted small" }, `${name} archived`)),
+          : el("span", { class: "muted small" }, `${name} not available`)),
       );
   });
   return el("div", { class: "panel" },

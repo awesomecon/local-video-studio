@@ -7,8 +7,8 @@ Whisper alignment model visible on the Captions screen:
   - the screen fetches GET /api/captions/models and renders the model
     identity and readiness entirely from the response (no hardcoded model
     names, versions, or paths);
-  - caption assets are grouped into alignment generations (one per run, keyed
-    by the fingerprint of the narration audio they aligned against) and
+  - caption assets are grouped into alignment generations (one per persisted
+    run id, with an ordered compatibility fallback for legacy records) and
     rendered as a current generation plus collapsed history, each run
     labelled with the narration take it was aligned against;
   - the word-timings output (role "caption_timing") and its provenance are
@@ -85,7 +85,7 @@ def test_captions_can_be_aligned_directly_from_the_screen() -> None:
 def test_captions_screen_groups_assets_into_generations() -> None:
     source = _js("pages/captions.js")
     # One alignment run is one "generation": SRT + ASS + word timings keyed
-    # by the fingerprint of the narration audio they aligned against, so
+    # by their persisted caption generation id, so
     # the screen shows the current run plus labelled history instead of one
     # panel per asset.
     assert "export function groupCaptionGenerations(" in source
@@ -95,3 +95,5 @@ def test_captions_screen_groups_assets_into_generations() -> None:
     assert "Aligned to:" in source
     assert "previous generation" in source
     assert "settings.archived_at" in source
+    assert "settings.caption_generation_id" in source
+    assert "archive_available" in source
