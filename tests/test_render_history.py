@@ -18,6 +18,7 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.main import create_app
@@ -136,6 +137,81 @@ def test_history_is_newest_first_and_grows_with_re_renders(tmp_path: Path) -> No
     assert [entry["created_at"] for entry in entries] == sorted(
         (entry["created_at"] for entry in entries), reverse=True,
     )
+
+
+def test_failed_re_render_does_not_create_history_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app, client, service = _client(tmp_path)
+    project_id = _create_and_render(client, service)
+    project = service._project(project_id)  # type: ignore[union-attr]
+    root = service.store.project_path(project)  # type: ignore[union-attr]
+    final = root / "renders" / "final.mp4"
+    original_hash = _sha256(final)
+
+    def fail_render(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic final-render failure")
+
+    monkeypatch.setattr(service.renderer, "render_final", fail_render)  # type: ignore[union-attr]
+    with pytest.raises(RuntimeError, match="synthetic final-render failure"):
+        service._ensure_final(project, force=True)  # type: ignore[union-attr]
+
+    assert final.is_file() and _sha256(final) == original_hash
+    assert client.get(f"/api/projects/{project_id}/render-history").json()["renders"] == []
+    assert list((root / "renders" / "history").glob("*.mp4")) == []
+
+
+def test_failure_after_publication_keeps_superseded_final_in_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app, client, service = _client(tmp_path)
+    project_id = _create_and_render(client, service)
+    project = service._project(project_id)  # type: ignore[union-attr]
+    root = service.store.project_path(project)  # type: ignore[union-attr]
+    final = root / "renders" / "final.mp4"
+    original_hash = _sha256(final)
+
+    def publish_then_fail(*_args: object, **_kwargs: object) -> None:
+        final.write_bytes(b"replacement published before validation failed")
+        raise RuntimeError("synthetic post-publication failure")
+
+    monkeypatch.setattr(service.renderer, "render_final", publish_then_fail)  # type: ignore[union-attr]
+    with pytest.raises(RuntimeError, match="synthetic post-publication failure"):
+        service._ensure_final(project, force=True)  # type: ignore[union-attr]
+
+    history = client.get(f"/api/projects/{project_id}/render-history").json()["renders"]
+    assert len(history) == 1
+    assert history[0]["hash"] == original_hash
+    assert _sha256(root / history[0]["filepath"]) == original_hash
+    assert _sha256(final) != original_hash
+
+
+def test_history_is_reindexed_from_portable_project_after_database_recovery(
+    tmp_path: Path,
+) -> None:
+    _app, client, service = _client(tmp_path)
+    project_id = _create_and_render(client, service)
+    service.run_render(project_id, force=True)  # type: ignore[union-attr]
+    project = service._project(project_id)  # type: ignore[union-attr]
+    root = service.store.project_path(project)  # type: ignore[union-attr]
+    before = client.get(f"/api/projects/{project_id}/render-history").json()["renders"]
+    history_file = root / before[0]["filepath"]
+    history_hash = _sha256(history_file)
+
+    # Simulate rebuilding the disposable SQLite index from the portable tree.
+    with service.database.connection() as connection:  # type: ignore[union-attr]
+        connection.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    assert service.database.get_project(project_id) is None  # type: ignore[union-attr]
+    assert service.database.list_assets(project_id) == []  # type: ignore[union-attr]
+
+    response = client.get(f"/api/projects/{project_id}/render-history")
+    assert response.status_code == 200
+    recovered = response.json()["renders"]
+    assert len(recovered) == 1
+    assert recovered[0]["filepath"] == before[0]["filepath"]
+    assert recovered[0]["hash"] == history_hash
+    assert recovered[0]["available"] is True
+    assert history_file.is_file()
 
 
 def test_delete_render_history_entry_removes_file_and_record(tmp_path: Path) -> None:
