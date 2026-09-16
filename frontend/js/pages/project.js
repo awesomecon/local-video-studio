@@ -22,13 +22,16 @@
  *    ({ has_edit_plan, plan_status, stale, stale_reasons, edit_plan_url,
  *    generate_url, preview_url, settings_url, captions_enabled,
  *    editorial_text_enabled }); classic and legacy projects never see it.
- *    Optional provenance metadata degrades safely: a missing/malformed
- *    plan_status keeps the classic "Edit Plan available" presentation, a
- *    stale plan shows a warning naming the changed inputs (project /
- *    script / word_timings), and an untracked plan (which may predate
- *    provenance tracking) shows a neutral note. Both stale and untracked
- *    plans keep their Open Preview link, and displaying any plan state
- *    issues no requests. Without a plan the panel offers a
+ *    Once a plan exists the panel leads with a plain-English
+ *    export-readiness statement (editorialReadinessStatement() over the
+ *    shared editorialPlanState()): a current plan says the render is up to
+ *    date and Export can render it; a stale plan names the changed inputs
+ *    in plain words (project / script / word_timings) and says to
+ *    regenerate the plan; an untracked plan (which may predate provenance
+ *    tracking) and a missing/malformed plan_status (older backends) get a
+ *    neutral available note — no warning badge or banner in this panel.
+ *    Every plan state keeps its Open Preview link, and displaying any plan
+ *    state issues no requests. Without a plan the panel offers a
  *    "Generate Edit Plan" button (only when generate_url is a non-empty
  *    string) that POSTs exactly once with no body, shows a pending label,
  *    and refreshes the panel on success; failures restore the button and
@@ -111,7 +114,6 @@ import {
   toast,
   toastError,
   stageChip,
-  badge,
   emptyState,
 } from "../ui.js";
 import { navigate } from "../router.js";
@@ -726,6 +728,40 @@ export function editorialPlanState(editorial) {
   if (planStatus === "untracked") return { kind: "untracked", reasons: [] };
   if (planStatus === "current") return { kind: "current", reasons: [] };
   return { kind: "unknown", reasons: [] };
+}
+
+/**
+ * Plain-English export-readiness statement for the Editorial Preview panel,
+ * derived from editorialPlanState() — what the user can export right now,
+ * without warning jargon:
+ *   current   — the Edit Plan is up to date; Export can render it.
+ *   stale     — names the changed inputs in plain words (the readable
+ *               stale reasons, or a generic line when none are reported)
+ *               and says what to do (regenerate the Edit Plan).
+ *   untracked — available; freshness unverifiable (may predate tracking).
+ *   unknown   — available; the backend reported no usable plan_status.
+ * Malformed planState degrades to the unknown note rather than throwing.
+ *
+ * @param {{kind: "stale"|"untracked"|"current"|"unknown", reasons: string[]} | null} planState
+ * @returns {string}
+ */
+export function editorialReadinessStatement(planState) {
+  const kind = (planState && typeof planState.kind === "string") ? planState.kind : "unknown";
+  const reasons = (planState && Array.isArray(planState.reasons)) ? planState.reasons : [];
+  if (kind === "current") {
+    return "This Edit Plan is up to date — Export can render it.";
+  }
+  if (kind === "stale") {
+    const changed = reasons.length ? reasons.join("; ")
+      : "tracked inputs changed since the plan was generated";
+    return `This Edit Plan is stale — ${changed}. Export would still render the last generated plan; ` +
+      "regenerate the Edit Plan from the Editorial workspace to reflect the changes.";
+  }
+  if (kind === "untracked") {
+    return "An Edit Plan is available — Export can render it. " +
+      "It may predate freshness tracking, so its freshness can't be verified.";
+  }
+  return "An Edit Plan is available — Export can render it.";
 }
 
 /**
@@ -1761,16 +1797,17 @@ async function loadCompositions(planUrl, target, button, retry, ctrl, projectId,
  * get null so the region stays empty and the rest of the page is untouched.
  * A missing or malformed `editorial` snapshot is treated defensively as
  * has_edit_plan=false, and a missing/malformed generate_url simply omits
- * the Generate button. Once a plan exists the panel keeps the
- * "Edit Plan available" presentation and the Open Preview link, and layers
- * provenance status on top: "stale" shows a warning naming the changed
- * inputs, "untracked" a neutral note for plans that may predate tracking,
- * and missing/malformed plan_status degrades to the classic presentation.
- * It then adds the display-setting switches, the on-demand composition
- * overview, and the safe Edit Plan download link — all zero-request at
- * render time (only explicit user actions issue requests), and all
- * omitted defensively when their snapshot metadata is malformed. Stale and
- * untracked plans keep every one of these available.
+ * the Generate button. Once a plan exists the panel leads with the
+ * plain-English export-readiness statement (editorialReadinessStatement()
+ * over editorialPlanState()) — current says the Edit Plan is up to date,
+ * stale names the changed inputs in plain words and points at regenerating,
+ * untracked and missing/malformed plan_status get the neutral available
+ * note — followed by the Open Preview link, the display-setting switches,
+ * the on-demand composition overview, and the safe Edit Plan download
+ * link. No warning badge or banner appears in this panel. All of it is
+ * zero-request at render time (only explicit user actions issue requests)
+ * and omitted defensively when the snapshot metadata is malformed; stale
+ * and untracked plans keep every one of these available.
  *
  * @param {import("../api.js").ProjectSnapshot} snap
  * @param {(() => any) | null} [onGenerated] — refresh hook after a successful mutation
@@ -1802,13 +1839,11 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
   } else {
     const planState = editorialPlanState(editorial);
     const previewUrl = usableUrl(editorial.preview_url);
+    // Plain-English export-readiness first: what the user can export right
+    // now — a stale plan names what changed and what to do in place of the
+    // old warning badge + banner.
+    body.append(el("p", { class: "small" }, editorialReadinessStatement(planState)));
     const row = el("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } },
-      planState.kind === "stale"
-        ? badge("warning", "Edit Plan is stale")
-        : planState.kind === "untracked"
-          ? badge("neutral", "Edit Plan available")
-          : badge("good", "Edit Plan available"),
-      planState.kind === "current" ? el("span", { class: "muted small" }, "Current") : null,
       previewUrl
         ? el("a", { class: "btn btn-primary btn-sm", href: previewUrl, target: "_blank", rel: "noopener" }, "Open Preview")
         : null,
@@ -1839,20 +1874,6 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
       editorial, ctrlState, errors, onGenerated, projectId,
     );
     if (displayControls) body.append(displayControls);
-    if (planState.kind === "stale") {
-      body.append(el("div", { class: "mt" }, banner(
-        el("div", {},
-          el("div", {}, planState.reasons.length
-            ? "The plan was generated before recent changes:"
-            : "Tracked inputs changed since this plan was generated:"),
-          ...planState.reasons.map((reason) => el("div", { class: "muted small" }, reason)),
-          el("div", { class: "muted small" }, "Stale plans are preserved on purpose — Open Preview still shows the last generated plan."),
-        ),
-      )));
-    } else if (planState.kind === "untracked") {
-      body.append(el("div", { class: "muted small mt" },
-        "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable — Open Preview shows it as-is."));
-    }
     const compositionBlock = buildCompositionBlock(editorial, ctrlState, projectId, errors);
     if (compositionBlock) body.append(compositionBlock);
   }
@@ -1866,9 +1887,9 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
 /**
  * Mount (or clear) the Editorial Preview panel for the current snapshot.
  * Pure rendering: no request is issued here. After a successful mutation the
- * default hook re-fetches the snapshot so the panel switches to "Edit Plan
- * available" + "Open Preview" (or re-reads the plan state after a display
- * setting change).
+ * default hook re-fetches the snapshot so the panel switches to the
+ * available-plan presentation (readiness statement + "Open Preview", or
+ * re-reads the plan state after a display setting change).
  *
  * Live-refresh preservation: a Generate Edit Plan POST or a display-setting
  * PATCH in flight, or an open composition list (loading / ready / error),

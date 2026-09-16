@@ -1358,3 +1358,61 @@ def test_unload_tts_unknown_provider_returns_503(tmp_path: Path) -> None:
     body = response.json()
     assert body["detail"]["code"] == "backend_unavailable"
     assert "does_not_exist" in body["detail"]["message"]
+
+
+class TogglingTTSBackend(GeneratorBackend):
+    """Backend that reports its loaded state honestly across load/unload."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        self.loaded = True
+
+    def descriptor(self):
+        return BackendDescriptor(backend_name=self.provider, model_name=self.provider)
+
+    def health(self):
+        return {"status": "healthy", "loaded": self.loaded}
+
+    def load(self):
+        self.loaded = True
+
+    def unload(self):
+        self.loaded = False
+
+    def cancel(self, job_id: str) -> bool:
+        return False
+
+    def estimate_resources(self, request: GenerationRequest):
+        return {}
+
+    def generate(self, request: GenerationRequest) -> GenerationResult:
+        raise AssertionError("stub should not generate")
+
+
+def test_unload_then_models_reports_the_honest_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After POST /api/tts/{provider}/unload the models snapshot must no
+    longer advertise the provider as loaded (the Voice page's Unload button
+    derives its enabled state from exactly this field)."""
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    backend = TogglingTTSBackend("qwen_tts")
+    app.state.service.registry.register(backend, name="qwen_tts", replace=True)
+    stopped: list[str] = []
+    monkeypatch.setattr(app.state.service.tts_workers, "stop", lambda provider: (stopped.append(provider), True)[1])
+
+    client = TestClient(app)
+
+    before = client.get("/api/tts/models").json()["models"]["qwen_tts"]
+    assert before["health"]["status"] == "healthy"
+    assert before["health"]["loaded"] is True
+
+    response = client.post("/api/tts/qwen_tts/unload")
+    assert response.status_code == 200
+    assert response.json()["status"] == "unloaded"
+    assert backend.loaded is False
+
+    after = client.get("/api/tts/models").json()["models"]["qwen_tts"]
+    assert after["health"]["status"] == "healthy"
+    assert after["health"]["loaded"] is False

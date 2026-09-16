@@ -231,6 +231,56 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     assert "export function clearGeminiKey(config" in api_source
 
 
+def test_worker_controls_report_honest_loaded_states() -> None:
+    """The Worker controls never claim "loaded" without a strict report.
+
+    Isolated TTS workers (and the mock backend) report `loaded` in their
+    /health payload; ComfyUI-backed adapters omit it. The status line must
+    distinguish loaded / running-without-weights / reachable-but-unreported /
+    worker-down. Reachable ComfyUI adapters with unreported residency remain
+    unloadable so their `/free` endpoint can release cached weights; confirmed
+    unloaded or unreachable workers stay disabled (a title explains why).
+    """
+    source = VOICE_JS.read_text(encoding="utf-8")
+
+    # The status logic is an exported pure function (table-shaped; the full
+    # state table is exercised by frontend/tests/js/frontend.test.js).
+    assert "export function ttsWorkerStatus(" in source
+    block = source.split("export function ttsWorkerStatus(", 1)[1].split("\n}", 1)[0]
+    # Healthy is split on a strict `loaded` boolean…
+    assert 'health.loaded === true' in block
+    assert '"Loaded and ready."' in block
+    assert 'health.loaded === false' in block
+    assert '"Worker running — model loads on first use."' in block
+    # …and a healthy entry without the flag is never claimed as loaded, while
+    # remaining unloadable because ComfyUI may still hold cached weights.
+    assert '"Worker reachable."' in block
+    # A downed worker is "not reachable", not "Loaded and ready".
+    assert '"Worker not reachable."' in block
+    # The managed auto-start and not-configured branches are kept.
+    assert "Configured for automatic worker startup — first use will load the model." in block
+    assert "Not configured. Set managed=true and the worker details in config." in block
+    # Confirmed and potentially cached weights are unloadable.
+    assert block.count("canUnload: true") == 2
+    assert "health.loaded === true" in block.split("canUnload: true", 1)[0]
+    assert "Request release of any cached model weights" in block
+    assert block.count("canUnload: false") == 5
+
+    # The panel binds the status line and the Unload button to the same view,
+    # re-applies it on provider change, and re-reads the snapshot after the
+    # post-unload refresh() rebuilds the page.
+    panel = source.split("function workerControlsPanel(", 1)[1].split("\n}", 1)[0]
+    assert "ttsWorkerStatus(localModels[provider.value] || null)" in panel
+    assert "unload.disabled = !view.canUnload" in panel
+    assert "unload.title = view.unloadTitle" in panel
+    assert "provider.onchange = applyWorkerStatus" in panel
+    assert "applyWorkerStatus();" in panel
+    # The post-unload toast keeps the owned-worker distinction.
+    assert "result.stopped_owned_worker" in panel
+    assert '"Worker process stopped; weights and memory released."' in panel
+    assert '"Weights released; worker stays running for the next job."' in panel
+
+
 def test_voice_consent_note_is_neutral_and_provider_free() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
     # The clone-consent sentence stays…
