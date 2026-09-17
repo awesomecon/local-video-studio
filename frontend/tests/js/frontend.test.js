@@ -144,6 +144,39 @@
  *                                residency remains unloadable so ComfyUI can
  *                                release cached weights, and every disabled
  *                                state gets a title that explains why.
+ *  19. Notification sounds          - alert-sound.js policy: defaults with
+ *                                empty storage, corrupt-JSON and wrong-type
+ *                                fallbacks, set/get round-trip with volume
+ *                                clamping, exactly the four shipped
+ *                                presets, the shouldPlay and volumeProfile
+ *                                matrices, and a stubbed AudioContext
+ *                                proving a locked context schedules
+ *                                nothing, the explicit Test path resumes
+ *                                before scheduling, and good/info play the
+ *                                same preset at the reduced soft level.
+ *  20. toastError severity          - every operational ApiError kind maps
+ *                                to a full-profile toast kind (warning or
+ *                                critical), pending stays informational,
+ *                                and the toast border follows the mapping.
+ *  21. System status and Models     - #/system parses to the system
+ *                                screen; renderSystemPage renders all five
+ *                                environment panels (an empty recovery
+ *                                report omits the recovery panel, offline
+ *                                renders the retry state without fetching);
+ *                                renderModels keeps the model panels
+ *                                (script model first) and no longer renders
+ *                                the environment panels.
+ *  22. Gemini TTS shared key panel  - geminiKeyPanel's five readiness
+ *                                states (badge + remediation + button
+ *                                enablement) including file-source
+ *                                Replace/Remove, Save trims and issues
+ *                                PUT /api/tts/gemini/key and never renders
+ *                                a key value from any payload, a blank key
+ *                                issues no request, Remove confirms then
+ *                                issues DELETE, the Settings host renders
+ *                                the panel and re-fetches after a save,
+ *                                and both hosts import the one shared
+ *                                builder.
  */
 
 import {
@@ -247,6 +280,10 @@ async function recordAsync(name, fn) {
 async function flush(turns = 30) {
   for (let i = 0; i < turns; i++) await Promise.resolve();
 }
+
+// The browser's real fetch, captured before any test installs a stub;
+// source-level checks (which read actual module files) must not see a stub.
+const nativeFetch = globalThis.fetch.bind(globalThis);
 
 // Stub globalThis.fetch, recording each call and answering via handler(call).
 function stubFetch(handler) {
@@ -3543,9 +3580,589 @@ record("voice-worker: confirmed or possibly cached weights are unloadable", () =
   }
 });
 
+/* --- 19. Notification sounds (alert-sound.js) ----------------------------- */
+
+const {
+  SOUND_PRESETS, getAlertPrefs, setAlertPrefs, shouldPlay, volumeProfile,
+  playNotification, unlockAndPlayNotification, resetAudioContextForTests,
+} = await import("../../js/alert-sound.js");
+
+// Float-safe comparison for gain math (e.g. 0.8 * 0.5 * 0.4 is not exact).
+function near(actual, expected, msg) {
+  if (!Number.isFinite(actual) || Math.abs(actual - expected) > 1e-6) {
+    throw new Error(`${msg || "near"}: got ${actual}, want ${expected}`);
+  }
+}
+
+function clearToasts() {
+  const region = document.getElementById("toasts");
+  if (region) region.replaceChildren();
+}
+
+record("alert-sound: defaults apply when storage is empty", () => {
+  localStorage.removeItem("lvs-alert-sound");
+  eq(getAlertPrefs(), { enabled: true, sound: "chirp", volume: 50 });
+});
+
+record("alert-sound: corrupt or wrong-typed storage falls back to defaults", () => {
+  localStorage.setItem("lvs-alert-sound", "{not json");
+  eq(getAlertPrefs(), { enabled: true, sound: "chirp", volume: 50 }, "corrupt JSON");
+  localStorage.setItem("lvs-alert-sound",
+    JSON.stringify({ enabled: "yes", sound: "laser", volume: "loud" }));
+  eq(getAlertPrefs(), { enabled: true, sound: "chirp", volume: 50 }, "wrong types");
+  localStorage.removeItem("lvs-alert-sound");
+});
+
+record("alert-sound: set/get round-trips with clamping and type validation", () => {
+  localStorage.removeItem("lvs-alert-sound");
+  eq(setAlertPrefs({ enabled: false, sound: "chime", volume: 80 }),
+    { enabled: false, sound: "chime", volume: 80 }, "the patch applies");
+  eq(getAlertPrefs(), { enabled: false, sound: "chime", volume: 80 }, "it persists");
+  eq(setAlertPrefs({ volume: 137 }),
+    { enabled: false, sound: "chime", volume: 100 }, "volume clamps to 100");
+  eq(setAlertPrefs({ volume: -5 }),
+    { enabled: false, sound: "chime", volume: 0 }, "volume clamps to 0");
+  eq(setAlertPrefs({ sound: "laser" }),
+    { enabled: false, sound: "chime", volume: 0 }, "unknown presets are ignored");
+  eq(setAlertPrefs({ enabled: "yes", sound: 7 }),
+    { enabled: false, sound: "chime", volume: 0 }, "wrong types are ignored");
+  localStorage.removeItem("lvs-alert-sound");
+});
+
+record("alert-sound: exactly the four shipped presets, each schedulable", () => {
+  eq(Object.keys(SOUND_PRESETS).sort(), ["beep", "chime", "chirp", "pulse"]);
+  for (const [id, preset] of Object.entries(SOUND_PRESETS)) {
+    assert(preset.label, `${id} has a label`);
+    assert(Array.isArray(preset.tones) && preset.tones.length >= 1, `${id} has tones`);
+    for (const tone of preset.tones) {
+      assert(tone.freq > 0 && tone.dur > 0 && tone.gain > 0 && tone.gain <= 1,
+        `${id} tone is schedulable: ${JSON.stringify(tone)}`);
+    }
+  }
+});
+
+record("alert-sound: shouldPlay honors prefs and the autoplay lock", () => {
+  const enabled = { enabled: true, volume: 50 };
+  eq(shouldPlay("good", enabled, true), true, "unlocked and enabled plays");
+  eq(shouldPlay("modal", enabled, true), true, "modals play");
+  eq(shouldPlay("good", enabled, false), false, "the autoplay lock silences");
+  eq(shouldPlay("good", { enabled: false, volume: 50 }, true), false, "disabled silences");
+  eq(shouldPlay("good", { enabled: true, volume: 0 }, true), false, "zero volume silences");
+  eq(shouldPlay("good", null, true), false, "missing prefs silence");
+});
+
+record("alert-sound: alerts and modals are full, acknowledgements soft", () => {
+  eq(volumeProfile("warning"), "full");
+  eq(volumeProfile("critical"), "full");
+  eq(volumeProfile("modal"), "full");
+  eq(volumeProfile("good"), "soft");
+  eq(volumeProfile("info"), "soft");
+  eq(volumeProfile("unlisted"), "soft", "unknown kinds default to soft");
+});
+
+// A fake AudioContext that records scheduling, so the playback policy is
+// observable without real audio (headless would mute every tone under the
+// autoplay policy anyway).
+class RecordingAudioContext {
+  constructor() {
+    RecordingAudioContext.last = this;
+    this.state = "suspended";
+    this.currentTime = 0;
+    this.destination = {};
+    this.oscs = [];
+    this.gains = [];
+    this.resumeCalls = 0;
+    this.oscsAtResume = null;
+  }
+  createOscillator() {
+    const node = {
+      type: "", frequency: { value: null },
+      start(t) { this.startAt = t; }, stop() {}, connect() {},
+    };
+    this.oscs.push(node);
+    return node;
+  }
+  createGain() {
+    const calls = [];
+    const node = {
+      calls,
+      gain: {
+        setValueAtTime: (v, t) => calls.push(["set", v, t]),
+        linearRampToValueAtTime: (v, t) => calls.push(["ramp", v, t]),
+        exponentialRampToValueAtTime: (v, t) => calls.push(["decay", v, t]),
+      },
+      connect() {},
+    };
+    this.gains.push(node);
+    return node;
+  }
+  resume() {
+    this.resumeCalls += 1;
+    return Promise.resolve().then(() => {
+      this.state = "running";
+      this.oscsAtResume = this.oscs.length;
+    });
+  }
+}
+RecordingAudioContext.last = null;
+
+record("alert-sound: a locked context skips the alert without scheduling", () => {
+  class LockedAudioContext {
+    constructor() {
+      LockedAudioContext.last = this;
+      this.state = "suspended";
+      this.touched = false;
+    }
+    createOscillator() { this.touched = true; return {}; }
+    createGain() { this.touched = true; return {}; }
+    resume() { return new Promise(() => {}); } // the lock never releases
+  }
+  LockedAudioContext.last = null;
+  window.AudioContext = LockedAudioContext;
+  resetAudioContextForTests();
+  setAlertPrefs({ enabled: true, sound: "pulse", volume: 80 });
+  playNotification("critical"); // must neither throw nor schedule
+  eq(LockedAudioContext.last.touched, false, "nothing was scheduled while locked");
+});
+
+await recordAsync(
+  "alert-sound: the Test path resumes a locked context before scheduling",
+  async () => {
+    window.AudioContext = RecordingAudioContext;
+    resetAudioContextForTests();
+    setAlertPrefs({ enabled: true, sound: "chirp", volume: 50 });
+    await unlockAndPlayNotification("modal");
+    const ctx = RecordingAudioContext.last;
+    assert(ctx, "a context was created");
+    eq(ctx.resumeCalls, 1, "resumed exactly once");
+    eq(ctx.state, "running", "the resume completed");
+    eq(ctx.oscsAtResume, 0, "nothing was scheduled before the resume resolved");
+    eq(ctx.oscs.length, 2, "the chirp preset schedules two tones");
+    eq(ctx.oscs[0].frequency.value, 740, "first tone is the lower chirp");
+    eq(ctx.oscs[1].frequency.value, 1180, "second tone is the upper chirp");
+    const ramp = ctx.gains[0].calls.find((c) => c[0] === "ramp");
+    assert(ramp, "the first tone ramps to its peak");
+    near(ramp[1], 0.4, "full profile at volume 50: 0.8 peak * 0.5");
+  },
+);
+
+await recordAsync(
+  "alert-sound: good/info play the same preset at the soft level",
+  async () => {
+    window.AudioContext = RecordingAudioContext;
+    setAlertPrefs({ enabled: true, sound: "chirp", volume: 50 });
+
+    resetAudioContextForTests();
+    await unlockAndPlayNotification("modal");
+    const full = RecordingAudioContext.last;
+    const fullPeak = full.gains[0].calls.find((c) => c[0] === "ramp")[1];
+    const fullDecayAt = full.gains[0].calls.find((c) => c[0] === "decay")[2];
+    near(fullPeak, 0.4, "full peak at volume 50");
+    near(fullDecayAt, 0.08, "full envelope keeps the tone duration");
+
+    resetAudioContextForTests();
+    await unlockAndPlayNotification("good");
+    const soft = RecordingAudioContext.last;
+    const softPeak = soft.gains[0].calls.find((c) => c[0] === "ramp")[1];
+    const softDecayAt = soft.gains[0].calls.find((c) => c[0] === "decay")[2];
+    near(softPeak, fullPeak * 0.4, "soft peak is 40% of the full peak");
+    near(softDecayAt, 0.08 * 0.6, "soft envelope is 60% of the tone duration");
+    eq(soft.oscs.length, 2, "same preset, same tone count");
+  },
+);
+
+/* --- 20. toastError severity mapping --------------------------------------- */
+
+const { toastError, errorToastKind } = await import("../../js/ui.js");
+
+record("toastError: operational failures resolve to full-profile kinds", () => {
+  for (const kind of ["offline", "timeout", "auth", "incompatible",
+    "insufficient_vram", "conflict", "validation", "unknown"]) {
+    eq(errorToastKind(kind), "warning", `${kind} is a warning`);
+  }
+  eq(errorToastKind("not_found"), "critical");
+  eq(errorToastKind("server"), "critical");
+  eq(errorToastKind("pending"), "info", "pending stays informational");
+  eq(errorToastKind("good"), "info");
+  eq(errorToastKind("something-new"), "info", "unmapped kinds stay informational");
+});
+
+record("toastError: the toast border follows the mapped severity", () => {
+  toastError({ kind: "insufficient_vram", message: "only 4 GiB free" }, "render");
+  let last = document.getElementById("toasts").lastElementChild;
+  assert(last.classList.contains("t-warning"),
+    "a VRAM failure renders as a warning toast");
+  toastError({ kind: "not_found", message: "gone" }, "render");
+  last = document.getElementById("toasts").lastElementChild;
+  assert(last.classList.contains("t-critical"),
+    "a not-found error renders as a critical toast");
+  toastError({ kind: "pending", message: "coming soon" }, "render");
+  last = document.getElementById("toasts").lastElementChild;
+  assert(!last.classList.contains("t-warning") && !last.classList.contains("t-critical"),
+    "pending renders without an alert border");
+  clearToasts();
+});
+
+/* --- 21. System status and Models screens ----------------------------------- */
+
+const { renderSystemPage } = await import("../../js/pages/system.js");
+const { renderModels } = await import("../../js/pages/models.js");
+
+const SYSTEM_STATUS_FIXTURE = {
+  environment: {
+    capabilities: {
+      core: {
+        ready: true,
+        detail: "Core mock rendering is ready",
+        requirements: {
+          python: { status: "available", detail: "Python 3.12 available" },
+          ffmpeg: { status: "available", detail: "FFmpeg 6.1 available" },
+        },
+      },
+      features: {
+        browser_rendering: { status: "available", detail: "Chromium available" },
+      },
+      optional: {
+        cuda: { status: "not_probed", detail: "Optional CUDA not checked" },
+      },
+    },
+    classification: "compatible_with_warnings",
+    version_conflicts: [],
+    warnings: ["PyTorch is newer than the tested reference build."],
+    recommendations: ["Prefer the 24 GB reference card for heavyweight backends."],
+    torch: {
+      installed: true, version: "2.6.0", cuda_runtime: "12.4",
+      cuda_probed: false, cuda_available: false,
+    },
+    python_version: "3.12.7",
+    python_executable: "/usr/bin/python3",
+    operating_system: "Linux 6.8",
+    system_ram_gb: 32,
+    ffmpeg: { available: true, version: "6.1", path: "/usr/bin/ffmpeg", source: "system" },
+    ffprobe: { available: true, version: "6.1", path: "/usr/bin/ffprobe", source: "system" },
+    git: { available: true, version: "2.43", path: "/usr/bin/git", source: "system" },
+    nvidia_gpus: [],
+  },
+  gpu: {
+    active_backend: null,
+    minimum_free_vram_gb: 20,
+    devices: [{ name: "NVIDIA RTX 3090", total_gb: 24, used_gb: 2, free_gb: 21.5 }],
+  },
+  ports: {
+    llm_external: 1234,
+    backend_effective: 8009,
+    backend_configured: 8000,
+    frontend_configured: 8080,
+    comfyui_external: null,
+  },
+  mock_mode: true,
+  queued_jobs: 0,
+  comfyui_resident_backend: null,
+  h3_readiness: null,
+};
+
+const MODEL_LIST_FIXTURE = {
+  models: {
+    h3_audiovisual_local: {
+      backend_name: "h3_audiovisual_local",
+      model_name: "MiniMax H3",
+      model_version: "1.0",
+      device: "cuda",
+      vram_required_gb: 20,
+      heavyweight: true,
+      capabilities: ["text_to_video"],
+    },
+  },
+  runtime: {
+    h3_audiovisual_local: { state: "resident", ownership: "studio", actions: ["release"] },
+  },
+};
+
+function stubSystemEndpoints(recovery) {
+  return stubFetch((call) => {
+    if (call.url === "/api/system/status") return { payload: SYSTEM_STATUS_FIXTURE };
+    if (call.url === "/api/projects") {
+      return { payload: { projects: [], recovery: recovery || [] } };
+    }
+    if (call.url === "/api/models") return { payload: MODEL_LIST_FIXTURE };
+    if (call.url.startsWith("/api/llm/models")) {
+      return { payload: {
+        endpoint: "http://127.0.0.1:1234/v1",
+        selected_model: "local-llm",
+        resolved_model: "local-llm",
+        models: [{ id: "local-llm" }],
+      } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+}
+
+function withStudioState(connection) {
+  const prev = {
+    config: state.config,
+    connection: state.connection,
+    currentProjectId: state.currentProjectId,
+  };
+  state.config = { apiBase: "", mediaBase: null };
+  state.connection = connection;
+  state.currentProjectId = null;
+  return () => {
+    state.config = prev.config;
+    state.connection = prev.connection;
+    state.currentProjectId = prev.currentProjectId;
+  };
+}
+
+await recordAsync("system page: renders all five environment panels", async () => {
+  const restore = withStudioState("online");
+  stubSystemEndpoints([
+    { type: "recovered", slug: "sample", project_id: "p-1", detail: "directory renamed to its slug" },
+  ]);
+  const screen = renderSystemPage({ name: "system", param: null });
+  await flush();
+  const text = screen.textContent;
+  for (const title of ["Core studio", "Environment compatibility", "Project recovery",
+    "Runtime environment", "Ports & pipeline mode"]) {
+    assert(text.includes(title), `missing panel: ${title}`);
+  }
+  assert(text.includes("sample"), "the recovery entry is listed");
+  assert(text.includes("Compatible with warnings"), "the classification badge reads");
+  restore();
+});
+
+await recordAsync("system page: an empty recovery report omits the recovery panel", async () => {
+  const restore = withStudioState("online");
+  stubSystemEndpoints([]);
+  const screen = renderSystemPage({ name: "system", param: null });
+  await flush();
+  assert(!screen.textContent.includes("Project recovery"),
+    "no recovery panel for an empty report");
+  restore();
+});
+
+await recordAsync("system page: offline renders the retry state without fetching", async () => {
+  const restore = withStudioState("offline");
+  const calls = stubSystemEndpoints([]);
+  const screen = renderSystemPage({ name: "system", param: null });
+  await flush();
+  assert(screen.textContent.includes("Backend offline"), "the offline message reads");
+  assert(screen.textContent.includes("Retry"), "the retry action is offered");
+  eq(calls.length, 0, "no request was issued");
+  restore();
+});
+
+await recordAsync("models page: keeps the model panels, drops the environment panels", async () => {
+  const restore = withStudioState("online");
+  stubSystemEndpoints([
+    { type: "recovered", slug: "sample", project_id: "p-1", detail: "directory renamed to its slug" },
+  ]);
+  const screen = renderModels({ name: "models", param: null });
+  await flush();
+  const text = screen.textContent;
+  for (const title of ["Script model (local LLM router)", "Model backends and runtime state",
+    "Model memory", "GPU (live)"]) {
+    assert(text.includes(title), `missing panel: ${title}`);
+  }
+  assert(text.indexOf("Script model") < text.indexOf("Model backends"),
+    "the script model panel comes first");
+  for (const moved of ["Core studio", "Environment compatibility", "Project recovery",
+    "Runtime environment", "Ports & pipeline mode"]) {
+    assert(!text.includes(moved), `environment panel still present: ${moved}`);
+  }
+  restore();
+});
+
+record("route: #/system parses to the system screen", () => {
+  const prevHash = window.location.hash;
+  window.location.hash = "#/system";
+  eq(parseRoute(), { name: "system", param: null });
+  if (prevHash) window.location.hash = prevHash;
+});
+
+/* --- 22. Gemini TTS shared key panel ---------------------------------------- */
+
+const { geminiKeyPanel } = await import("../../js/gemini-key.js");
+
+record("gemini-key: the shared builder covers all five readiness states", () => {
+  const cases = [
+    [null, "Gemini unavailable",
+      "This backend did not register the Gemini TTS provider.", true, true],
+    [{ status: "not_configured", configured: false, source: "none", api_key_env: "GEMINI_API_KEY" },
+      "Gemini disabled",
+      "Enable backends.gemini_tts.enabled and restart the dashboard.", true, true],
+    [{ status: "key_invalid", configured: false, invalid: true, source: "environment", api_key_env: "GEMINI_API_KEY" },
+      "API key is malformed",
+      "Fix GEMINI_API_KEY and restart the dashboard.", true, true],
+    [{ status: "key_required", configured: false, source: "none", api_key_env: "GEMINI_API_KEY" },
+      "API key needed",
+      "Paste a key below, or export GEMINI_API_KEY and restart the dashboard.", false, true],
+    [{ status: "healthy", configured: true, source: "environment", api_key_env: "GEMINI_API_KEY" },
+      "Ready to generate",
+      "the GEMINI_API_KEY environment variable", true, true],
+  ];
+  for (const [health, badgeLabel, remediation, saveDisabled, clearDisabled] of cases) {
+    const panel = geminiKeyPanel({ health, onSaved: () => {} });
+    assert(panel.status.textContent.includes(badgeLabel),
+      `badge "${badgeLabel}" for ${JSON.stringify(health)}`);
+    assert(panel.status.textContent.includes(remediation),
+      `remediation for "${badgeLabel}"`);
+    const [save, clear] = [...panel.control.querySelectorAll("button")];
+    eq(save.disabled, saveDisabled, `Save disabled for "${badgeLabel}"`);
+    eq(clear.disabled, clearDisabled, `Remove disabled for "${badgeLabel}"`);
+  }
+});
+
+record("gemini-key: file-sourced keys expose Replace and Remove", () => {
+  const invalid = geminiKeyPanel({
+    health: { status: "key_invalid", configured: false, source: "file", api_key_env: "GEMINI_API_KEY" },
+    onSaved: () => {},
+  });
+  const [saveI, clearI] = [...invalid.control.querySelectorAll("button")];
+  eq(saveI.textContent, "Replace saved key", "file source labels Save a replace");
+  eq(saveI.disabled, false, "replacing a file-sourced key is allowed");
+  eq(clearI.disabled, false, "removing a file-sourced key is allowed");
+  assert(invalid.status.textContent.includes("Remove or replace the saved key below."));
+  const ready = geminiKeyPanel({
+    health: { status: "healthy", configured: true, source: "file", api_key_env: "GEMINI_API_KEY" },
+    onSaved: () => {},
+  });
+  const [saveR, clearR] = [...ready.control.querySelectorAll("button")];
+  eq(saveR.textContent, "Replace saved key");
+  eq(clearR.disabled, false);
+  assert(ready.status.textContent.includes("a key saved on this machine"));
+});
+
+await recordAsync(
+  "gemini-key: Save trims, issues PUT /api/tts/gemini/key, and calls onSaved",
+  async () => {
+    const restore = withStudioState("online");
+    const calls = stubFetch((call) => {
+      if (call.method === "PUT" && call.url === "/api/tts/gemini/key") {
+        // Hostile response: echo the key back; it must never be rendered.
+        return { payload: { api_key: "HOSTILE_ECHO_VALUE" } };
+      }
+      return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+    });
+    let saved = 0;
+    const panel = geminiKeyPanel({
+      health: { status: "key_required", configured: false, source: "none", api_key_env: "GEMINI_API_KEY" },
+      onSaved: () => { saved += 1; },
+    });
+    panel.control.querySelector("input").value = "  sk-test-123  ";
+    [...panel.control.querySelectorAll("button")][0].click();
+    await flush();
+    const put = calls.find((c) => c.method === "PUT");
+    assert(put, "PUT /api/tts/gemini/key was issued");
+    eq(put.url, "/api/tts/gemini/key");
+    eq(put.body, { api_key: "sk-test-123" }, "the trimmed key is the whole body");
+    eq(saved, 1, "onSaved lets the host re-fetch");
+    eq(panel.control.querySelector("input").value, "", "the input is cleared after a save");
+    const rendered = panel.status.textContent + " " + panel.control.textContent;
+    assert(!rendered.includes("HOSTILE_ECHO_VALUE"),
+      "a response payload never renders a key value");
+    clearToasts();
+    restore();
+  },
+);
+
+await recordAsync("gemini-key: saving a blank key issues no request", async () => {
+  const restore = withStudioState("online");
+  const calls = stubFetch(() => ({ status: 404, payload: { detail: "unexpected" } }));
+  const panel = geminiKeyPanel({
+    health: { status: "key_required", configured: false, source: "none", api_key_env: "GEMINI_API_KEY" },
+    onSaved: () => {},
+  });
+  panel.control.querySelector("input").value = "   ";
+  [...panel.control.querySelectorAll("button")][0].click();
+  await flush();
+  eq(calls.length, 0, "no network call for a blank key");
+  clearToasts();
+  restore();
+});
+
+await recordAsync("gemini-key: Remove confirms, issues DELETE, and calls onSaved", async () => {
+  const restore = withStudioState("online");
+  const calls = stubFetch((call) => {
+    if (call.method === "DELETE" && call.url === "/api/tts/gemini/key") return { payload: {} };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  let saved = 0;
+  const panel = geminiKeyPanel({
+    health: { status: "healthy", configured: true, source: "file", api_key_env: "GEMINI_API_KEY" },
+    onSaved: () => { saved += 1; },
+  });
+  const [, clearBtn] = [...panel.control.querySelectorAll("button")];
+  clearBtn.click();
+  await flush();
+  const dialog = document.querySelector("dialog.modal");
+  assert(dialog, "the confirm dialog opened");
+  assert(dialog.textContent.includes("Remove saved Gemini key"), "it names the action");
+  const footButtons = [...dialog.querySelectorAll(".modal-foot button")];
+  footButtons[footButtons.length - 1].click(); // the "Remove" action
+  await flush();
+  assert(calls.some((c) => c.method === "DELETE"), "DELETE /api/tts/gemini/key was issued");
+  eq(saved, 1, "onSaved ran after the remove");
+  if (dialog.open) dialog.close();
+  if (dialog.isConnected) dialog.remove();
+  clearToasts();
+  restore();
+});
+
+await recordAsync("settings: the Gemini panel renders and re-fetches after a save", async () => {
+  const { renderSettings } = await import("../../js/pages/settings.js");
+  const restore = withStudioState("online");
+  let ttsGets = 0;
+  stubFetch((call) => {
+    if (call.url === "/api/tts/models") {
+      ttsGets += 1;
+      return { payload: { models: { gemini_tts: { health: {
+        status: "key_required", configured: false, source: "none",
+        api_key_env: "GEMINI_API_KEY",
+      } } } } };
+    }
+    if (call.method === "PUT" && call.url === "/api/tts/gemini/key") return { payload: {} };
+    if (call.url === "/health") return { payload: { status: "ok", mode: "mock" } };
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderSettings({ name: "settings", param: null });
+  await flush();
+  assert(screen.textContent.includes("Notification sound"), "the sound panel is present");
+  const geminiPanel = [...screen.querySelectorAll(".panel")]
+    .find((p) => p.textContent.includes("Remote services — Gemini TTS"));
+  assert(geminiPanel, "the Gemini panel exists as its own panel");
+  const saveBtn = [...geminiPanel.querySelectorAll("button")]
+    .find((b) => b.textContent === "Save key");
+  assert(saveBtn, "Save key is offered in the key-needed state");
+  geminiPanel.querySelector("input[type=password]").value = "sk-test-123";
+  saveBtn.click();
+  await flush();
+  assert(ttsGets >= 2, `tts models were re-fetched after the save (got ${ttsGets} reads)`);
+  clearToasts();
+  restore();
+});
+
+await recordAsync("gemini-key: Voice and Settings import one shared builder", async () => {
+  // Paths are relative to the harness page (frontend/tests/), not to this
+  // module (frontend/tests/js/); assert res.ok so a wrong path fails loudly.
+  const readSource = async (relPath) => {
+    const res = await nativeFetch(new URL(relPath, document.baseURI));
+    assert(res.ok, `could not read ${relPath} (status ${res.status})`);
+    return res.text();
+  };
+  const voice = await readSource("../js/pages/voice.js");
+  const settings = await readSource("../js/pages/settings.js");
+  const shared = await readSource("../js/gemini-key.js");
+  assert(voice.includes('from "../gemini-key.js"'), "voice.js imports the shared builder");
+  assert(settings.includes('from "../gemini-key.js"'), "settings.js imports the shared builder");
+  assert(shared.includes("export function geminiKeyPanel"),
+    "the state machine is exported from the shared module");
+  assert(!voice.includes("function updateGeminiPanel"),
+    "the old inline state machine is gone from voice.js");
+});
+
 /* --- report -------------------------------------------------------------- */
 
-const { capabilityPanel } = await import("../../js/pages/models.js");
+const { capabilityPanel } = await import("../../js/pages/system.js");
 record("core readiness stays ready when optional AI is absent", () => {
   const panel = capabilityPanel({
     core: { ready: true, detail: "Core mock rendering is ready", requirements: {

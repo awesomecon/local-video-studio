@@ -9,10 +9,10 @@ import {
   regenerateNarrationChunk, regeneratePerformanceSegment,
   savePerformanceTags,
   ttsModels, setNarrationTakeGain, unloadTtsProvider, uploadVoiceProfile,
-  clearGeminiKey, saveGeminiKey,
 } from "../api.js";
 import { loadingState, errorPanel, badge, icon, toast, toastError, confirm, field as sharedField } from "../ui.js";
 import { effectiveVideoMode } from "../video-mode.js";
+import { geminiKeyPanel } from "../gemini-key.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
 const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
@@ -477,14 +477,15 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const geminiStyle = el("input", { type: "text", class: "input", maxlength: "500",
     value: current.gemini_style || "",
     placeholder: "e.g. warm documentary narrator, measured pace (optional)" });
-  const geminiKeyStatus = el("div", {
-    class: "gemini-key-status", role: "status", "aria-live": "polite",
-  }, badge("neutral", "Checking Gemini readiness"));
-  const geminiKeyInput = el("input", { type: "password", class: "input",
-    autocomplete: "off", spellcheck: "false",
-    placeholder: "Paste a Google AI Studio API key — stored only on this machine" });
-  const geminiSaveKey = el("button", { class: "btn", type: "button" }, "Save key");
-  const geminiClearKey = el("button", { class: "btn btn-ghost", type: "button" }, "Remove saved key");
+  // API-key status + controls come from the shared builder (gemini-key.js),
+  // which the Settings screen renders in its Remote services panel — one
+  // state machine for both hosts.
+  const geminiHealth = () => models.gemini_tts?.health || null;
+  const geminiReady = () => {
+    const health = geminiHealth();
+    return health?.status === "healthy" && health.configured === true;
+  };
+  const geminiKey = geminiKeyPanel({ health: geminiHealth(), onSaved: refresh });
   const geminiNote = el("div", { class: "callout" },
     el("strong", {}, "Gemini TTS is a remote Google service"),
     el("p", { class: "muted small" },
@@ -497,7 +498,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       + "starting the dashboard — the environment variable always takes priority over a key "
       + "saved here."));
   const geminiGrid = el("div", { class: "pref-grid" },
-    geminiKeyStatus,
+    geminiKey.status,
     field("Gemini model", geminiModel,
       "Per-take model override — blank uses the backend default. Pro sounds better on long-form; Flash is faster."),
     field("Gemini voice",
@@ -505,95 +506,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       "Grouped by delivery — filter by name or vibe (e.g. “warm”, “calm”). Custom gallery names stay selectable."),
     field("Voice style", geminiStyle,
       "Optional delivery direction included with the narration prompt; blank uses the voice's default delivery."),
-    field("API key", el("div", { class: "row" }, geminiKeyInput, geminiSaveKey, geminiClearKey),
-      "Keys are stored only on this machine. Saving refreshes the readiness status above."));
-  const geminiHealth = () => models.gemini_tts?.health || null;
-  const geminiReady = () => {
-    const health = geminiHealth();
-    return health?.status === "healthy" && health.configured === true;
-  };
-  const updateGeminiPanel = () => {
-    const health = geminiHealth();
-    if (!health) {
-      geminiKeyStatus.replaceChildren(
-        badge("critical", "Gemini unavailable"),
-        el("span", {}, "This backend did not register the Gemini TTS provider."));
-      geminiSaveKey.disabled = true;
-      geminiClearKey.disabled = true;
-      return;
-    }
-    if (health.status === "not_configured") {
-      geminiKeyStatus.replaceChildren(
-        badge("offline", "Gemini disabled"),
-        el("span", {}, "Enable backends.gemini_tts.enabled and restart the dashboard."));
-      geminiSaveKey.disabled = true;
-      geminiClearKey.disabled = true;
-      return;
-    }
-    if (health.status === "key_invalid") {
-      const where = health.source === "environment"
-        ? `Fix ${health.api_key_env} and restart the dashboard.`
-        : "Remove or replace the saved key below.";
-      geminiKeyStatus.replaceChildren(
-        badge("critical", "API key is malformed"), el("span", {}, where));
-      geminiSaveKey.textContent = health.source === "file" ? "Replace saved key" : "Save key";
-      geminiSaveKey.disabled = health.source === "environment";
-      geminiClearKey.disabled = health.source !== "file";
-      return;
-    }
-    if (geminiReady()) {
-      const via = health.source === "environment"
-        ? `the ${health.api_key_env} environment variable`
-        : "a key saved on this machine";
-      geminiKeyStatus.replaceChildren(
-        badge("good", "Ready to generate"),
-        el("span", {}, `Gemini TTS will use ${via}. Narration text is sent only when you generate.`));
-      geminiSaveKey.textContent = health.source === "file" ? "Replace saved key" : "Save key";
-      geminiSaveKey.disabled = health.source === "environment";
-      geminiClearKey.disabled = health.source !== "file";
-      return;
-    }
-    geminiKeyStatus.replaceChildren(
-      badge("warning", "API key needed"),
-      el("span", {}, `Paste a key below, or export ${health.api_key_env || "GEMINI_API_KEY"} and restart the dashboard.`));
-    geminiSaveKey.textContent = "Save key";
-    geminiSaveKey.disabled = false;
-    geminiClearKey.disabled = true;
-  };
+    geminiKey.control);
   const syncGenerateEnabled = () => {
     generate.disabled = provider.value === "gemini_tts" && !geminiReady();
-  };
-  geminiSaveKey.onclick = async () => {
-    const key = geminiKeyInput.value.trim();
-    if (!key) {
-      toast("critical", "API key required",
-        "Paste your Google AI Studio key first, then save it.");
-      return;
-    }
-    geminiSaveKey.disabled = true;
-    try {
-      await saveGeminiKey(state.config, key);
-      geminiKeyInput.value = "";
-      toast("good", "Gemini API key saved",
-        "It is stored in a private file on this machine; the environment variable still wins.");
-      await refresh();
-    } catch (err) { toastError(err, "save Gemini API key"); }
-    finally { geminiSaveKey.disabled = false; }
-  };
-  geminiClearKey.onclick = async () => {
-    const ok = await confirm({
-      title: "Remove saved Gemini key",
-      message: "Delete the Google AI Studio key saved on this machine? An environment variable, if set, is not affected.",
-      confirmLabel: "Remove",
-    });
-    if (!ok) return;
-    geminiClearKey.disabled = true;
-    try {
-      await clearGeminiKey(state.config);
-      toast("good", "Saved Gemini key removed");
-      await refresh();
-    } catch (err) { toastError(err, "remove Gemini API key"); }
-    finally { geminiClearKey.disabled = false; }
   };
   const voxGrid = el("div", { class: "pref-grid" },
     field("CFG scale", cfgValue,
@@ -717,7 +632,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     higgsNote.hidden = !higgs;
     geminiGrid.hidden = !gemini;
     geminiNote.hidden = !gemini;
-    if (gemini) updateGeminiPanel();
+    if (gemini) geminiKey.update();
     stepGrid.hidden = !qwen;
     enhanceRow.hidden = !qwen;
     // Show the selected provider's saved tags and preserve other editors.

@@ -36,7 +36,7 @@ actionable message instead.
 **One knob gates the heavy cold loads.** The Krea 2, Qwen-Image, Ideogram 4, H3, and ACE-Step XL
 cold loads all require `gpu.minimum_free_vram_gb_for_heavy_job` (default 20 GiB) of system-wide
 free VRAM before dispatch. On a smaller card, lower it to what your card can actually provide and
-disable the backends whose weights do not fit (Models & System Status shows each backend's
+disable the backends whose weights do not fit (the Models screen shows each backend's
 requirement). On a larger card you may raise it to reserve more headroom; nothing in the code
 caps larger cards.
 
@@ -55,7 +55,7 @@ Default policy:
   offload); the Studio itself does not configure offload budgets;
 - keep lightweight orchestration and FFmpeg work running independently where safe.
 
-The Models & System Status screen shows the ComfyUI family retained by this Studio process and has a
+The Models screen shows the ComfyUI family retained by this Studio process and has a
 **Release ComfyUI VRAM** button. Image Motion retains whichever still-image family the scene selects:
 Krea 2 Turbo or Qwen-Image-2512. Switching to a different ComfyUI family releases the previous family
 before loading the next.
@@ -72,7 +72,7 @@ use H3's smaller canvas presets, a quantized checkpoint, or another video backen
 system-wide free VRAM and raises a structured `INSUFFICIENT_VRAM` error (mapped to HTTP 409) when the
 threshold is not met. The error message lists concrete remediation steps:
 
-1. Release cached ComfyUI models from Models & System Status.
+1. Release cached ComfyUI models from the Models screen.
 2. Unload the externally managed LLM in its router UI.
 3. Retry after VRAM is free.
 

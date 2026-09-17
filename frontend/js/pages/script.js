@@ -89,7 +89,7 @@ function scriptPanel() {
         ? el("div", { class: "warning-list" },
             el("div", { class: "witem" },
               el("span", {}, "Choose a script model before planning. "),
-              el("a", { href: "#/models" }, "Open Models & System Status"),
+              el("a", { href: "#/models" }, "Open Models"),
               el("span", {}, " to select a router model for this project."),
             ),
           )

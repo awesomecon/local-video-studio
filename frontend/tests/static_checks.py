@@ -212,6 +212,7 @@ def check_routes() -> None:
 
 ALLOWED_STORAGE_KEYS = {
     "lvs-current-project",
+    "lvs-alert-sound",
     "lvs-nav-collapsed",
     "lvs-recovery-seen",
 }

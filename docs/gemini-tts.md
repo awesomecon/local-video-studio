@@ -35,9 +35,10 @@ Two ways, and the environment variable always wins:
 1. **Environment variable.** Export `GEMINI_API_KEY` before starting the
    dashboard (see `.env.example` for file-based loading). This is the
    recommended path for anything automated.
-2. **Voice page.** Select "Gemini TTS (Google, cloud)" in the TTS model
-   list. A Gemini panel appears with a key field: paste the key and press
-   **Save key**. The key is validated, then written to a private file
+2. **Settings screen (or the Voice screen).** The "Remote services —
+   Gemini TTS" panel on the Settings screen — and the same panel in the
+   Gemini TTS section of the Voice screen — has a key field: paste the key
+   and press **Save key**. The key is validated, then written to a private file
    (`~/.local/share/local-video-studio/secrets/gemini_tts_api_key.key`, mode
    `0600` with a `0700` directory on POSIX, or a user-only ACL on Windows).
    No endpoint ever returns the key's value — status checks report only
@@ -107,7 +108,7 @@ Machine-local overrides go in `config/local.yaml` (never the key itself).
 
 | Symptom | Meaning / fix |
 | --- | --- |
-| `needs API key` / `409 ... needs a Google AI Studio API key` | Set the key (Voice page or `GEMINI_API_KEY`) and restart the dashboard if you used the environment variable. |
+| `needs API key` / `409 ... needs a Google AI Studio API key` | Set the key (Settings or Voice screen, or `GEMINI_API_KEY`) and restart the dashboard if you used the environment variable. |
 | `Google rejected the Gemini API key` (auth) | The key is invalid, revoked, or has no Gemini access. Regenerate it in AI Studio. |
 | `Gemini TTS quota or rate limit was hit` | You are on the free tier or exceeded it; wait, or check your AI Studio usage. The job marks this retryable. |
 | `model ... was not found` | The `model` identifier in config does not exist (or your account lacks access). |

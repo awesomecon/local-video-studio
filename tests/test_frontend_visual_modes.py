@@ -10,6 +10,7 @@ SHOTS_HELPERS = FRONTEND / "js" / "shots.js"
 SCENE_EDITOR = FRONTEND / "js" / "pages" / "scene-editor.js"
 THUMBNAILS_PAGE = FRONTEND / "js" / "pages" / "thumbnails.js"
 MODELS_PAGE = Path(__file__).resolve().parents[1] / "frontend" / "js" / "pages" / "models.js"
+SYSTEM_PAGE = Path(__file__).resolve().parents[1] / "frontend" / "js" / "pages" / "system.js"
 
 
 def test_scene_editor_describes_every_visual_mode_and_its_readiness() -> None:
@@ -102,6 +103,18 @@ def test_models_page_can_unload_a_studio_owned_ideogram_worker() -> None:
     assert '"Unload Ideogram 4"' in source
     assert "stopped_owned_worker" in source
     assert "only when this Studio started it" in source
+
+
+def test_environment_panels_live_on_the_system_screen() -> None:
+    models_source = MODELS_PAGE.read_text(encoding="utf-8")
+    system_source = SYSTEM_PAGE.read_text(encoding="utf-8")
+
+    for moved in ("capabilityPanel", "classificationPanel", "recoveryPanel",
+                  "runtimePanel", "portsPanel"):
+        assert f"function {moved}(" not in models_source, (
+            f"{moved} should have moved off the Models screen")
+        assert f"function {moved}(" in system_source, (
+            f"{moved} should live on the System status screen")
 
 
 def test_scene_editor_exposes_generated_background_exact_text_mode() -> None:

@@ -67,6 +67,7 @@ ROUTES = [
     ("jobs", "#/jobs"),
     ("settings", "#/settings"),
     ("models", "#/models"),
+    ("system", "#/system"),
     ("scene", None),  # filled from the selected project's first scene
 ]
 

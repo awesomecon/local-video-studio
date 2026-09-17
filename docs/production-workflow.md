@@ -101,6 +101,15 @@ compositions instead of scene-based video, and the screens follow that:
   downstream renders, after which the Timeline's timing badge reports the
   resulting alignment — the take badge itself never claims it.
 
+- **System status is its own screen.** The environment and machine
+  diagnostics (core capabilities, environment compatibility, project
+  recovery, runtime environment, ports and pipeline mode) live on the
+  dedicated System status screen (`#/system`); the Models screen
+  (`#/models`) keeps script-model selection, registered backends, model
+  memory, H3 readiness, and the live GPU, and the Settings screen
+  (`#/settings`) holds app preferences — including the notification sound
+  and the Gemini TTS API key shared with the Voice screen.
+
 Classic and legacy projects keep the existing scene-based screens unchanged.
 
 ## Long-form rhythm

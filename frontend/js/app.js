@@ -25,6 +25,7 @@ import {
 import { loadConfig } from "./config.js";
 import { parseRoute, onHashChange, navigate, onRoute } from "./router.js";
 import { icon, badge, toast, STAGE_LABELS } from "./ui.js";
+import { initAlertSound } from "./alert-sound.js";
 import { health, systemStatus, listProjects } from "./api.js";
 import { effectiveVideoMode } from "./video-mode.js";
 import { createJobFeed } from "./events.js";
@@ -43,6 +44,7 @@ import { renderTimeline } from "./pages/timeline.js";
 import { renderExport } from "./pages/export.js";
 import { renderSettings } from "./pages/settings.js";
 import { renderModels } from "./pages/models.js";
+import { renderSystemPage } from "./pages/system.js";
 import { renderJobs } from "./pages/jobs.js";
 import { renderNotFound } from "./pages/not-found.js";
 
@@ -68,6 +70,7 @@ const NAV_PRIMARY = /** @type {NavItem[]} */ ([
 const NAV_FOOT = /** @type {NavItem[]} */ ([
   { name: "jobs", hash: "#/jobs", label: "Job Monitor", icon: "film" },
   { name: "models", hash: "#/models", label: "Models", icon: "cpu" },
+  { name: "system", hash: "#/system", label: "System status", icon: "system" },
   { name: "settings", hash: "#/settings", label: "Settings", icon: "settings" },
 ]);
 
@@ -401,8 +404,8 @@ function recoveryFingerprint(recovery) {
  * startup, so a boot-time-only toast is noise. The fingerprint is persisted
  * in localStorage; when storage is unavailable the toast falls back to
  * showing every time (honest over silent). The message names each entry
- * (slug + human detail) and offers a View button to the Models screen, which
- * renders the same entries persistently.
+ * (slug + human detail) and offers a View button to the System status
+ * screen, which renders the same entries persistently.
  * @param {Array<{type: string, slug?: string, project_id?: string, detail: string}>} recovery
  */
 function noteRecoveryChange(recovery) {
@@ -424,7 +427,7 @@ function noteRecoveryChange(recovery) {
   if (recovery.length > 3) shown.push(`…and ${recovery.length - 3} more`);
   toast("warning", "Project recovery",
     `${shown.join(" — ")} No files were deleted.`,
-    { label: "View", onClick: () => navigate("#/models") },
+    { label: "View", onClick: () => navigate("#/system") },
   );
 }
 
@@ -535,6 +538,7 @@ const SCREENS = {
   export: renderExport,
   settings: renderSettings,
   models: renderModels,
+  system: renderSystemPage,
   jobs: renderJobs,
   "not-found": renderNotFound,
 };
@@ -568,6 +572,7 @@ async function init() {
   restoreCurrentProject();
   renderShell();
   restoreNav();
+  initAlertSound();
   renderRoute();
   onHashChange(renderRoute);
   startJobFeed();
