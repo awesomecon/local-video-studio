@@ -225,8 +225,9 @@ def test_krea2_refuses_to_load_without_free_vram(tmp_path: Path) -> None:
     pipeline.database.save_scene(scene)
     pipeline.store.save_scene(project.slug, scene)
 
-    with pytest.raises(PipelineError, match="Free system VRAM"):
+    with pytest.raises(PipelineError, match="Free system VRAM") as exc_info:
         pipeline.generate_scene(scene.id)
+    assert "from the Models screen" in str(exc_info.value)
 
 
 def test_update_scene_merges_both_canvas_settings(tmp_path: Path) -> None:

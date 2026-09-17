@@ -3629,6 +3629,24 @@ record("alert-sound: set/get round-trips with clamping and type validation", () 
   localStorage.removeItem("lvs-alert-sound");
 });
 
+record("alert-sound: a rejected storage write still applies for this page load", () => {
+  localStorage.removeItem("lvs-alert-sound");
+  const nativeSetItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = () => { throw new DOMException("blocked", "SecurityError"); };
+  try {
+    eq(setAlertPrefs({ enabled: false, sound: "pulse", volume: 35 }),
+      { enabled: false, sound: "pulse", volume: 35 }, "the patch applies");
+    eq(getAlertPrefs(), { enabled: false, sound: "pulse", volume: 35 },
+      "the in-memory fallback survives the failed write");
+  } finally {
+    Storage.prototype.setItem = nativeSetItem;
+  }
+  // A later successful write returns preference ownership to localStorage.
+  setAlertPrefs({ enabled: true, sound: "chirp", volume: 50 });
+  eq(getAlertPrefs(), { enabled: true, sound: "chirp", volume: 50 });
+  localStorage.removeItem("lvs-alert-sound");
+});
+
 record("alert-sound: exactly the four shipped presets, each schedulable", () => {
   eq(Object.keys(SOUND_PRESETS).sort(), ["beep", "chime", "chirp", "pulse"]);
   for (const [id, preset] of Object.entries(SOUND_PRESETS)) {

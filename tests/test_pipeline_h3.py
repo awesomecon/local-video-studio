@@ -197,6 +197,8 @@ def test_h3_dispatch_refuses_without_free_vram(tmp_path: Path) -> None:
     with pytest.raises(BackendError, match="Free system VRAM") as exc_info:
         pipeline.generate_scene(scene.id)
     assert exc_info.value.code is BackendErrorCode.INSUFFICIENT_VRAM
+    assert "from the Models screen" in str(exc_info.value)
+    assert "release cached ComfyUI models from the Models screen" in exc_info.value.details
 
 
 def test_h3_canvas_and_frame_count() -> None:

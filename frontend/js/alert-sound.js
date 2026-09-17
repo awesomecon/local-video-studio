@@ -56,6 +56,8 @@ const SOFT_ENV = 0.6;
 /** @type {any|null} the shared AudioContext (suspended until the unlock). */
 let context = null;
 let unlockRegistered = false;
+/** In-page fallback when browser storage rejects a preference write. */
+let memoryPrefs = null;
 
 /* ============================================================================
  * Preferences (persisted per browser)
@@ -67,6 +69,7 @@ let unlockRegistered = false;
  * @returns {{enabled: boolean, sound: string, volume: number}}
  */
 export function getAlertPrefs() {
+  if (memoryPrefs) return { ...memoryPrefs };
   let stored = null;
   try {
     stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
@@ -108,8 +111,11 @@ export function setAlertPrefs(patch = {}) {
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    memoryPrefs = null;
   } catch {
-    /* storage unavailable — the merged prefs still apply for this page load */
+    // Storage can be blocked by browser policy or quota. Keep the validated
+    // value in memory so controls and playback still agree for this page load.
+    memoryPrefs = { ...next };
   }
   return next;
 }
