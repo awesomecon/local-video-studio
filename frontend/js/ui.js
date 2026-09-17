@@ -7,6 +7,7 @@
  */
 
 import { el, clamp } from "./dom.js";
+import { playNotification } from "./alert-sound.js";
 
 /* ============================================================================
  * Icons — inline SVG, 24px viewBox, currentColor.
@@ -28,6 +29,7 @@ const ICONS = {
   export: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 15V3M7 8l5-5 5 5'/><path d='M4 15v5h16v-5'/></svg>",
   settings: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='3'/><path d='M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.06-.4.1-.8.1-1.2z'/></svg>",
   cpu: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='6' y='6' width='12' height='12' rx='1'/><rect x='10' y='10' width='4' height='4'/><path d='M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4'/></svg>",
+  system: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 17a8 8 0 0 1 16 0'/><path d='M12 17l4-4.5'/><circle cx='12' cy='17' r='1'/></svg>",
   check: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 12l5 5L20 6'/></svg>",
   alert: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l10 18H2z'/><path d='M12 10v5M12 18.5v.5'/></svg>",
   info: "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><circle cx='12' cy='12' r='9'/><path d='M12 11v5M12 8v.5'/></svg>",
@@ -207,6 +209,10 @@ const TOAST_TTL = 6000;
  *   (e.g. navigate to the screen the message is about).
  */
 export function toast(kind, title, message, action = null) {
+  // Audible notification: full volume for warning/critical, soft variant
+  // for good/info (see alert-sound.js). Skipped silently while the
+  // browser's autoplay policy keeps the page muted.
+  playNotification(kind);
   let region = document.getElementById("toasts");
   if (!region) {
     region = el("div", { id: "toasts" });
@@ -235,6 +241,34 @@ export function toast(kind, title, message, action = null) {
 }
 
 /**
+ * Toast severity for a normalized error kind. Operational failures
+ * (unreachable backend, timeout, authentication, validation,
+ * incompatibility, insufficient VRAM, conflict, not found, server, unknown)
+ * map to an alert — warning or critical — so the visual severity and the
+ * audible profile (full volume) stay aligned; only pending/not-yet features
+ * stay informational.
+ * @param {string} kind - ApiError kind
+ * @returns {"info"|"warning"|"critical"}
+ */
+export function errorToastKind(kind) {
+  const map = {
+    good: "info",
+    offline: "warning",
+    timeout: "warning",
+    auth: "warning",
+    incompatible: "warning",
+    insufficient_vram: "warning",
+    conflict: "warning",
+    validation: "warning",
+    not_found: "critical",
+    server: "critical",
+    pending: "info",
+    unknown: "warning",
+  };
+  return map[kind] || "info";
+}
+
+/**
  * Render a normalized ApiError into a toast.
  * @param {import("./api.js").ApiError} err
  * @param {string} [context]
@@ -254,7 +288,7 @@ export function toastError(err, context) {
     unknown: "Error",
   };
   toast(
-    err.kind === "good" ? "info" : err.kind === "conflict" || err.kind === "insufficient_vram" || err.kind === "incompatible" ? "warning" : err.kind === "not_found" || err.kind === "server" ? "critical" : "info",
+    errorToastKind(err.kind),
     titles[err.kind] || "Error",
     context ? `${context} — ${err.message}` : err.message,
   );
@@ -278,6 +312,8 @@ export function toastError(err, context) {
  * @returns {{dialog: HTMLDialogElement, close: () => void}}
  */
 export function openModal({ title, body, actions = [] }) {
+  // Nearly every dialog is a destructive-action confirm: full-volume alert.
+  playNotification("modal");
   const previous = document.activeElement;
   const dialog = el("dialog", { class: "modal", "aria-modal": "true", "aria-label": title });
   // Declared before every listener below registers it (a later `const` would

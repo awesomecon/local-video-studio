@@ -6607,7 +6607,7 @@ class PipelineService:
         if free < required:
             raise PipelineError(
                 f"Free system VRAM {free:.1f} GiB is below the {required:g} GiB required "
-                "for Krea 2 Turbo. Release cached ComfyUI models from Models & System Status, "
+                "for Krea 2 Turbo. Release cached ComfyUI models from the Models screen, "
                 "or unload the externally managed LLM in its router UI, then retry."
             )
 
@@ -7432,7 +7432,7 @@ class PipelineService:
                 BackendErrorCode.INSUFFICIENT_VRAM,
                 (
                     f"Free system VRAM {free:.1f} GiB is below the {required:g} GiB required "
-                    "for MiniMax H3. Release cached ComfyUI models from Models & System Status, "
+                    "for MiniMax H3. Release cached ComfyUI models from the Models screen, "
                     "or unload the externally managed LLM in its router UI, then retry."
                 ),
                 retryable=True,
@@ -7440,7 +7440,7 @@ class PipelineService:
                     "free_gib": free,
                     "required_gib": required,
                     "actions": [
-                        "release cached ComfyUI models from Models & System Status",
+                        "release cached ComfyUI models from the Models screen",
                         "unload the externally managed LLM in its router UI",
                         "retry after VRAM is free",
                     ],

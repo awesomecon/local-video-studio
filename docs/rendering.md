@@ -104,7 +104,7 @@ Caption alignment runs a locally stored Whisper `large-v3-turbo` (CTranslate2) m
 `narration/master.wav` — never over the script text — and records actual word timings in
 `subtitles/word-timings.json`. SRT/ASS files are built from those timestamps, so captions track
 the real audio. `GET /api/captions/models` exposes the descriptor, install guidance, health, and
-readiness (the Models & System Status screen surfaces this); the optional dependency and model
+readiness (the Models screen surfaces this); the optional dependency and model
 directory must be configured first, and nothing is downloaded automatically.
 
 Editorial composition cuts follow that same caption clock. Internal cuts snap to the nearest

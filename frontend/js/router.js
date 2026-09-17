@@ -36,6 +36,7 @@ const ROUTES = [
   { re: /^#\/jobs$/, name: "jobs", param: null },
   { re: /^#\/settings$/, name: "settings", param: null },
   { re: /^#\/models$/, name: "models", param: null },
+  { re: /^#\/system$/, name: "system", param: null },
   // Catch-all: unknown hashes get an honest not-found screen.
   { re: /./, name: "not-found", param: null },
 ];

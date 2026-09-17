@@ -219,9 +219,16 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
     # stays disabled until a key is present.
     assert "voice.disabled = gemini;" in source
     assert 'provider.value === "gemini_tts" && !geminiReady()' in source
-    assert 'badge("good", "Ready to generate")' in source
-    assert 'badge("warning", "API key needed")' in source
-    assert 'badge("offline", "Gemini disabled")' in source
+    # The readiness state machine (badges per health state) lives in the
+    # shared builder; both Voice and Settings render it.
+    shared = VOICE_JS.parent.parent / "gemini-key.js"
+    shared_source = shared.read_text(encoding="utf-8")
+    assert 'badge("good", "Ready to generate")' in shared_source
+    assert 'badge("warning", "API key needed")' in shared_source
+    assert 'badge("offline", "Gemini disabled")' in shared_source
+    assert 'badge("critical", "Gemini unavailable")' in shared_source
+    assert 'badge("critical", "API key is malformed")' in shared_source
+    assert "geminiKeyPanel" in source
     assert 'entry?.health?.remote !== true' in source
     assert "Gemini API key required" in source
     # Saving/removing the key talks to the dedicated endpoints.

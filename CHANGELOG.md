@@ -4,6 +4,32 @@
 
 ### Added
 
+- **System status is its own screen.** The environment and machine panels
+  (core studio capabilities, environment compatibility, project recovery,
+  runtime environment, ports & pipeline mode) moved off the former
+  "Models & System Status" catch-all onto a dedicated `#/system` screen,
+  so `#/models` now holds only what the machine can run and what is
+  loaded: script-model selection (now first), registered backends with
+  runtime state, model memory controls, MiniMax H3 readiness, and the live
+  GPU. The recovery toast's View button points at the System status
+  screen, and docs that named the old combined screen were refreshed.
+- **Notification-sound setting.** Settings gains a Notification sound
+  panel: enable toggle (on by default), a selectable synthesized preset
+  (chirp / beep / chime / pulse — WebAudio only, no binary assets),
+  volume, and a Test sound button. Every toast and modal dialog now plays
+  the selected preset: warnings, failures, and confirms at full volume,
+  confirmations and status updates as a quiet soft variant. Browsers keep
+  the page muted until the first click or keypress; alerts before that
+  first interaction are silently skipped, never replayed. Preferences
+  persist per browser (`lvs-alert-sound`).
+- **Gemini TTS API-key management on the Settings screen.** The key
+  panel (readiness state, password input, Save/Replace key, Remove saved
+  key) now appears under "Remote services — Gemini TTS" on the Settings
+  screen as well as in the Gemini TTS section of the Voice screen. Both
+  hosts render one shared builder (`frontend/js/gemini-key.js`), so the
+  state machine exists in exactly one place; the security model is
+  unchanged (user-private local secret file, no endpoint returns the
+  key).
 - **Final-render history with deletion.** Every time a final video is
   re-rendered, the previous `renders/final.mp4` is preserved in the
   project's human-readable `renders/history/` directory (instead of the

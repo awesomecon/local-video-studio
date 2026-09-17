@@ -60,7 +60,7 @@ The first Krea generation uses the system-wide 20 GiB free-VRAM gate. Consecutiv
 Krea-backed Image Motion scenes reuse the resident Krea stack, so they do not fail the cold-load gate
 merely because that same stack now occupies VRAM. Image Motion can also select Qwen-Image-2512; that
 choice uses the Qwen canvas and requested-text controls and switches the resident ComfyUI family.
-Switching to H3 releases the current still-image stack first. The Models & System Status screen also
+Switching to H3 releases the current still-image stack first. The Models screen also
 provides a manual **Release ComfyUI VRAM** action.
 
 If the local LLM router holds the card before a cold load, generation still waits for the user to
