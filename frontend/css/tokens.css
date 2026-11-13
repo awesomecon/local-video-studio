@@ -1,42 +1,49 @@
-/*
- * Local Video Studio — design tokens.
- *
- * Dark, production-oriented workspace. Palette values are the validated dark
- * column of the neutral reference palette (see docs for provenance): surface
- * #1a1a19, ink #ffffff/#c3c2b7/#898781, accent blue #3987e5, and the fixed
- * status set good/warning/serious/critical. Status colors are reserved and are
- * always paired with an icon + text label — never color alone.
- */
+@font-face {
+  font-family: "DM Sans";
+  src: url("../assets/fonts/dm-sans-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Manrope;
+  src: url("../assets/fonts/manrope-latin.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
   /* --- Surfaces ------------------------------------------------------- */
-  --plane: #0d0d0d;        /* page background */
-  --surface-1: #1a1a19;    /* card / panel */
-  --surface-2: #20201e;    /* raised panel, inputs */
-  --surface-3: #282826;    /* hover wash */
-  --surface-inset: #131312;/* wells, code blocks */
+  --plane: #f7f7f2;
+  --rail: #f1f2eb;
+  --surface-1: #fffefa;
+  --surface-2: #fafaf5;
+  --surface-3: #eeefe7;
+  --surface-inset: #f4f5ef;
 
   /* --- Ink ------------------------------------------------------------ */
-  --text-1: #ffffff;
-  --text-2: #c3c2b7;
-  --text-3: #898781;
+  --text-1: #26372f;
+  --text-2: #46564d;
+  --text-3: #5f6d62;
 
   /* --- Lines ------------------------------------------------------------ */
-  --line: #2c2c2a;
-  --line-strong: #383835;
+  --line: #dcdfd3;
+  --line-strong: #bbc2b4;
 
   /* --- Accent (restrained) -------------------------------------------- */
-  --accent: #3987e5;
-  --accent-2: #256abf;
+  --accent: #ae482f;
+  --accent-2: #943b28;
+  --accent-text: #fffdf8;
   --accent-wash: color-mix(in oklab, var(--accent) 16%, transparent);
 
   /* --- Status (reserved: icon + label, never color alone) -------------- */
-  --good: #0ca30c;
-  --warning: #fab219;
-  --serious: #ec835a;
-  --critical: #d03b3b;
-  --offline: #898781;
+  --good: #36694a;
+  --warning: #815814;
+  --serious: #9b4227;
+  --critical: #a32f2f;
+  --offline: #627063;
 
   --good-ink: color-mix(in oklab, var(--good) 14%, transparent);
   --warning-ink: color-mix(in oklab, var(--warning) 15%, transparent);
@@ -53,6 +60,10 @@
   --lane-image: #8b72f0;
   --lane-h3: #f08c3a;
   --lane-html: #3d8fe0;
+  --lane-real-text: #285c42;
+  --lane-image-text: #57429a;
+  --lane-h3-text: #884711;
+  --lane-html-text: #1e5487;
   --tpl-archive-canvas: #c9a86a;
   --tpl-document-reveal: #8fb8a8;
   --tpl-comparison-canvas: #8b72f0;
@@ -60,10 +71,11 @@
   --tpl-big-text-reveal: #ec835a;
 
   /* --- Typography ------------------------------------------------------ */
-  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font: "DM Sans", system-ui, sans-serif;
+  --font-display: Manrope, var(--font);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --text-xs: 0.72rem;
-  --text-sm: 0.82rem;
+  --text-xs: 0.79rem;
+  --text-sm: 0.89rem;
   --text-md: 0.95rem;
   --text-lg: 1.05rem;
   --text-2xl: 1.7rem;
@@ -74,15 +86,15 @@
   --radius: 8px;
   --radius-lg: 12px;
   --focus-ring: 0 0 0 2px var(--plane), 0 0 0 4px var(--accent);
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-1: none;
+  --shadow-2: 0 16px 50px #273c3026;
   --dur: 140ms;
   --dur-slow: 240ms;
 
   /* --- Layout ----------------------------------------------------------- */
-  --nav-w: 232px;
+  --nav-w: 238px;
   --nav-w-collapsed: 64px;
-  --topbar-h: 52px;
+  --topbar-h: 62px;
   --content-max: 1560px;
   --gap: 16px;
   --gap-sm: 10px;
@@ -92,6 +104,34 @@
   /* Sticky label column width; timeline.js reads this (single source of
      truth, no magic number duplicated in JS). */
   --tl-label-w: 96px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #191d1b;
+  --rail: #151916;
+  --surface-1: #202622;
+  --surface-2: #252d27;
+  --surface-3: #2b332c;
+  --surface-inset: #171c18;
+  --text-1: #eeefe5;
+  --text-2: #bfc8b8;
+  --text-3: #a4b09d;
+  --line: #3b453b;
+  --line-strong: #546053;
+  --accent: #e79a7c;
+  --accent-2: #f3ae91;
+  --accent-text: #291a13;
+  --good: #a7c599;
+  --warning: #dec08a;
+  --serious: #efb08c;
+  --critical: #eda299;
+  --offline: #a4b09d;
+  --lane-real-text: #86dcb0;
+  --lane-image-text: #cabcff;
+  --lane-h3-text: #ffc790;
+  --lane-html-text: #93cdff;
+  --shadow-2: 0 16px 60px #0005;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -649,7 +649,7 @@ class EditorialPlanner:
                 for template, constraints in TEMPLATE_TEXT_CONSTRAINTS.items()
             },
             "approved_motion_primitives": [item.value for item in MotionPrimitive],
-            "approved_image_models": ["krea", "qwen_image", "ideogram4_local"],
+            "approved_image_models": ["krea", "qwen_image", "qwen_image_21", "ideogram4_local"],
         }
 
     @staticmethod

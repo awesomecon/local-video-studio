@@ -70,8 +70,7 @@ export function renderMusic(_route) {
   }
   destroyWaveformContext();
   const screen = el("div", { class: "screen" },
-    el("div", { class: "screen-head" }, el("h1", {}, "Music"),
-      el("span", { class: "sub" }, "Score Studio")),
+    el("div", { class: "screen-head" }, el("h1", {}, "Music & sound")),
   );
   if (!state.currentProjectId) {
     screen.append(needsProject("Select a project in the top bar to manage its music."));
@@ -80,24 +79,28 @@ export function renderMusic(_route) {
   }
   const layout = el("div", { class: "score-layout" });
   const genPanel = el("div", { class: "score-col score-col-gen" });
-  const studioPanel = el("div", { class: "score-col score-col-studio" });
+  const studioPanel = el("div", { class: "score-col" });
   const cuePanel = el("div", { class: "score-col score-col-cues" });
-  layout.append(genPanel, studioPanel, cuePanel);
+  const autoHost = el("div", { class: "score-col", hidden: true });
+  layout.append(studioPanel, el("aside", { class: "score-sidebar", "aria-label": "Score controls" },
+    el("div", { class: "stack" }, cuePanel, autoHost), genPanel,
+  ));
   screen.append(layout);
   active = { gen, screen, timeline: null };
 
-  load(gen, { genPanel, studioPanel, cuePanel });
+  load(gen, { genPanel, studioPanel, cuePanel, autoHost });
   return screen;
 }
 
 /**
  * @param {number} gen
- * @param {{genPanel: HTMLElement, studioPanel: HTMLElement, cuePanel: HTMLElement}} region
+ * @param {{genPanel: HTMLElement, studioPanel: HTMLElement, cuePanel: HTMLElement, autoHost: HTMLElement}} region
  */
 async function load(gen, region) {
   region.genPanel.replaceChildren(loadingState(2));
   region.studioPanel.replaceChildren(loadingState(3));
   region.cuePanel.replaceChildren(loadingState(2));
+  region.autoHost.hidden = true;
   try {
     const [snap, models] = await Promise.all([
       musicStudio(state.config, state.currentProjectId),
@@ -469,7 +472,7 @@ function soundtrackPanel(snap) {
       rows.length
         ? rows
         : el("div", { class: "muted small" },
-          "No music yet — generate it above. The master is never modified by scoring; cues are mixed into a separate scored file."
+          "No music yet. Generate a soundtrack in the Generation panel. Scoring mixes cues into a separate file."
         ),
       planHash
         ? el("div", { class: "muted small mono" }, `score plan ${planHash}`)
@@ -532,7 +535,7 @@ function versionedAudioUrl(url, version) {
 
 /**
  * @param {number} gen
- * @param {{genPanel: HTMLElement, studioPanel: HTMLElement, cuePanel: HTMLElement}} region
+ * @param {{genPanel: HTMLElement, studioPanel: HTMLElement, cuePanel: HTMLElement, autoHost: HTMLElement}} region
  * @param {any} snap
  */
 function buildStudio(gen, region, snap) {
@@ -573,7 +576,9 @@ function buildStudio(gen, region, snap) {
   );
   const autoBody = autoPanel.querySelector(".panel-body");
 
-  studioPanel.replaceChildren(timelinePanel, previewRow, autoPanel);
+  studioPanel.replaceChildren(timelinePanel, previewRow);
+  region.autoHost.replaceChildren(autoPanel);
+  region.autoHost.hidden = false;
 
   // ---- timeline -----------------------------------------------------------
   const timeline = createScoreTimeline(timelineHost, {
@@ -1078,6 +1083,10 @@ function cuesPanel(state, snap, region) {
     : el("div", { class: "muted small" }, "Select a cue to edit its exact time, action, gain, filter, and effect.");
 
   return el("div", { class: "stack" },
+    el("section", { class: "panel" },
+      el("h2", { class: "panel-title" }, "Mix"),
+      levelControl,
+    ),
     el("div", { class: "panel" },
       el("div", { class: "row" },
         el("span", { class: "panel-title" }, "Cues"),
@@ -1085,7 +1094,7 @@ function cuesPanel(state, snap, region) {
         el("span", { class: "spacer" }),
         addBtn,
       ),
-      el("div", { class: "panel-body stack" }, levelControl, listRows),
+      el("div", { class: "panel-body stack" }, listRows),
     ),
     el("div", { class: "panel" },
       el("div", { class: "row" },

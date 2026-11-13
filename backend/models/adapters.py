@@ -219,6 +219,28 @@ class QwenImage2512Backend(ComfyUIBackend):
         )
 
 
+class QwenImage21Backend(ComfyUIBackend):
+    """Native Qwen-Image-2.1 INT8 workflow in a separate local service."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("model_name", "Qwen-Image-2.1")
+        super().__init__(*args, **kwargs)
+
+    def descriptor(self) -> BackendDescriptor:
+        return BackendDescriptor(
+            backend_name="qwen_image_21_comfyui",
+            model_name=self.model_name,
+            model_version="2.1",
+            quantization="int8_convrot",
+            device="external-local-service",
+            vram_required_gb=20.0,
+            capabilities=frozenset({Capability.TEXT_TO_IMAGE}),
+            supported_inputs=("prompt", "negative_prompt", "seed", "workflow_json"),
+            supported_outputs=("image",),
+            heavyweight=True,
+        )
+
+
 class Ideogram4LocalBackend(ComfyUIBackend):
     """Local ComfyUI adapter for Ideogram 4 (structured JSON prompts).
 

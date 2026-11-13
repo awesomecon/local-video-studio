@@ -448,6 +448,8 @@ class ThumbnailStudioService:
             default_backend = "ideogram4_local_comfyui"
         elif image_model in {"qwen_image", "qwen_image_native_text"}:
             default_backend = "qwen_image_2512_comfyui"
+        elif image_model in {"qwen_image_21", "qwen_image_21_native_text"}:
+            default_backend = "qwen_image_21_comfyui"
         else:
             default_backend = "krea2_comfyui"
         return self.pipeline.jobs.enqueue(GenerationJob(
@@ -489,7 +491,7 @@ class ThumbnailStudioService:
         temporary = Path(tempfile.mkdtemp(prefix=f".{candidate_id}-", dir=thumbnail_root))
         image_model = getattr(plan, "image_model", "krea") or "krea"
         is_ideogram = image_model == "ideogram4_local"
-        is_qwen_native_text = image_model == "qwen_image_native_text"
+        is_qwen_native_text = image_model in {"qwen_image_native_text", "qwen_image_21_native_text"}
         # Imported artwork never contains model-rendered copy, even when the
         # saved plan currently selects a native-text generator.
         renders_native_text = (
@@ -534,7 +536,7 @@ class ThumbnailStudioService:
                 elif is_ideogram:
                     result = self._dispatch_ideogram4(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
-                elif image_model in {"qwen_image", "qwen_image_native_text"}:
+                elif image_model in {"qwen_image", "qwen_image_native_text", "qwen_image_21", "qwen_image_21_native_text"}:
                     result = self._dispatch_qwen_image(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
                 else:
@@ -688,6 +690,7 @@ class ThumbnailStudioService:
                     model={
                         "krea2_comfyui": "Krea 2 Turbo",
                         "qwen_image_2512_comfyui": "Qwen-Image-2512",
+                        "qwen_image_21_comfyui": "Qwen-Image-2.1",
                         "ideogram4_local_comfyui": "Ideogram 4",
                     }.get(job.backend or "", "local"),
                     workflow_version="thumbnail-composite-v2",
@@ -947,20 +950,22 @@ class ThumbnailStudioService:
         seed: int,
     ) -> GenerationResult:
         """Generate either Qwen artwork or a finished Qwen native-text thumbnail."""
-        backend_name = "qwen_image_2512_comfyui"
+        qwen21 = plan.image_model in {"qwen_image_21", "qwen_image_21_native_text"}
+        backend_name = "qwen_image_21_comfyui" if qwen21 else "qwen_image_2512_comfyui"
+        workflow_version = "qwen-image-2.1-thumbnail-int8-v1" if qwen21 else _QWEN_THUMBNAIL_WORKFLOW_VERSION
         reusing_resident = self.pipeline._prepare_comfy_backend(backend_name)
         if not reusing_resident:
             self.pipeline._check_qwen_image_vram()
         parameters = {
             "width": _QWEN_THUMBNAIL_WIDTH,
             "height": _QWEN_THUMBNAIL_HEIGHT,
-            "steps": 50,
-            "cfg": 4.0,
+            "steps": 25 if qwen21 else 50,
+            "cfg": 1.0 if qwen21 else 4.0,
             "sampler": "euler",
             "scheduler": "simple",
-            "model_sampling_shift": 3.1,
+            "model_sampling_shift": 1.0 if qwen21 else 3.1,
         }
-        native_text = plan.image_model == "qwen_image_native_text"
+        native_text = plan.image_model in {"qwen_image_native_text", "qwen_image_21_native_text"}
         request = GenerationRequest(
             job_id=job_id,
             output_dir=directory,
@@ -976,8 +981,8 @@ class ThumbnailStudioService:
             height=_QWEN_THUMBNAIL_HEIGHT,
             settings={
                 "kind": "image",
-                "workflow": self.pipeline.QWEN_IMAGE_2512_WORKFLOW,
-                "workflow_version": _QWEN_THUMBNAIL_WORKFLOW_VERSION,
+                "workflow": self.pipeline.QWEN_IMAGE_21_WORKFLOW if qwen21 else self.pipeline.QWEN_IMAGE_2512_WORKFLOW,
+                "workflow_version": workflow_version,
             },
         )
         backend = self.pipeline.registry.get(backend_name)
@@ -992,7 +997,7 @@ class ThumbnailStudioService:
                     "prompt": request.prompt,
                     "negative_prompt": request.negative_prompt,
                     "seed": request.seed,
-                    "workflow_version": _QWEN_THUMBNAIL_WORKFLOW_VERSION,
+                    "workflow_version": workflow_version,
                     "settings": {**parameters, "native_text": native_text},
                 },
                 peak_vram_gb=generated.peak_vram_gb,
@@ -1005,7 +1010,7 @@ class ThumbnailStudioService:
                 model=descriptor.model_name,
                 model_version=descriptor.model_version,
                 quantization=descriptor.quantization,
-                workflow_version=_QWEN_THUMBNAIL_WORKFLOW_VERSION,
+                workflow_version=workflow_version,
                 parameters=parameters,
                 seed=seed,
                 success=False,

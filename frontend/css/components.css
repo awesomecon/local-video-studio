@@ -27,10 +27,10 @@
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent-2);
-  color: #fff;
+  color: var(--accent-text);
 }
 .btn-primary:hover { background: var(--accent-2); }
-.btn-danger { border-color: color-mix(in oklab, var(--critical) 55%, var(--line-strong)); color: #ffb4b4; }
+.btn-danger { border-color: color-mix(in oklab, var(--critical) 55%, var(--line-strong)); color: var(--critical); }
 .btn-danger:hover { background: color-mix(in oklab, var(--critical) 18%, var(--surface-2)); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .btn-ghost:hover { background: var(--surface-3); color: var(--text-1); }
@@ -260,27 +260,43 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 /* --- Job monitor rows --------------------------------------------------------- */
 .job-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(120px, 1fr) auto;
-  gap: 10px 14px;
-  align-items: center;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 6px 24px;
+  align-items: start;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
 }
-.job-row:last-child { border-bottom: 0; }
-.job-row .job-what { min-width: 0; }
-.job-row .job-what .job-stage { font-weight: 600; font-size: var(--text-sm); }
-.job-row .job-what .job-ctx { font-size: var(--text-xs); color: var(--text-3); }
-.job-row .job-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.job-row .job-actions { display: flex; gap: 6px; align-items: center; }
-.job-error {
-  margin-top: 8px;
-  font-size: var(--text-xs);
+.jobs-filters { margin-bottom: 14px; }
+.jobs-filters select { width: auto; max-width: 100%; }
+.jobs-filters [aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
+.job-row .job-what { min-width: 0; gap: 5px; }
+.job-row .job-stage { margin: 0; font: 750 1rem var(--font-display); }
+.job-row .job-ctx { font-size: var(--text-sm); color: var(--text-2); overflow-wrap: anywhere; }
+.job-row .job-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  min-width: 0;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+.job-state { display: grid; grid-template-columns: minmax(0, 1fr) 70px; align-items: start; gap: 8px; }
+.job-state > .badge { justify-self: start; max-width: 100%; white-space: normal; }
+.job-row .job-actions { display: flex; justify-content: flex-end; }
+.job-failure {
   color: var(--critical);
   background: var(--critical-ink);
-  border: 1px solid color-mix(in oklab, var(--critical) 35%, transparent);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  word-break: break-word;
+  padding: 5px 8px;
+  overflow-wrap: anywhere;
+}
+.job-row .progress-row { max-width: 360px; }
+@media (max-width: 680px) {
+  .job-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+  .job-state { grid-template-columns: 1fr; justify-items: end; }
+  .job-state > .badge { justify-self: end; }
 }
 .job-row .job-id { font-family: var(--mono); font-size: var(--text-xs); color: var(--text-3); }
 
@@ -334,11 +350,6 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   padding: 2px 8px;
   display: inline-flex; align-items: center; gap: 5px;
 }
-.scene-card .seed-chip {
-  position: absolute; bottom: 8px; left: 8px;
-  font-family: var(--mono); font-size: var(--text-xs);
-  background: rgba(0,0,0,0.55); color: #ddd; padding: 1px 6px; border-radius: 4px;
-}
 
 /* --- Scene editor ----------------------------------------------------------------- */
 .editor-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--gap); align-items: start; }
@@ -365,10 +376,10 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   border-radius: 999px; padding: 1px 8px;
   border: 1px solid; white-space: nowrap;
 }
-.lane-real  { color: #86dcb0; border-color: color-mix(in oklab, var(--lane-real) 60%, transparent); background: color-mix(in oklab, var(--lane-real) 16%, transparent); }
-.lane-image { color: #cabcff; border-color: color-mix(in oklab, var(--lane-image) 60%, transparent); background: color-mix(in oklab, var(--lane-image) 16%, transparent); }
-.lane-h3    { color: #ffc790; border-color: color-mix(in oklab, var(--lane-h3) 60%, transparent); background: color-mix(in oklab, var(--lane-h3) 16%, transparent); }
-.lane-html  { color: #93cdff; border-color: color-mix(in oklab, var(--lane-html) 60%, transparent); background: color-mix(in oklab, var(--lane-html) 16%, transparent); }
+.lane-real  { color: var(--lane-real-text); border-color: color-mix(in oklab, var(--lane-real) 60%, transparent); background: color-mix(in oklab, var(--lane-real) 16%, transparent); }
+.lane-image { color: var(--lane-image-text); border-color: color-mix(in oklab, var(--lane-image) 60%, transparent); background: color-mix(in oklab, var(--lane-image) 16%, transparent); }
+.lane-h3    { color: var(--lane-h3-text); border-color: color-mix(in oklab, var(--lane-h3) 60%, transparent); background: color-mix(in oklab, var(--lane-h3) 16%, transparent); }
+.lane-html  { color: var(--lane-html-text); border-color: color-mix(in oklab, var(--lane-html) 60%, transparent); background: color-mix(in oklab, var(--lane-html) 16%, transparent); }
 
 /* Ordered shot strip in the Scene Editor. */
 .shot-strip {
@@ -1186,31 +1197,36 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 
 /* ==========================================================================
    Score Studio (Music screen)
-   Responsive 3-column workspace: Generation | Timeline | Cues.
+   Timeline workspace with a sidebar for cue editing and generation.
    Reuses the shared .panel / .field / .btn / .badge primitives and tokens;
    only the score-timeline geometry and cue chrome are new.
    ========================================================================== */
 .score-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(460px, 2fr) minmax(320px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.48fr);
   gap: var(--gap-lg);
   align-items: start;
 }
-.score-col { min-width: 0; display: grid; gap: var(--gap-lg); }
+.score-col, .score-sidebar { min-width: 0; display: grid; gap: var(--gap); }
+.score-layout .panel { margin-bottom: 0; }
+.score-sidebar { border-left: 1px solid var(--line); padding-left: var(--gap); }
+.score-sidebar .panel { background: var(--surface-2); box-shadow: none; }
 /* Grid items default to min-width:auto (their min-content). The timeline's
    lane canvas is sized in fixed pixels (duration × px-per-second) and would
    otherwise force the panel wider than its track, painting underneath the
    cues column instead of scrolling inside .sc-viewport. */
 .score-col > * { min-width: 0; }
 @media (max-width: 1500px) {
-  /* Tablet: timeline full-width on top, generation and cues side by side. */
-  .score-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .score-col-studio { grid-column: 1 / -1; order: -1; }
+  .score-layout { grid-template-columns: minmax(0, 1fr); }
+  .score-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    border-left: 0;
+    padding-left: 0;
+  }
 }
-@media (max-width: 900px) {
-  /* Mobile: single column in reading order generation → timeline → cues. */
-  .score-layout { grid-template-columns: 1fr; }
-  .score-col-studio { grid-column: auto; order: 0; }
+@media (max-width: 740px) {
+  .score-sidebar { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ---- score timeline ------------------------------------------------------ */
@@ -1378,6 +1394,10 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 .sc-time { min-width: 92px; text-align: right; font-size: 12px; color: var(--text-2); }
 .sc-snap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); }
 .sc-snap input { accent-color: var(--accent); }
+@media (max-width: 740px) {
+  .sc-transport { flex-wrap: wrap; }
+  .sc-transport input[type="range"] { max-width: 100%; }
+}
 
 /* ---- cue list rows --------------------------------------------------------- */
 .cue-row {

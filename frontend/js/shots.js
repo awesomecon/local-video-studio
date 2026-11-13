@@ -144,6 +144,12 @@ export const VISUAL_TYPES = [
     description: "Generates a local still with Qwen-Image-2512 when readable text must be part of the photographed or illustrated scene.",
   },
   {
+    value: "qwen_image_21_still",
+    wired: true,
+    label: "Qwen-Image-2.1 still image",
+    description: "Generates a local still with Qwen-Image-2.1 through its dedicated ComfyUI service.",
+  },
+  {
     value: "flux_still",
     wired: false,
     label: "FLUX still image — unwired",

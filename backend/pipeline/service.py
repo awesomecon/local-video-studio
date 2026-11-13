@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import textwrap
 import threading
@@ -235,6 +236,7 @@ class PipelineService:
         / "comfyui"
         / "qwen-image-2512.workflow.json"
     )
+    QWEN_IMAGE_21_WORKFLOW = resource_path("workflows", "comfyui", "qwen-image-2.1.workflow.json")
     # Ideogram 4 runs locally through its ComfyUI workflow template. Added to
     # TEST against Qwen Image for embedded-text scenes; Qwen stays available.
     IDEOGRAM4_WORKFLOW = (
@@ -457,13 +459,16 @@ class PipelineService:
                     }
             scene_payloads.append(payload)
 
+        jobs = self.jobs.list(project_id)
+        stages = self._read_stage_state(project)
         snapshot = {
             "project": project.model_dump(mode="json"),
             "scenes": scene_payloads,
             "assets": assets,
-            "jobs": [job.model_dump(mode="json") for job in self.jobs.list(project_id)],
+            "jobs": [job.model_dump(mode="json") for job in jobs],
             "directory": str(self.store.project_path(project)),
-            "stage_state": self._read_stage_state(project),
+            "stage_state": stages,
+            "quality_report": self._preview_quality_report(project, stages.get("stages", {}), jobs),
         }
         if project.video_mode is VideoMode.EDITORIAL:
             plan_status = self._editorial_plan_status(project)
@@ -911,6 +916,9 @@ class PipelineService:
                 EditorialImageModel.KREA: (ImageModelOption.KREA, VisualType.KREA2_STILL),
                 EditorialImageModel.QWEN_IMAGE: (
                     ImageModelOption.QWEN_IMAGE, VisualType.QWEN_IMAGE_STILL,
+                ),
+                EditorialImageModel.QWEN_IMAGE_21: (
+                    ImageModelOption.QWEN_IMAGE_21, VisualType.QWEN_IMAGE_21_STILL,
                 ),
                 EditorialImageModel.IDEOGRAM4_LOCAL: (
                     ImageModelOption.IDEOGRAM4_LOCAL, VisualType.IDEOGRAM4_STILL,
@@ -3291,6 +3299,7 @@ class PipelineService:
     _VISUAL_BATCH_ORDER = (
         VisualType.TEXT_OVERLAY_STILL,
         VisualType.QWEN_IMAGE_STILL,
+        VisualType.QWEN_IMAGE_21_STILL,
         VisualType.IDEOGRAM4_STILL,
         VisualType.KREA2_STILL,
         VisualType.IMAGE_MOTION,
@@ -3365,11 +3374,13 @@ class PipelineService:
             return ImageModelOption.KREA.value
 
         image_order = {
+            ImageModelOption.QWEN_IMAGE_21.value: 3,
             ImageModelOption.KREA.value: 0,
             ImageModelOption.IDEOGRAM4_LOCAL.value: 1,
             ImageModelOption.QWEN_IMAGE.value: 2,
         }
         image_type_order = {
+            VisualType.QWEN_IMAGE_21_STILL: 0,
             VisualType.TEXT_OVERLAY_STILL: 0,
             VisualType.KREA2_STILL: 0,
             VisualType.IDEOGRAM4_STILL: 0,
@@ -3595,6 +3606,7 @@ class PipelineService:
         if job is None:
             raise KeyError(f"job not found: {job_id}")
         canceled = self.jobs.cancel(job_id)
+        self.tts.cancel_active(job_id)
         cancel_media_processes_for_job(job_id)
         if job.stage == "visual_batch":
             self._cancel_batch_children(canceled)
@@ -4604,8 +4616,22 @@ class PipelineService:
             def _execute() -> GenerationResult:
                 if resolved.uses_gpu:
                     with self._gpu_lock:
-                        resolved.backend.load()
-                        return resolved.backend.generate(request)
+                        if resolved.backend_name == "qwen_image_21_comfyui":
+                            if not self._prepare_comfy_backend(resolved.backend_name):
+                                self._check_qwen_image_vram()
+                        try:
+                            resolved.backend.load()
+                            generated = resolved.backend.generate(request)
+                        except BaseException:
+                            if resolved.backend_name == "qwen_image_21_comfyui":
+                                self._release_comfyui_memory(
+                                    backend_name=resolved.backend_name,
+                                    wait_for_vram=False, suppress_errors=True,
+                                )
+                            raise
+                        if resolved.backend_name == "qwen_image_21_comfyui":
+                            self._resident_comfy_backend = resolved.backend_name
+                        return generated
                 return resolved.backend.generate(request)
 
             result = _execute()
@@ -4716,6 +4742,7 @@ class PipelineService:
                 VisualType.KREA2_STILL,
                 VisualType.IDEOGRAM4_STILL,
                 VisualType.QWEN_IMAGE_STILL,
+                VisualType.QWEN_IMAGE_21_STILL,
                 VisualType.FLUX_STILL,
                 VisualType.IMAGE_MOTION,
             }:
@@ -5883,6 +5910,8 @@ class PipelineService:
             return ImageModelOption.KREA
         if scene.visual_type is VisualType.IDEOGRAM4_STILL:
             return ImageModelOption.IDEOGRAM4_LOCAL
+        if scene.visual_type is VisualType.QWEN_IMAGE_21_STILL:
+            return ImageModelOption.QWEN_IMAGE_21
         if scene.needs_embedded_text:
             try:
                 return ImageModelOption(self.config.image_generation.text_model)
@@ -5925,6 +5954,10 @@ class PipelineService:
             return self._dispatch_krea2(project, scene, directory, use_cache=use_cache)
         if model is ImageModelOption.QWEN_IMAGE:
             return self._dispatch_qwen_image_2512(project, scene, directory, use_cache=use_cache)
+        if model is ImageModelOption.QWEN_IMAGE_21:
+            return self._dispatch_qwen_image_2512(
+                project, scene, directory, use_cache=use_cache, qwen21=True,
+            )
         if model is ImageModelOption.IDEOGRAM4_LOCAL:
             return self._dispatch_ideogram4(project, scene, directory, use_cache=use_cache)
         raise PipelineError(f"Unsupported image model {model!r}.")
@@ -6613,9 +6646,12 @@ class PipelineService:
 
     def _dispatch_qwen_image_2512(
         self, project: Project, scene: Scene, directory: Path, *, use_cache: bool = True,
+        qwen21: bool = False,
     ) -> GenerationResult:
-        """Generate a text-capable still with the native Qwen-Image-2512 workflow."""
+        """Generate a text-capable still with the selected native Qwen workflow."""
         width, height = self._qwen_image_scene_canvas(project, scene)
+        workflow = self.QWEN_IMAGE_21_WORKFLOW if qwen21 else self.QWEN_IMAGE_2512_WORKFLOW
+        workflow_version = "qwen-image-2.1-int8-v1" if qwen21 else "qwen-image-2512-fp8-v1"
         # Prompt recipe preserved verbatim from the original inline logic
         # (Qwen stays unchanged as the fallback/A-B test generator).
         prompt = build_qwen_prompt(
@@ -6629,21 +6665,21 @@ class PipelineService:
             "scene_id": scene.id,
             "width": width,
             "height": height,
-            "steps": 50,
-            "cfg": 4.0,
+            "steps": 25 if qwen21 else 50,
+            "cfg": 1.0 if qwen21 else 4.0,
             "sampler": "euler",
             "scheduler": "simple",
-            "model_sampling_shift": 3.1,
+            "model_sampling_shift": 1.0 if qwen21 else 3.1,
             "on_screen_text": requested_text,
         }
-        backend_name = "qwen_image_2512_comfyui"
+        backend_name = "qwen_image_21_comfyui" if qwen21 else "qwen_image_2512_comfyui"
         backend = self.registry.get(backend_name)
         sampler_settings = {
             key: value for key, value in parameters.items() if key != "scene_id"
         }
         cache_key = self._generation_cache_key(backend_name, {
-            "kind": "qwen_image_2512",
-            "workflow_version": "qwen-image-2512-fp8-v1",
+            "kind": "qwen_image_21" if qwen21 else "qwen_image_2512",
+            "workflow_version": workflow_version,
             **self._backend_identity(backend),
             "prompt": prompt,
             "negative_prompt": negative,
@@ -6664,7 +6700,7 @@ class PipelineService:
         if not reusing_resident:
             self._check_qwen_image_vram()
         request = GenerationRequest(
-            job_id=f"{project.id}:qwen-image-2512:{scene.seed}",
+            job_id=f"{project.id}:qwen-image-{'2.1' if qwen21 else '2512'}:{scene.seed}",
             output_dir=directory,
             prompt=prompt,
             negative_prompt=negative,
@@ -6673,8 +6709,8 @@ class PipelineService:
             height=height,
             settings={
                 "kind": "image",
-                "workflow": self.QWEN_IMAGE_2512_WORKFLOW,
-                "workflow_version": "qwen-image-2512-fp8-v1",
+                "workflow": workflow,
+                "workflow_version": workflow_version,
             },
         )
         try:
@@ -6696,7 +6732,7 @@ class PipelineService:
                 model=descriptor.model_name,
                 model_version=descriptor.model_version,
                 quantization=descriptor.quantization,
-                workflow_version="qwen-image-2512-fp8-v1",
+                workflow_version=workflow_version,
                 parameters=parameters,
                 seed=scene.seed,
                 success=False,
@@ -9750,14 +9786,32 @@ class PipelineService:
         finally:
             publish.unlink(missing_ok=True)
 
+    def _preview_dimensions(self, project: Project) -> tuple[int, int]:
+        """Fit the delivery canvas inside the configured preview size."""
+        width, height = project.resolution
+        limit_w, limit_h = self.config.render.preview_resolution
+        if (width < height) != (limit_w < limit_h) and limit_w != limit_h:
+            limit_w, limit_h = limit_h, limit_w
+        scale = min(limit_w / width, limit_h / height)
+        # FFmpeg's default 4:2:0 output needs even dimensions.
+        return max(2, round(width * scale / 2) * 2), max(2, round(height * scale / 2) * 2)
+
     def _ensure_preview(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "renders" / "preview.mp4"
+        dimensions = self._preview_dimensions(project)
         if not force and self._stage_complete(project, "render_preview"):
-            return output
+            if dimensions == self.config.render.preview_resolution:
+                return output
+            try:
+                info = probe_media(output, self.renderer.binaries)
+                if (info.width, info.height) == dimensions:
+                    return output
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
 
         def operation() -> tuple[Path, list[Path]]:
             timeline = self._build_timeline(project)
-            width, height = self.config.render.preview_resolution
+            width, height = dimensions
             if output.is_file():
                 self.store.copy_to_archive(project.slug, output.relative_to(self.store.project_path(project)))
             info = self.renderer.render_preview(
@@ -9776,6 +9830,7 @@ class PipelineService:
                 self._jsonable(asdict(info)), utc_now(),
             )
             self._record_render_asset(project, output, role="preview_render")
+            self._invalidate_stages(project, {"quality_control"})
             return output, [output]
 
         return self._execute_stage(project, "render_preview", operation, backend="ffmpeg")[0]
@@ -9785,6 +9840,9 @@ class PipelineService:
         if not force and self._stage_complete(project, "quality_control"):
             return self.qc.check_timeline(self._build_timeline(project))
 
+        job = GenerationJob(project_id=project.id, stage="quality_control", backend="ffmpeg")
+        preview_job_id = self._read_stage_state(project).get("stages", {}).get("render_preview", {}).get("job_id")
+
         def operation() -> tuple[QCReport, list[Path]]:
             timeline = self._build_timeline(project)
             report = self.qc.check_timeline(timeline)
@@ -9792,11 +9850,13 @@ class PipelineService:
                 self.qc.check_file(
                     self.store.project_path(project) / "renders" / "preview.mp4",
                     expected_duration_seconds=timeline.duration_seconds,
-                    expected_resolution=self.config.render.preview_resolution,
+                    expected_resolution=self._preview_dimensions(project),
                     require_audio=True,
                 )
             )
             payload = {
+                "job_id": job.id,
+                "preview_job_id": preview_job_id,
                 "passed": report.passed,
                 "inspected_files": report.inspected_files,
                 "issues": [self._jsonable(asdict(issue)) for issue in report.issues],
@@ -9807,7 +9867,48 @@ class PipelineService:
                 raise PipelineError(f"quality control failed with {len(errors)} error(s)")
             return report, [output]
 
-        return self._execute_stage(project, "quality_control", operation, backend="ffmpeg")[0]
+        return self._execute_stage(project, "quality_control", operation, backend="ffmpeg", job=job)[0]
+
+    def _preview_quality_report(
+        self, project: Project, stages: dict[str, Any], jobs: list[GenerationJob],
+    ) -> dict[str, Any] | None:
+        preview = stages.get("render_preview", {})
+        if preview.get("status") != "completed":
+            return None
+        latest = max(
+            (job for job in jobs if job.stage == "quality_control"),
+            key=lambda job: job.created_at,
+            default=None,
+        )
+        if latest is None or latest.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            return None
+        root = self.store.project_path(project)
+        try:
+            path = resolve_asset_path(root, "renders/qc.json")
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(report, dict) or not isinstance(report.get("passed"), bool):
+            return None
+        if "job_id" in report:
+            if report["job_id"] != latest.id or report.get("preview_job_id") != preview.get("job_id"):
+                return None
+        elif stages.get("quality_control", {}).get("job_id") != latest.id:
+            return None
+        issues = report.get("issues", [])
+        return {
+            "passed": report["passed"],
+            "inspected_files": report.get("inspected_files", 0),
+            "issues": [
+                {
+                    "severity": issue.get("severity"),
+                    "code": issue.get("code"),
+                    "message": redact_secrets(str(issue.get("message", "")).replace(str(root), ".")),
+                }
+                for issue in issues
+                if isinstance(issue, dict)
+            ] if isinstance(issues, list) else [],
+        }
 
     def _ensure_final(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "renders" / "final.mp4"

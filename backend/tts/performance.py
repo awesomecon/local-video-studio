@@ -43,8 +43,8 @@ class NoNarrationTextError(RuntimeError):
 
 
 #: Providers whose TTS engine interprets in-band delivery markup.
-PERFORMANCE_TAG_PROVIDERS: tuple[str, ...] = ("fish_s2_pro", "higgs_tts_3")
-PerformanceProvider = Literal["fish_s2_pro", "higgs_tts_3"]
+PERFORMANCE_TAG_PROVIDERS: tuple[str, ...] = ("fish_s2_pro", "higgs_tts_3", "fish_drama_3")
+PerformanceProvider = Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"]
 
 
 def _require_supported_provider(provider: str) -> None:

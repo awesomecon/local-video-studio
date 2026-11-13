@@ -46,7 +46,7 @@ function scriptPanel() {
   const planRegion = el("div", { class: "mt" });
   const modelGate = el("div", { class: "mt" });
 
-  const planBtn = el("button", { class: "btn", type: "button" }, "Run planning");
+  const planBtn = el("button", { class: "btn btn-primary", type: "button" }, "Run planning");
   const forceBtn = el("button", { class: "btn btn-ghost", type: "button" }, "Force re-plan");
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
   let scriptModelRequired = false;
@@ -105,16 +105,29 @@ function scriptPanel() {
    */
   function buildScript(region, snap) {
     const scenes = snap.scenes || [];
+    const duration = scenes.reduce((total, scene) => total + (Number(scene.duration) || 0), 0);
+    const target = Number(snap.project.target_duration) || 0;
+    const timing = el("div", { class: "script-timing" },
+      el("div", { class: "row script-timing-labels" },
+        el("strong", {}, `Planned ${fmtDuration(duration)}`),
+        el("span", { class: "muted" }, target ? `Target ${fmtDuration(target)}` : "No target set"),
+      ),
+      target ? el("meter", {
+        min: 0, max: Math.max(target, duration), value: duration,
+        "aria-label": "Planned script duration", "aria-valuetext": `${fmtDuration(duration)} planned, ${fmtDuration(target)} target`,
+        class: duration > target ? "is-over-target" : "",
+      }) : null,
+    );
     if (!scenes.length) {
-      region.replaceChildren(emptyState(
+      region.replaceChildren(timing, emptyState(
         "No scenes yet",
         "Run planning to have the backend draft the scene script for this project.",
       ));
       return;
     }
-    const doc = el("div", { class: "script-doc" });
+    const doc = el("div", { class: "script-doc" }, timing);
     scenes.forEach((s, i) => {
-      doc.append(
+      doc.append(el("section", { class: "script-scene" },
         el("h3", {}, `${i + 1}. ${s.title}`),
         s.narration
           ? el("p", {}, s.narration)
@@ -122,7 +135,7 @@ function scriptPanel() {
         el("div", { class: "muted small" },
           `${fmtDuration(s.duration || 0)} · ${s.selected_backend || "automatic"} · ${s.visual_type || "still"}`,
         ),
-      );
+      ));
     });
     region.replaceChildren(doc);
   }
@@ -141,7 +154,7 @@ function scriptPanel() {
       const plan = await planProject(state.config, state.currentProjectId, { force });
       renderPlan(plan, planRegion);
       toast("good", force ? "Project re-planned" : "Planning complete", plan.title);
-      loadScript(scriptRegion); // narration may have changed
+      await loadScript(scriptRegion, { skeleton: false });
     } catch (err) {
       planRegion.replaceChildren(errorPanel(err,
         el("button", { class: "btn", type: "button", onclick: () => doPlan(force) }, "Retry"),
@@ -166,17 +179,14 @@ function scriptPanel() {
   forceBtn.onclick = onForce;
   refreshBtn.onclick = () => loadScript(scriptRegion);
 
-  const panel = el("div", { class: "panel" },
-    el("div", { class: "row" },
-      el("span", { class: "panel-title" }, "Project script"),
-      el("span", { class: "spacer" }),
-      planBtn,
-      forceBtn,
-      refreshBtn,
+  const panel = el("div", { class: "script-layout" },
+    scriptRegion,
+    el("aside", { class: "panel script-planning stack", "aria-label": "Script planning" },
+      el("h2", { class: "panel-title" }, "Planning"),
+      modelGate,
+      el("div", { class: "row" }, planBtn, forceBtn, refreshBtn),
+      planRegion,
     ),
-    el("p", { class: "muted small" },
-      "The script is the narration text the planner assigned to each scene. It is persisted on the backend and refreshes automatically as planning and narration jobs complete."),
-    el("div", { class: "panel-body" }, modelGate, scriptRegion, planRegion),
   );
   // Live path: narration updates as plan/narration jobs complete. The plan
   // region is populated only by an explicit planning action, so it is not

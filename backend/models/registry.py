@@ -17,6 +17,7 @@ from .adapters import (
     Ideogram4LocalBackend,
     Krea2Backend,
     QwenImage2512Backend,
+    QwenImage21Backend,
     WanBackend,
     WhisperBackend,
 )
@@ -114,6 +115,11 @@ class BackendRegistry:
         registry.register(FluxBackend(endpoint=comfy_endpoint))
         registry.register(Krea2Backend(endpoint=comfy_endpoint))
         registry.register(QwenImage2512Backend(endpoint=comfy_endpoint))
+        qwen21 = backends.get("qwen_image_21", {})
+        registry.register(QwenImage21Backend(
+            endpoint=str(qwen21.get("endpoint", "http://127.0.0.1:8200")),
+            generation_timeout=float(qwen21.get("generation_timeout_seconds", 3600)),
+        ))
         # Ideogram 4 runs locally through its own workflow; registered alongside
         # Qwen Image (kept for fallback/A-B testing) — neither replaces the other.
         ideogram = backends.get("ideogram4_local", {})
@@ -129,10 +135,12 @@ class BackendRegistry:
         registry.register(H3Backend(endpoint=h3.get("endpoint")))
         for name in (
             "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
-            "breeze_tts_2", "higgs_tts_3",
+            "breeze_tts_2", "higgs_tts_3", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         ):
             tts = backends.get(name, {})
-            registry.register(TTSServiceBackend(name, tts.get("endpoint")))
+            registry.register(TTSServiceBackend(
+                name, tts.get("endpoint"), local_config=tts,
+            ))
         # Remote cloud TTS (opt-in, key-gated narration and delivery direction). Always
         # registered so the Voice page can show its honest readiness; it
         # generates only when the user picks it and supplies a key.

@@ -23,7 +23,12 @@ _MODELS = {
     "higgs_tts_3": (
         "Boson AI Higgs TTS 3 4B", "239f63fb7b02 / SGLang-Omni 7989a5ed2735", 20.0,
     ),
+    "fish_drama_3": ("Fish Audio Drama 3 Q4 (drama-rs)", "97b414614dcd / drama-q4 1fce9bd21d46", 22.0),
+    "ming_tts_tiny": ("Ming 3 TTS Tiny (7.9B-A1.3B)", "4715ef5a2f02 / Ming 9332fb944332", 20.0),
+    "ming_tts_05b": ("Ming 3 TTS 0.5B", "7247f4c94a5b / Ming 9332fb944332", 6.0),
 }
+
+_NEW_PROVIDERS = frozenset({"fish_drama_3", "ming_tts_tiny", "ming_tts_05b"})
 
 
 class TTSServiceBackend(GeneratorBackend):
@@ -36,6 +41,7 @@ class TTSServiceBackend(GeneratorBackend):
         *,
         timeout_seconds: float = 900.0,
         client_factory: Any = httpx.Client,
+        local_config: Mapping[str, Any] | None = None,
     ) -> None:
         if backend_name not in _MODELS:
             raise ValueError(f"unsupported TTS backend: {backend_name}")
@@ -43,6 +49,7 @@ class TTSServiceBackend(GeneratorBackend):
         self.endpoint = endpoint.rstrip("/") if endpoint else None
         self.timeout_seconds = timeout_seconds
         self._client_factory = client_factory
+        self.local_config = dict(local_config or {})
 
     def descriptor(self) -> BackendDescriptor:
         model, version, vram = _MODELS[self.backend_name]
@@ -59,10 +66,16 @@ class TTSServiceBackend(GeneratorBackend):
             inputs.extend(("voice_instruction", "guidance_scale", "breeze_mode"))
         if self.backend_name == "higgs_tts_3":
             inputs.extend(("inline_control_tokens", "temperature", "max_new_tokens"))
+        if self.backend_name == "fish_drama_3":
+            inputs.extend(("inline_control_tokens", "temperature", "default_voice"))
+        if self.backend_name.startswith("ming_tts_"):
+            inputs.extend(("voice_instruction", "ming_task", "voice_design"))
         return BackendDescriptor(
             backend_name=self.backend_name,
             model_name=model,
             model_version=version,
+            quantization=("Q4 experts / INT8 dense" if self.backend_name == "fish_drama_3"
+                          else "bf16" if self.backend_name.startswith("ming_tts_") else None),
             device="external-local-service" if self.endpoint else "unconfigured",
             vram_required_gb=vram,
             capabilities=frozenset({Capability.TEXT_TO_SPEECH}),
@@ -114,6 +127,18 @@ class TTSServiceBackend(GeneratorBackend):
         return response
 
     def health(self) -> Mapping[str, Any]:
+        if self.backend_name in _NEW_PROVIDERS and self.local_config:
+            if not self.local_config.get("enabled", False):
+                return {"status": "disabled", "backend": self.backend_name}
+            for key in ("model_path", "python_path", "source_path", "runtime_path"):
+                value = self.local_config.get(key)
+                if value and not Path(value).expanduser().exists():
+                    return {"status": "not_installed", "backend": self.backend_name,
+                            "detail": f"Missing {key}; see docs/drama-ming-tts.md."}
+            model_path = self.local_config.get("model_path")
+            if model_path and not (Path(model_path).expanduser() / "lvs-release.json").is_file():
+                return {"status": "not_installed", "backend": self.backend_name,
+                        "detail": "Checkpoint download is incomplete; see docs/drama-ming-tts.md."}
         if not self.endpoint:
             return {"status": "not_configured", "backend": self.backend_name}
         try:
@@ -126,6 +151,8 @@ class TTSServiceBackend(GeneratorBackend):
             return {"status": "unhealthy", "backend": self.backend_name, "error": error}
 
     def load(self) -> None:
+        if self.backend_name in _NEW_PROVIDERS and self.local_config and not self.local_config.get("enabled"):
+            raise BackendError(BackendErrorCode.BACKEND_UNAVAILABLE, "Speech provider is disabled.")
         self._request("POST", "/load")
 
     def unload(self) -> None:
@@ -173,6 +200,10 @@ class TTSServiceBackend(GeneratorBackend):
                 "seed": request.seed,
                 "prompt": request.prompt,
                 "settings": {**dict(request.settings), "metrics": metrics},
+                **({"quantization": descriptor.quantization,
+                    "negative_prompt": request.negative_prompt,
+                    "worker_provenance": metrics.get("provenance", {})}
+                   if self.backend_name in _NEW_PROVIDERS and isinstance(metrics, dict) else {}),
             },
             peak_vram_gb=metrics.get("peak_vram_gb") if isinstance(metrics, dict) else None,
         )

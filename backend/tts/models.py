@@ -15,7 +15,7 @@ from backend.schemas import utc_now
 TTSProviderName = Literal[
     "qwen_tts", "step_audio_editx", "chatterbox",
     "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2",
-    "higgs_tts_3", "gemini_tts",
+    "higgs_tts_3", "gemini_tts", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
 ]
 QwenSpeaker = Literal[
     "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee",
@@ -73,6 +73,7 @@ class NarrationRequest(BaseModel):
     temperature: float = Field(default=0.8, gt=0, le=2)
     speaker: QwenSpeaker = "Ryan"
     voice_instruction: str = Field(default="", max_length=500)
+    ming_task: Literal["tts", "voice_design", "freeform"] = "tts"
     # Provider-specific controls for the four comparison providers. `None`
     # means "use the model/workflow default"; unsupported values are rejected
     # by the provider adapter instead of being silently ignored.

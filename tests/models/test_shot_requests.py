@@ -168,6 +168,22 @@ def test_qwen_request_appends_exact_on_screen_text() -> None:
     assert plan.cache_payload["negative_prompt"] == "blurry"
 
 
+def test_qwen21_shot_request_uses_its_own_workflow_and_provenance() -> None:
+    shot = make_shot(
+        visual_type=VisualType.QWEN_IMAGE_21_STILL,
+        settings={"on_screen_text": ["OPEN LATE"]},
+    )
+    plan = build_qwen_image_request(
+        shot, make_project(), Path("out"),
+        backend_identity={"model": "Qwen-Image-2.1", "quantization": "int8_convrot"},
+    )
+    assert plan.request.settings["workflow"].name == "qwen-image-2.1.workflow.json"
+    assert plan.provenance["steps"] == 25
+    assert plan.cache_payload["cfg"] == 1.0
+    assert plan.cache_payload["workflow_version"] == "qwen-image-2.1-int8-v1"
+    assert '"OPEN LATE"' in plan.request.prompt
+
+
 def test_qwen_negative_prompt_changes_cache_key() -> None:
     project = make_project()
     first = build_qwen_image_request(

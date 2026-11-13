@@ -1525,7 +1525,10 @@ def test_provider_tags_preserve_legacy_scripts_and_scope_every_api_operation(
     assert legacy.read_bytes() == legacy_bytes
     assert client.get(base, params={"provider": legacy_provider}).json()["script"] == first
     assert client.post(base, json={"provider": legacy_provider}).json()["script"] == first
-    assert all(value["script"] for value in client.get(base).json()["providers"].values())
+    providers = client.get(base).json()["providers"]
+    assert providers[legacy_provider]["script"]
+    assert providers[other]["script"]
+    assert providers["fish_drama_3"]["script"] is None
 
     key = first["segments"][0]["key"]
     response = client.put(base, json={"provider": legacy_provider, "segments": [{"key": key, "tagged": source}]})
