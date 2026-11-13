@@ -616,12 +616,15 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       projectId,
     );
     const showPreview = el("button", {
-      class: "btn btn-sm", type: "button", "data-ed-preview-toggle": "1",
+      class: `btn btn-sm${previewOn ? "" : " btn-primary"}`, type: "button", "data-ed-preview-toggle": "1",
+      "aria-expanded": String(previewOn), "aria-controls": "editorial-preview",
     }, previewOn ? "Hide preview" : "Show preview");
     showPreview.addEventListener("click", () => {
       if (ctrl.busy !== "" || !previewUrl) return;
       previewOn = !previewOn;
       showPreview.textContent = previewOn ? "Hide preview" : "Show preview";
+      showPreview.classList.toggle("btn-primary", !previewOn);
+      showPreview.setAttribute("aria-expanded", String(previewOn));
       previewWell.hidden = !previewOn;
       if (previewOn) mountPreviewFrame();
     });
@@ -632,7 +635,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     );
 
     const ctx = mutationCtx();
-    const leftCol = el("div", { class: "ed-col" },
+    const sequenceCol = el("div", { class: "ed-col ed-sequence" },
       el("section", { class: "panel" },
         el("div", { class: "row" },
           el("span", { class: "panel-title" }, "Sequence"),
@@ -643,9 +646,12 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         (noteHost = el("div", {})),
         buildStrip(summary.compositions),
       ),
-      el("section", { class: "panel" },
+    );
+    const canvasCol = el("div", { class: "ed-col ed-canvas" },
+      el("section", { class: "panel ed-preview-panel" },
         el("div", { class: "row" },
-          el("span", { class: "panel-title" }, "Preview"),
+          el("h2", { class: "panel-title" }, "Canvas preview"),
+          el("span", { class: "spacer" }),
           previewUrl ? showPreview : null,
           previewUrl
             ? el("a", {
@@ -657,7 +663,11 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
               "Preview is unavailable for this project's snapshot metadata.")
             : null,
         ),
-        (previewWell = el("div", { class: "ed-preview-well", hidden: !previewOn })),
+        (previewWell = el("div", { id: "editorial-preview", class: "ed-preview-well", hidden: !previewOn })),
+      ),
+      el("section", { class: "panel" },
+        el("div", { class: "panel-title" }, "Composition"),
+        (detailHost = el("div", { class: "stack" })),
       ),
       el("section", { class: "panel" },
         el("div", { class: "panel-title" }, "AI revision"),
@@ -666,17 +676,13 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         buildRevisionControl(null, ctx),
       ),
     );
-    const rightCol = el("div", { class: "ed-col" },
+    const settingsCol = el("div", { class: "ed-col ed-settings" },
       el("section", { class: "panel" },
         el("div", { class: "panel-title" }, "Display settings"),
         (settingsHost = el("div", { class: "stack" })),
       ),
-      el("section", { class: "panel" },
-        el("div", { class: "panel-title" }, "Composition"),
-        (detailHost = el("div", { class: "stack" })),
-      ),
     );
-    workspaceRoot = el("div", { class: "ed-layout" }, leftCol, rightCol);
+    workspaceRoot = el("div", { class: "ed-layout" }, sequenceCol, canvasCol, settingsCol);
     body.replaceChildren(errors, workspaceRoot);
     paintStatusAndNotes((snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
       ? snapRef.editorial : {});

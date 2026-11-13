@@ -1,7 +1,6 @@
 /*
  * App shell: top bar, persistent sidebar navigation, content region.
- * Desktop-first, responsive down to narrow widths (sidebar collapses to an
- * icon rail; content reflows to a single column).
+ * The sidebar spans the workspace and becomes a labeled drawer on tablets.
  */
 
 * { box-sizing: border-box; }
@@ -19,7 +18,7 @@ html, body {
 
 #app {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   height: 100dvh; /* mobile browsers: track the dynamic viewport */
   overflow: hidden;
@@ -30,8 +29,8 @@ html, body {
   display: flex;
   align-items: center;
   gap: var(--gap);
-  padding: 0 var(--gap);
-  background: var(--surface-1);
+  padding: 0 32px;
+  background: var(--plane);
   border-bottom: 1px solid var(--line);
   min-width: 0;
 }
@@ -40,26 +39,44 @@ html, body {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-weight: 650;
-  letter-spacing: 0.1px;
+  padding: 0 10px;
+  margin-bottom: 18px;
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-decoration: none;
+  color: var(--text-1);
   white-space: nowrap;
 }
 .brand-mark {
-  width: 26px; height: 26px;
+  width: 38px; height: 38px;
   display: grid; place-items: center;
-  border-radius: var(--radius-sm);
-  background: var(--accent-wash);
-  color: var(--accent);
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-text);
   flex: none;
 }
-.brand-name { font-size: var(--text-md); }
-.brand-sub { color: var(--text-3); font-weight: 400; font-size: var(--text-sm); }
+.brand-name { font-size: 28px; line-height: 1; letter-spacing: -0.06em; }
+.brand-name small {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-3);
+  font: 650 9px var(--font);
+  letter-spacing: 0.16em;
+}
 
 .nav-toggle {
   display: inline-flex;
 }
 
 .topbar-spacer { flex: 1 1 auto; }
+.breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
 
 .project-switcher {
   display: flex;
@@ -68,14 +85,17 @@ html, body {
   min-width: 0;
 }
 .project-switcher select {
-  max-width: 280px;
-  min-width: 140px;
-  text-overflow: ellipsis;
-}
-.project-switcher .proj-meta {
-  color: var(--text-3);
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
   font-size: var(--text-sm);
-  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .topbar-status {
@@ -86,25 +106,32 @@ html, body {
 }
 
 /* --- Body grid ----------------------------------------------------------- */
-.body {
+#app > .body {
   display: grid;
-  grid-template-columns: var(--nav-w) 1fr;
+  grid-template-columns: var(--nav-w) minmax(0, 1fr);
   min-height: 0;
 }
-.body.nav-collapsed { grid-template-columns: var(--nav-w-collapsed) 1fr; }
+#app > .body.nav-collapsed { grid-template-columns: var(--nav-w-collapsed) minmax(0, 1fr); }
+.studio-body {
+  display: grid;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
 
 /* --- Sidebar ------------------------------------------------------------- */
 .sidebar {
-  background: var(--surface-1);
+  background: var(--rail);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  padding: var(--gap-sm) 8px;
+  padding: 23px 14px 14px;
   overflow-y: auto;
   overflow-x: hidden;
 }
 .nav-section {
-  font-size: var(--text-xs);
+  font-size: 11px;
+  font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-3);
@@ -131,8 +158,8 @@ html, body {
 .nav-item:hover { background: var(--surface-3); color: var(--text-1); }
 .nav-item[aria-current="page"] {
   background: var(--accent-wash);
-  color: var(--text-1);
-  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--accent);
+  font-weight: 700;
 }
 .nav-item .nav-icon { flex: none; width: 18px; height: 18px; }
 .nav-item .nav-label { overflow: hidden; text-overflow: ellipsis; }
@@ -145,12 +172,16 @@ html, body {
   padding: 1px 8px;
   font-variant-numeric: tabular-nums;
 }
-.nav-collapsed .nav-section { text-align: center; padding: 12px 4px 6px; font-size: 0; }
-.nav-collapsed .nav-item { justify-content: center; padding: 8px 4px; }
-.nav-collapsed .nav-label,
-.nav-collapsed .nav-count { display: none; }
+.project-nav { border-top: 1px solid var(--line); margin-top: 13px; }
+.sidebar-foot { margin-top: auto; padding-top: 9px; }
 
-.sidebar-foot { margin-top: auto; }
+@media (min-width: 961px) {
+  .nav-collapsed .sidebar { padding-inline: 9px; }
+  .nav-collapsed .brand { padding: 0; justify-content: center; }
+  .nav-collapsed .nav-section { height: 10px; padding: 0; overflow: hidden; font-size: 0; }
+  .nav-collapsed .nav-item { justify-content: center; padding: 8px 4px; }
+  .nav-collapsed :is(.nav-label, .nav-count, .brand-name, .project-switcher) { display: none; }
+}
 
 /* --- Content ------------------------------------------------------------- */
 .content {
@@ -162,20 +193,19 @@ html, body {
 .screen {
   max-width: var(--content-max);
   margin: 0 auto;
-  padding: var(--gap-lg) var(--gap-lg) 80px;
+  padding: 30px 34px 64px;
 }
 .screen-head {
   display: flex;
   align-items: baseline;
   gap: 12px;
-  margin-bottom: var(--gap);
+  margin-bottom: var(--gap-lg);
   flex-wrap: wrap;
 }
 .screen-head h1 {
-  font-size: var(--text-2xl);
+  font: 750 clamp(1.7rem, 3vw, 2.1rem)/1.22 var(--font-display);
   margin: 0;
-  font-weight: 650;
-  letter-spacing: 0.2px;
+  letter-spacing: -0.045em;
 }
 .screen-head .sub { color: var(--text-3); font-size: var(--text-sm); }
 .screen-actions { margin-left: auto; display: flex; gap: var(--gap-sm); flex-wrap: wrap; }
@@ -186,17 +216,15 @@ html, body {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow-1);
-  padding: var(--gap);
+  padding: 18px;
   margin-bottom: var(--gap);
 }
 .panel > .panel-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--text-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-3);
+  font: 750 1rem var(--font-display);
+  color: var(--text-1);
   margin: 0 0 var(--gap-sm);
 }
 .panel .panel-body { min-width: 0; }
@@ -247,20 +275,30 @@ html, body {
 @keyframes shimmer { 100% { transform: translateX(100%); } }
 
 /* --- Responsive ----------------------------------------------------------- */
-@media (max-width: 900px) {
-  .body { grid-template-columns: var(--nav-w-collapsed) 1fr; }
-  .nav-section { font-size: 0; text-align: center; }
-  .nav-item { justify-content: center; }
-  .nav-label, .nav-count { display: none; }
-  .brand-sub, .project-switcher .proj-meta { display: none; }
-  /* #app is a fixed-height grid with overflow:hidden, so the top bar cannot
-     wrap: on narrow screens drop the wider status slots and keep the
-     connection + job-feed badges. */
+@media (max-width: 960px) {
+  #app > .body, #app > .body.nav-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(var(--nav-w), 85vw);
+    z-index: 22;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform var(--dur);
+  }
+  .drawer-open .sidebar { transform: none; visibility: visible; }
+  .nav-scrim { position: fixed; inset: 0; z-index: 21; background: #10201970; }
+  .topbar { padding-inline: 18px; }
   .topbar-status [data-slot="model"],
   .topbar-status [data-slot="gpu"] { display: none; }
 }
 
 @media (max-width: 640px) {
-  .topbar-status [data-slot="mode"] { display: none; }
-  .project-switcher select { min-width: 110px; max-width: 170px; }
+  .topbar { gap: 6px; padding-inline: 10px; }
+  .topbar-spacer { flex: 1 0 0; }
+  .topbar-status :is([data-slot="mode"], [data-slot="jobs"]) { display: none; }
+  .screen { padding: 18px 14px 45px; }
+  .screen-head { margin-bottom: 16px; gap: 8px; }
+  .screen-actions { margin-left: 0; }
+  .panel { padding: 13px; }
 }

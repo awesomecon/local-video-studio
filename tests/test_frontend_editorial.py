@@ -39,7 +39,7 @@ def test_editorial_route_is_wired_end_to_end() -> None:
     assert "editorial: renderEditorial," in app
     assert 'import { renderEditorial } from "./pages/editorial.js";' in app
     assert '{ name: "editorial", hash: "#/editorial", label: "Editorial", icon: "canvas" }' in app
-    nav = app.split("const NAV_PRIMARY = ", 1)[1].split("];", 1)[0]
+    nav = app.split("const NAV_FINISH = ", 1)[1].split("];", 1)[0]
     assert '{ name: "editorial", hash: "#/editorial"' in nav
     # The headless UI capture covers the new screen too.
     shots = (ROOT / "scripts" / "ui_shots.py").read_text(encoding="utf-8")

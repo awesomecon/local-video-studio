@@ -117,7 +117,7 @@ import {
   emptyState,
 } from "../ui.js";
 import { navigate } from "../router.js";
-import { registerLiveUpdate } from "../app.js";
+import { registerLiveUpdate, syncProjectChrome } from "../app.js";
 import { effectiveVideoMode } from "../video-mode.js";
 
 /** Editable brief fields and how they map to controls. */
@@ -202,10 +202,9 @@ function buildScreen(projectId) {
   load(body, provenance, editorialRegion, projectId);
 
   registerLiveUpdate(() => refreshProvenance(provenance, editorialRegion, projectId));
-  return el("div", {},
-    panel,
-    editorialRegion,
-    provenancePanel,
+  return el("div", { class: "brief-layout" },
+    el("div", {}, panel, editorialRegion),
+    el("aside", {}, provenancePanel),
   );
 
   /** @param {HTMLElement} region @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
@@ -394,6 +393,7 @@ function buildForm(snap, projectId) {
       const result = await editProject(state.config, projectId, body);
       const saved = result.project;
       upsertProject(saved);
+      if (state.currentProjectId === projectId) syncProjectChrome();
       // Update baseline to the saved project so further edits diff correctly.
       Object.assign(baseline, readProjectFields(saved));
       const inv = result.invalidated_stages || [];
@@ -1294,9 +1294,9 @@ export function buildCompositionControls(data, ctx) {
       buildTemplateControl(data, ctx)),
   ];
   const textGroup = buildTextControls(data, ctx);
-  if (textGroup) groups.push(compositionControlGroup("Deterministic text", textGroup));
+  if (textGroup) groups.push(compositionControlGroup("On-screen text", textGroup));
   const eventGroup = buildEventControls(data, ctx);
-  if (eventGroup) groups.push(compositionControlGroup("Event actions", eventGroup));
+  if (eventGroup) groups.push(compositionControlGroup("Motion events", eventGroup));
   const assetGroup = buildAssetControls(data, ctx);
   if (assetGroup) groups.push(compositionControlGroup("Planned assets", assetGroup));
   return el("div", { class: "stack ed-ctrl" }, ...groups);
@@ -1305,7 +1305,7 @@ export function buildCompositionControls(data, ctx) {
 /** One labeled field cluster inside the composition editor. */
 function compositionControlGroup(label, ...items) {
   return el("div", { class: "ed-ctrl-group" },
-    el("div", { class: "ed-ctrl-label" }, label), ...items);
+    el("h3", { class: "ed-ctrl-label" }, label), ...items);
 }
 
 function revisionCompositionText(item) {

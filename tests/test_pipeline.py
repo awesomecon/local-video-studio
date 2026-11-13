@@ -75,6 +75,25 @@ def test_complete_mock_pipeline_is_restartable_and_playable(tmp_path: Path) -> N
     assert qc["passed"]
     assert qc["inspected_files"] >= 2
     assert "subtitle_overflow" not in {issue["code"] for issue in qc["issues"]}
+    assert snapshot["quality_report"]["passed"] is True
+    assert snapshot["quality_report"]["inspected_files"] == qc["inspected_files"]
+
+
+def test_portrait_preview_and_qc_follow_delivery_canvas(tmp_path: Path) -> None:
+    pipeline = service(tmp_path)
+    project = pipeline.create_project(ProjectCreate(
+        title="Portrait review", topic="vertical framing", target_duration=2,
+        aspect_ratio="9:16", resolution=(180, 320), fps=12,
+    ))
+    final = pipeline.run_project(project.id)
+    preview = probe_media(final.with_name("preview.mp4"), pipeline.renderer.binaries)
+    assert (preview.width, preview.height) == (360, 640)
+    assert pipeline.project_snapshot(project.id)["quality_report"]["passed"] is True
+
+    pipeline.run_render_stage(project.id, "render_preview", force=True)
+    assert pipeline.project_snapshot(project.id)["quality_report"] is None
+    pipeline.run_render_stage(project.id, "quality_control", force=True)
+    assert pipeline.project_snapshot(project.id)["quality_report"]["passed"] is True
 
 
 def test_stage_state_json_survives_concurrent_mark_and_invalidate(tmp_path: Path) -> None:

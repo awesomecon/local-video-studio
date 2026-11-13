@@ -206,6 +206,10 @@ class BackendServiceConfig(StrictModel):
     python_path: Path | None = None
     model_path: Path | None = None
     tokenizer_path: Path | None = None
+    source_path: Path | None = None
+    runtime_path: Path | None = None
+    cache_path: Path | None = None
+    runtime_port: int | None = Field(default=None, ge=1, le=65535)
     startup_timeout_seconds: float = Field(default=15, gt=0, le=120)
     provider: str = "comfyui"
     model: str = "xl_turbo"
@@ -214,7 +218,7 @@ class BackendServiceConfig(StrictModel):
     poll_interval_seconds: float = Field(default=0.5, gt=0)
     generation_timeout_seconds: float = Field(default=1800, gt=0)
 
-    @field_validator("python_path", "model_path", "tokenizer_path", mode="before")
+    @field_validator("python_path", "model_path", "tokenizer_path", "source_path", "runtime_path", "cache_path", mode="before")
     @classmethod
     def expand_optional_path(cls, value: object) -> Path | None:
         if value is None:
@@ -225,6 +229,8 @@ class BackendServiceConfig(StrictModel):
 
 
 class BackendsConfig(StrictModel):
+    qwen_image_21: BackendServiceConfig = Field(default_factory=lambda: BackendServiceConfig(
+        enabled=True, endpoint="http://127.0.0.1:8200", generation_timeout_seconds=3600))
     comfyui: BackendServiceConfig = Field(default_factory=lambda: BackendServiceConfig(
         enabled=True, endpoint="http://127.0.0.1:8188"))
     ideogram4_local: BackendServiceConfig = Field(default_factory=lambda: BackendServiceConfig(
@@ -258,6 +264,9 @@ class BackendsConfig(StrictModel):
     # child process. This keeps the serving stack and its Torch pin outside the
     # application environment.
     higgs_tts_3: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
+    fish_drama_3: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
+    ming_tts_tiny: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
+    ming_tts_05b: BackendServiceConfig = Field(default_factory=BackendServiceConfig)
     # Remote Google Gemini TTS API. Unlike the providers above it is not a
     # local service: narration text is sent to Google only when a user picks
     # the provider and generates with their own API key. It is always
@@ -280,7 +289,7 @@ class RenderConfig(StrictModel):
         return value
 
 
-_ALLOWED_IMAGE_MODELS = {"krea", "qwen_image", "ideogram4_local"}
+_ALLOWED_IMAGE_MODELS = {"krea", "qwen_image", "qwen_image_21", "ideogram4_local"}
 
 
 class ImageGenerationConfig(StrictModel):
@@ -332,7 +341,8 @@ class AppConfig(StrictModel):
         for name in (
             "comfyui", "h3", "qwen_tts", "step_audio_editx", "chatterbox",
             "ace_step", "whisper", "ideogram4_local", "fish_s2_pro", "voxcpm2", "index_tts_2_5",
-            "omnivoice", "breeze_tts_2", "higgs_tts_3",
+            "omnivoice", "breeze_tts_2", "higgs_tts_3", "qwen_image_21",
+            "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         ):
             backend = getattr(self.backends, name)
             if backend.enabled and backend.endpoint:
@@ -349,7 +359,7 @@ class AppConfig(StrictModel):
         # remain localhost while ``allow_remote_backends`` is false.
         for name in (
             "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
-            "breeze_tts_2", "higgs_tts_3",
+            "breeze_tts_2", "higgs_tts_3", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         ):
             backend = getattr(self.backends, name)
             if backend.managed and not backend.enabled:

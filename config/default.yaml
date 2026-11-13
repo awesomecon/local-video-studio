@@ -36,7 +36,7 @@ ports:
   # official-API children 8196 eager / 8197 fast, and Higgs TTS 3 worker 8198
   # plus SGLang-Omni child 8199) so port selection can never
   # claim a port another configured endpoint points at.
-  reserved: [1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199]
+  reserved: [1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8203, 8204]
   auto_select_free_port: true
   allowed_range: [8000, 8999]
 
@@ -55,6 +55,10 @@ llm_roles:
   qc: auto
 
 backends:
+  qwen_image_21:
+    enabled: true
+    endpoint: "http://127.0.0.1:8200"
+    generation_timeout_seconds: 3600
   comfyui:
     enabled: true
     endpoint: "http://127.0.0.1:8188"
@@ -154,6 +158,33 @@ backends:
     managed: true
     python_path: "~/ai/services/sglang-omni/.venv/bin/python"
     model_path: "~/ai/models/tts/higgs/bosonai-higgs-tts-3-4b"
+    startup_timeout_seconds: 120
+  # Optional pinned speech workers. Install explicitly; missing bundles never
+  # trigger downloads. Both Ming workers initially share Tiny's Python env.
+  fish_drama_3:
+    enabled: true
+    managed: true
+    endpoint: "http://127.0.0.1:8201"
+    python_path: "~/ai/services/ming-tts/.venv/bin/python"
+    model_path: "~/ai/models/tts/fish/drama-q4"
+    runtime_path: "~/ai/services/drama-rs/drama"
+    runtime_port: 8202
+    startup_timeout_seconds: 120
+  ming_tts_tiny:
+    enabled: true
+    managed: true
+    endpoint: "http://127.0.0.1:8203"
+    python_path: "~/ai/services/ming-tts/.venv/bin/python"
+    source_path: "~/ai/services/ming-tts/source"
+    model_path: "~/ai/models/tts/ming/Ming-3.0-tts-tiny"
+    startup_timeout_seconds: 120
+  ming_tts_05b:
+    enabled: true
+    managed: true
+    endpoint: "http://127.0.0.1:8204"
+    python_path: "~/ai/services/ming-tts/.venv/bin/python"
+    source_path: "~/ai/services/ming-tts/source"
+    model_path: "~/ai/models/tts/ming/Ming-3.0-tts-0.5B"
     startup_timeout_seconds: 120
   # Remote Google Gemini TTS (the one cloud provider; see docs/gemini-tts.md).
   # Always registered, but generates only when you pick it in the Voice page

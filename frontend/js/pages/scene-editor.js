@@ -203,8 +203,10 @@ async function load(region, sceneId, requestedShotId = null) {
   }
   region.replaceChildren(
     header,
-    el("div", { class: "editor-grid" }, form, meta),
-    shots.panel,
+    el("div", { class: "scene-workbench" },
+      el("aside", { class: "scene-monitor panel", "aria-label": "Scene monitor" }, meta, shots.actions),
+      el("div", {}, shots.panel, form),
+    ),
   );
   let lastSig = sceneSignature(sceneId, snap);
 
@@ -234,7 +236,13 @@ async function load(region, sceneId, requestedShotId = null) {
       header.replaceChildren(buildStatusRow(fs));
       if (fs.locked) header.append(buildLockedNote());
       const metaEl = /** @type {HTMLElement|null} */ (region.querySelector("#se-meta"));
-      if (metaEl) metaEl.replaceChildren(...buildMeta(fs, fAssets, fJob).children);
+      if (metaEl) {
+        const recordsOpen = metaEl.querySelector(".scene-records")?.open;
+        const updated = buildMeta(fs, fAssets, fJob);
+        const records = updated.querySelector(".scene-records");
+        if (records) records.open = Boolean(recordsOpen);
+        metaEl.replaceChildren(...updated.children);
+      }
       const regenBtn = /** @type {HTMLButtonElement|null} */ (region.querySelector("#se-regen"));
       if (regenBtn) {
         regenBtn.disabled = fs.locked || Boolean(fJob);
@@ -427,6 +435,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
     el("option", { value: "krea" }, "Krea 2 Turbo"),
     el("option", { value: "ideogram4_local" }, "Ideogram 4 (local)"),
     el("option", { value: "qwen_image" }, "Qwen-Image-2512"),
+    el("option", { value: "qwen_image_21" }, "Qwen-Image-2.1"),
   );
   preferredImageModel.value = scene.preferred_image_model || "automatic";
   const ideogramPromptMode = el("select", { id: "se-ideogram-prompt-mode", disabled: visualLocked });
@@ -556,7 +565,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
     hint.textContent = mode?.description || "This project contains an unknown visual type; regeneration support cannot be determined.";
     const imageMotion = visualType.value === "image_motion";
     const exactTextComposite = visualType.value === "text_overlay_still";
-    const routableImage = ["text_overlay_still", "image_motion", "krea2_still", "ideogram4_still", "qwen_image_still", "flux_still"].includes(visualType.value);
+    const routableImage = ["text_overlay_still", "image_motion", "krea2_still", "ideogram4_still", "qwen_image_still", "qwen_image_21_still", "flux_still"].includes(visualType.value);
     const preferred = preferredImageModel.value;
     const effectiveModel = preferred !== "automatic"
       ? preferred
@@ -564,6 +573,8 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
         ? "krea"
         : visualType.value === "ideogram4_still"
         ? "ideogram4_local"
+        : visualType.value === "qwen_image_21_still"
+        ? "qwen_image_21"
         : needsEmbeddedText.checked
         ? "ideogram4_local"
         : (visualType.value === "qwen_image_still"
@@ -575,18 +586,18 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
     fNeedsEmbeddedText.hidden = !routableImage;
     fTextInImage.hidden = !routableImage
       || !(exactTextComposite || needsEmbeddedText.checked
-        || ["ideogram4_local", "qwen_image"].includes(effectiveModel));
+        || ["ideogram4_local", "qwen_image", "qwen_image_21"].includes(effectiveModel));
     fTextOverlayLayout.hidden = !exactTextComposite;
     fIdeogramPromptMode.hidden = exactTextComposite || !routableImage || effectiveModel !== "ideogram4_local";
     fIdeogramPromptJson.hidden = fIdeogramPromptMode.hidden || ideogramPromptMode.value !== "precise";
     fKreaCanvas.hidden = !routableImage || effectiveModel !== "krea";
-    fQwenImageCanvas.hidden = !routableImage || effectiveModel !== "qwen_image";
+    fQwenImageCanvas.hidden = !routableImage || !["qwen_image", "qwen_image_21"].includes(effectiveModel);
     fCameraInstruction.hidden = !imageMotion;
     fGraphicInstructions.hidden = visualType.value !== "graphic_screen";
     fGraphicText.hidden = visualType.value !== "graphic_screen";
     // Preserve the legacy Qwen-only settings field for automatic legacy
     // scenes; explicit routed models use the common text_in_image field.
-    fOnScreenText.hidden = !(visualType.value === "qwen_image_still" && preferred === "automatic");
+    fOnScreenText.hidden = !(["qwen_image_still", "qwen_image_21_still"].includes(visualType.value) && preferred === "automatic");
     const isReused = visualType.value === "reused_media";
     fReusedMedia.hidden = !isReused;
     fReusedTitle.hidden = !isReused;
@@ -602,7 +613,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
       if (["", "locked", "locked-off", "none", "no motion", "static"].includes(normalized)) {
         cameraInstruction.value = "slow push in";
       }
-    } else if (["text_overlay_still", "krea2_still", "ideogram4_still", "qwen_image_still"].includes(visualType.value)) {
+    } else if (["text_overlay_still", "krea2_still", "ideogram4_still", "qwen_image_still", "qwen_image_21_still"].includes(visualType.value)) {
       cameraInstruction.value = "locked";
     }
     if (visualType.value === "text_overlay_still") {
@@ -916,7 +927,7 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
       graphic_text: visualType.value === "graphic_screen"
         ? (graphicText.value === "" ? [] : graphicText.value.split("\n"))
         : undefined,
-      on_screen_text: visualType.value === "qwen_image_still"
+      on_screen_text: ["qwen_image_still", "qwen_image_21_still"].includes(visualType.value)
         ? (onScreenText.value === "" ? [] : onScreenText.value.split("\n"))
         : undefined,
     };
@@ -1113,6 +1124,9 @@ function buildMeta(scene, assets, job) {
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   const current = visual[0] || null;
   const previous = visual[1] || null;
+  const rendered = assets
+    .filter((a) => a.scene_id === scene.id && a.settings?.role === "scene_render" && a.url)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
 
   const parts = [];
   if (job) {
@@ -1124,13 +1138,27 @@ function buildMeta(scene, assets, job) {
       progress(job.progress || 0),
     );
   }
+  if (rendered) parts.push(
+    el("div", { class: "stack" },
+      el("strong", {}, "Last compiled scene"),
+      el("video", { src: rendered.url, controls: true, playsinline: "", preload: "metadata", "aria-label": "Last compiled scene" }),
+      el("span", { class: "small muted" }, "Render the scene again to review subsequent shot changes."),
+    ),
+  );
   parts.push(assetBlock("Current visual", current));
-  if (previous) parts.push(assetBlock("Previous visual (archived)", previous));
+  if (current || previous) parts.push(
+    el("details", { class: "studio-disclosure scene-records" },
+      el("summary", {}, "Generation records"),
+      el("div", { class: "stack" },
+        current ? assetRecord("Current visual", current) : null,
+        previous ? assetBlock("Previous visual (archived)", previous, true) : null,
+      ),
+    ),
+  );
   if (!current && !previous && !job) {
     parts.push(el("div", { class: "muted small" }, "No visual has been generated for this scene yet."));
   }
-  return el("div", { class: "panel", id: "se-meta" },
-    el("div", { class: "panel-title" }, "Generation metadata"),
+  return el("div", { id: "se-meta" },
     el("div", { class: "panel-body stack" }, ...parts),
   );
 }
@@ -1138,10 +1166,24 @@ function buildMeta(scene, assets, job) {
 /**
  * @param {string} title
  * @param {import("../api.js").Asset|null} asset
+ * @param {boolean} [includeRecord]
  * @returns {HTMLElement}
  */
-function assetBlock(title, asset) {
+function assetBlock(title, asset, includeRecord = false) {
   if (!asset) return el("div", { class: "muted small" }, `${title}: none.`);
+  return el("div", { class: "stack scene-visual" },
+    includeRecord ? null : el("h3", {}, title),
+    asset.url && asset.type === "video" ? el("video", {
+      src: asset.url, controls: true, playsinline: "", preload: "metadata", "aria-label": title,
+    }) : asset.url ? el("img", {
+      src: asset.url, alt: `${title} preview`,
+    }) : null,
+    includeRecord ? assetRecord(title, asset) : null,
+  );
+}
+
+/** @param {string} title @param {import("../api.js").Asset} asset */
+function assetRecord(title, asset) {
   const rows = [
     ["Model", asset.model || asset.backend || "?"],
     ["Model version", asset.model_version || "—"],
@@ -1152,10 +1194,6 @@ function assetBlock(title, asset) {
   ];
   return el("div", { class: "stack" },
     el("h3", {}, title),
-    asset.url ? el("img", {
-      src: asset.url, alt: `${title} preview`,
-      style: { maxWidth: "100%", maxHeight: "260px", objectFit: "contain" },
-    }) : null,
     el("dl", { class: "kv" },
       ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]),
     ),
@@ -1224,6 +1262,7 @@ function shotsController(scene, opts = {}) {
   const strip = el("div", { class: "shot-strip", role: "group", "aria-label": `Ordered shots of scene S${sceneNumber}` });
   const detailErr = el("div", { role: "alert" });
   const detailWrap = el("div", {});
+  const actions = el("div", { class: "scene-shot-review stack", hidden: true });
   // Inline Add-shot chooser: a new shot must start from a valid
   // lane/visual-type combination, never an unwired default.
   const addChooser = el("div", { class: "overlay-form", hidden: true });
@@ -1424,7 +1463,9 @@ function shotsController(scene, opts = {}) {
 
   function renderDetail() {
     detailErr.replaceChildren();
+    actions.replaceChildren();
     const shot = current();
+    actions.hidden = !shot;
     if (!shot) {
       detailWrap.replaceChildren(
         el("p", { class: "muted small" }, "No shots in this scene yet."),
@@ -1481,6 +1522,7 @@ function shotsController(scene, opts = {}) {
       el("option", { value: "krea" }, "Krea 2 Turbo"),
       el("option", { value: "ideogram4_local" }, "Ideogram 4 (text-free background)"),
       el("option", { value: "qwen_image" }, "Qwen Image (text-free background)"),
+      el("option", { value: "qwen_image_21" }, "Qwen-Image-2.1 (text-free background)"),
     );
     textOverlayBackground.value = shot.settings?.text_overlay_background_model || "krea";
     const textOverlayLayout = el("select", {
@@ -1603,7 +1645,7 @@ function shotsController(scene, opts = {}) {
       const ideogram = visualType.value === "ideogram4_still";
       const exactTextComposite = visualType.value === "text_overlay_still";
       const reused = visualType.value === "reused_media";
-      const generatedImage = ["krea2_still", "ideogram4_still", "qwen_image_still", "flux_still", "image_motion"].includes(visualType.value);
+      const generatedImage = ["krea2_still", "ideogram4_still", "qwen_image_still", "qwen_image_21_still", "flux_still", "image_motion"].includes(visualType.value);
       fIdeogramMode.hidden = !ideogram;
       fIdeogramText.hidden = !(exactTextComposite || (ideogram && ideogramPromptMode.value === "quick"));
       fIdeogramJson.hidden = !ideogram || ideogramPromptMode.value !== "precise";
@@ -1664,7 +1706,7 @@ function shotsController(scene, opts = {}) {
       title: "Archive this shot's media and remove it from the order.",
     }, "Archive");
     const approveBtn = el("button", {
-      class: "btn btn-sm", type: "button",
+      class: "btn btn-primary btn-sm", type: "button",
       hidden: shot.status === "approved",
       title: shot.stale
         ? `Mark this shot approved. Approval records your acceptance; the stale flag stays until you ${shot.visual_type === "reused_media" ? "re-import its media" : "regenerate it"}.`
@@ -1894,6 +1936,13 @@ function shotsController(scene, opts = {}) {
 
     /* assemble -------------------------------------------------------- */
     const container = el("div", { class: "stack" });
+    actions.append(
+      el("div", { class: "row scene-shot-heading" },
+        el("h3", { class: "panel-title" }, `Shot ${idx + 1} · ${shot.title || "Untitled"}`),
+        shotStatusBadge(shot.status, shot.locked),
+        shot.stale ? shotStaleBadge(shot, shots) : null),
+      el("div", { class: "row" }, approveBtn, generateBtn, regenerateBtn, lockBtn, unlockBtn),
+    );
 
     if (shot.implicit) {
       container.append(el("div", { class: "readonly-note" },
@@ -1918,37 +1967,40 @@ function shotsController(scene, opts = {}) {
     }
 
     container.append(
-      el("div", { class: "row", style: { flexWrap: "wrap" } },
-        el("span", { class: "sc-title", style: { fontSize: "var(--text-md)" } },
-          `Shot #${idx + 1}`),
-        shotStatusBadge(shot.status, shot.locked),
-        shot.stale ? shotStaleBadge(shot, shots) : null,
+      el("div", { class: "row shot-organize", role: "group", "aria-label": "Organize shot" },
+        upBtn, downBtn, dupBtn, archiveBtn,
+      ),
+      el("section", { class: "shot-field-section stack" },
+        el("h3", { class: "panel-title" }, "Visual direction"),
+        el("div", { class: "grid-2" }, fTitle, fLane),
+        el("div", { class: "grid-2" }, fVisualType, fCamera),
+        el("div", { class: "grid-2" }, fPrompt, fNegative),
+        el("div", { class: "grid-2" }, fIdeogramMode, fIdeogramText),
+        el("div", { class: "grid-2" }, fTextOverlayBackground, fTextOverlayLayout),
+        fIdeogramJson,
+        fSeed,
+      ),
+      el("section", { class: "shot-field-section stack" },
+        el("h3", { class: "panel-title" }, "Timing & transitions"),
         el("span", { class: "muted small" },
           `contributes ${fmtSecs(Math.max(0, Number(shot.duration_seconds) - transitionOverlap(shot)))} of ${fmtSecs(shot.duration_seconds)} to the scene`),
-        el("span", { class: "spacer" }),
-        upBtn, downBtn, dupBtn, archiveBtn,
-        generateBtn, regenerateBtn,
-        approveBtn, lockBtn, unlockBtn,
+        el("div", { class: "grid-2" }, fDuration, fStartMode),
+        el("div", { class: "grid-2" }, fTransKind, fTransDur),
       ),
-      el("div", { class: "grid-2" }, fTitle, fLane),
-      el("div", { class: "grid-2" }, fVisualType, fCamera),
-      el("div", { class: "grid-2" }, fPrompt, fNegative),
-      el("div", { class: "grid-2" }, fIdeogramMode, fIdeogramText),
-      el("div", { class: "grid-2" }, fTextOverlayBackground, fTextOverlayLayout),
-      fIdeogramJson,
-      el("div", { class: "grid-2" }, fDuration, fStartMode),
-      el("div", { class: "grid-2" }, fTransKind, fTransDur),
-      el("div", { class: "grid-2" }, fSeed, fSrcAsset),
-      el("div", { class: "grid-2" }, fReusedMedia, fReusedTitle),
-      el("div", { class: "grid-2" }, fReusedUrl, fReusedRights),
-      el("div", { class: "row" }, reusedMediaImport),
-      el("div", { class: "grid-2" }, fGeneratedImage),
-      el("div", { class: "row" }, generatedImageImport),
-      el("div", { class: "grid-2" }, fTrimIn, fTrimOut),
+      el("section", { class: "shot-field-section stack" },
+        el("h3", { class: "panel-title" }, "Source media"),
+        fSrcAsset,
+        el("div", { class: "grid-2" }, fReusedMedia, fReusedTitle),
+        el("div", { class: "grid-2" }, fReusedUrl, fReusedRights),
+        el("div", { class: "row" }, reusedMediaImport),
+        fGeneratedImage,
+        el("div", { class: "row" }, generatedImageImport),
+        el("div", { class: "grid-2" }, fTrimIn, fTrimOut),
+      ),
       el("div", { class: "row" }, saveBtn, revertBtn),
     );
 
-    const overlaysSection = el("div", { class: "stack mt", id: "se-overlays" });
+    const overlaysSection = el("section", { class: "shot-field-section stack", id: "se-overlays" });
     container.append(overlaysSection);
     fillOverlays(overlaysSection, shot, editable);
     return container;
@@ -2086,7 +2138,7 @@ function shotsController(scene, opts = {}) {
   function fillOverlays(section, shot, editable) {
     section.replaceChildren();
     const cues = Array.isArray(shot.overlays) ? shot.overlays : [];
-    section.append(el("h3", {}, `Overlay cues (${cues.length})`));
+    section.append(el("h3", { class: "panel-title" }, `Overlay cues (${cues.length})`));
     if (!cues.length) {
       section.append(el("p", { class: "muted small" },
         "No overlay cues on this shot. Exact-text cards, graphics, and image crops can be timed over the shot here."));
@@ -2508,5 +2560,5 @@ function shotsController(scene, opts = {}) {
   });
 
   pull();
-  return { panel, refreshQuiet };
+  return { panel, actions, refreshQuiet };
 }

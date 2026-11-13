@@ -87,20 +87,22 @@ def test_art_prompt_scrubs_exact_copy_so_krea_never_paints_the_title(tmp_path: P
     assert "No text, no letters" in prompt
 
 
-def test_qwen_thumbnail_routes_to_2512_workflow_with_exact_text_overlay(
-    tmp_path: Path,
+@pytest.mark.parametrize("qwen21", [False, True])
+def test_qwen_thumbnail_routes_to_its_workflow_with_exact_text_overlay(
+    tmp_path: Path, qwen21: bool,
 ) -> None:
     service = make_service(tmp_path)
     project = make_project(service)
     plan = ThumbnailPlan.model_validate(service.thumbnails.snapshot(project.id)["plan"])
     plan = service.thumbnails.save_plan(
-        project.id, plan.model_copy(update={"image_model": "qwen_image"}),
+        project.id, plan.model_copy(update={"image_model": "qwen_image_21" if qwen21 else "qwen_image"}),
     )
     service.mock_mode = False
     job = service.thumbnails.queue_candidate(
         project.id, ThumbnailCandidateRequest(candidate_id="candidate-01"),
     )
-    assert job.backend == "qwen_image_2512_comfyui"
+    expected_backend = "qwen_image_21_comfyui" if qwen21 else "qwen_image_2512_comfyui"
+    assert job.backend == expected_backend
 
     captured = {}
 
@@ -123,14 +125,16 @@ def test_qwen_thumbnail_routes_to_2512_workflow_with_exact_text_overlay(
     )
 
     request = captured["request"]
-    assert captured["backend_name"] == "qwen_image_2512_comfyui"
-    assert captured["prepared"] == "qwen_image_2512_comfyui"
+    assert captured["backend_name"] == expected_backend
+    assert captured["prepared"] == expected_backend
     assert captured["loaded"] is True
     assert request.width == 1664 and request.height == 928
-    assert request.settings["workflow"] == service.QWEN_IMAGE_2512_WORKFLOW
+    assert request.settings["workflow"] == (service.QWEN_IMAGE_21_WORKFLOW if qwen21 else service.QWEN_IMAGE_2512_WORKFLOW)
     assert "No text, no letters" in request.prompt
     assert plan.text_layout.title not in request.prompt
-    assert result.metadata["workflow_version"] == "qwen-image-2512-thumbnail-fp8-v1"
+    assert result.metadata["workflow_version"] == (
+        "qwen-image-2.1-thumbnail-int8-v1" if qwen21 else "qwen-image-2512-thumbnail-fp8-v1"
+    )
 
 
 def test_qwen_native_text_uses_exact_copy_prompt_and_same_2512_backend(

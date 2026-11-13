@@ -140,7 +140,7 @@ class VisualBatchRequest(BaseModel):
     def validate_image_model(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        valid = {"krea", "qwen_image", "ideogram4_local"}
+        valid = {"krea", "qwen_image", "qwen_image_21", "ideogram4_local"}
         if value not in valid:
             raise ValueError(f"image_model must be one of: {', '.join(sorted(valid))}")
         return value
@@ -204,7 +204,7 @@ class SceneEdit(BaseModel):
     def validate_preferred_image_model(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        valid = {"automatic", "krea", "qwen_image", "ideogram4_local"}
+        valid = {"automatic", "krea", "qwen_image", "qwen_image_21", "ideogram4_local"}
         if value not in valid:
             raise ValueError(
                 f"preferred_image_model must be one of: {', '.join(sorted(valid))}"
@@ -282,7 +282,7 @@ class PerformanceTagsGenerateRequest(BaseModel):
     #: Script-override text to tag instead of the scene narration. ``None``
     #: (the default) tags the narration that would actually be generated.
     text: str | None = None
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
     notes: str = Field(default="", max_length=2000)
     #: Re-tag over an existing script instead of returning it unchanged.
@@ -299,7 +299,7 @@ class PerformanceTagsSaveRequest(BaseModel):
     """Body for PUT /api/projects/{id}/tts/performance-tags."""
 
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     segments: list[PerformanceTagsSegmentEdit] = Field(min_length=1)
 
 
@@ -307,7 +307,7 @@ class PerformanceTagsRegenerateRequest(BaseModel):
     """Body for POST /api/projects/{id}/tts/performance-tags/regenerate."""
 
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     #: Key of the single segment to re-tag (e.g. ``scene:<id>`` or ``override``).
     key: str = Field(min_length=1, max_length=200)
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
@@ -448,9 +448,10 @@ class GeminiKeyRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=512)
 
 
-_COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "wan_comfyui", "ace_step_comfyui"})
+_COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "qwen_image_21_comfyui", "wan_comfyui", "ace_step_comfyui"})
 _TTS_BACKENDS = frozenset({
     "qwen_tts", "step_audio_editx", "chatterbox", "higgs_tts_3", "gemini_tts",
+    "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
 })
 
 
@@ -884,6 +885,7 @@ def create_app(
             "qwen_tts", "step_audio_editx", "chatterbox",
             "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
             "breeze_tts_2", "higgs_tts_3", "gemini_tts",
+            "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         )
         models: dict[str, Any] = {}
         for name in names:
@@ -1572,7 +1574,10 @@ def create_app(
                 )
             if request.voice_profile_id:
                 service.tts.get_voice_profile(project_id, request.voice_profile_id)
-            elif request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts"}:
+            elif request.provider not in {
+                "chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts",
+                "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
+            }:
                 raise ValueError(f"{request.provider} requires an authorized reference voice")
             elif request.enhance_with_step:
                 raise ValueError("Step enhancement requires an authorized reference voice")
@@ -1631,7 +1636,7 @@ def create_app(
     @application.get("/api/projects/{project_id}/tts/performance-tags")
     def get_performance_tags(
         project_id: str,
-        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+        provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro",
     ) -> dict[str, Any]:
         """Current provider-scoped delivery-tag script, staleness, and LLM state."""
         try:
@@ -1659,7 +1664,7 @@ def create_app(
                         "stale": service.tts.performance_script_is_stale(project_id, saved) if saved else False,
                         "tag_count": saved.tag_count if saved else 0,
                     }
-                    for name in ("fish_s2_pro", "higgs_tts_3")
+                    for name in ("fish_s2_pro", "higgs_tts_3", "fish_drama_3")
                     for saved in [service.tts.get_performance_script(project_id, name)]
                 },
                 "script": script.model_dump(mode="json") if script is not None else None,
@@ -1771,7 +1776,7 @@ def create_app(
     @application.delete("/api/projects/{project_id}/tts/performance-tags")
     def delete_performance_tags(
         project_id: str,
-        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+        provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro",
     ) -> dict[str, Any]:
         try:
             service.tts.clear_performance_script(project_id, provider)

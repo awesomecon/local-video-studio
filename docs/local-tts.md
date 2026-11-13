@@ -19,12 +19,18 @@ Providers, by runtime:
 | OmniVoice (k2-fsa) | isolated venv worker | 8194 |
 | Breeze TTS 2 | managed worker + one official-API child | 8195 (worker), 8196 eager / 8197 fast (children) |
 | Higgs TTS 3 4B | managed worker + SGLang-Omni child | 8198 (worker), 8199 (child) |
+| Fish Drama 3 Q4 | managed worker + drama-rs child | 8201 (worker), 8202 (child) |
+| Ming 3 TTS Tiny | isolated Python worker; shared Ming environment | 8203 |
+| Ming 3 TTS 0.5B | isolated Python worker; shared Ming environment | 8204 |
 | Fish Audio S2 Pro | shared ComfyUI workflow | 8188 |
 | VoxCPM2 2B | shared ComfyUI workflow | 8188 |
 | IndexTTS 2.5 | shared ComfyUI workflow | 8188 |
 
 All ports bind to `127.0.0.1` and are reserved in `config/default.yaml` so no other configured
 endpoint can claim them.
+
+See [Drama and Ming setup](drama-ming-tts.md) for the pinned installers,
+shared-environment compatibility checks, voice controls and 50 GiB reserve.
 
 ## Installed layout (reference example)
 

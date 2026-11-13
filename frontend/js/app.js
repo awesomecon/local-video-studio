@@ -13,7 +13,7 @@
  * screens and add per-screen data loading.
  */
 
-import { el, fill, fmtGb, shortId } from "./dom.js";
+import { el, fill, fmtDuration, fmtGb, shortId } from "./dom.js";
 import {
   state,
   restoreCurrentProject,
@@ -50,32 +50,39 @@ import { renderNotFound } from "./pages/not-found.js";
 
 /** @typedef {{name: string, hash: string, label: string, icon: string}} NavItem */
 
-/** Primary studio navigation, in display order. */
-const NAV_PRIMARY = /** @type {NavItem[]} */ ([
-  { name: "dashboard", hash: "#/", label: "Dashboard", icon: "dashboard" },
-  { name: "new-project", hash: "#/new", label: "New Project", icon: "plus" },
-  { name: "project", hash: "#/project", label: "Project", icon: "folder" },
+const NAV_WORKSPACE = [
+  { name: "dashboard", hash: "#/", label: "Studio", icon: "dashboard" },
+  { name: "projects", hash: "#/projects", label: "All projects", icon: "folder" },
+  { name: "jobs", hash: "#/jobs", label: "Job monitor", icon: "film" },
+];
+const NAV_START = [
+  { name: "project", hash: "#/project", label: "Project brief", icon: "folder" },
+];
+const NAV_MAKE = [
   { name: "script", hash: "#/script", label: "Script", icon: "script" },
   { name: "storyboard", hash: "#/storyboard", label: "Storyboard", icon: "storyboard" },
-  { name: "thumbnails", hash: "#/thumbnails", label: "Thumbnails", icon: "thumbnail" },
-  { name: "voice", hash: "#/voice", label: "Voice", icon: "mic" },
-  { name: "music", hash: "#/music", label: "Music", icon: "music" },
+  { name: "voice", hash: "#/voice", label: "Voice & narration", icon: "mic" },
+  { name: "music", hash: "#/music", label: "Music & sound", icon: "music" },
   { name: "captions", hash: "#/captions", label: "Captions", icon: "captions" },
+];
+const NAV_FINISH = [
   { name: "editorial", hash: "#/editorial", label: "Editorial", icon: "canvas" },
   { name: "timeline", hash: "#/timeline", label: "Timeline", icon: "timeline" },
+  { name: "thumbnails", hash: "#/thumbnails", label: "Thumbnails", icon: "thumbnail" },
   { name: "export", hash: "#/export", label: "Export", icon: "export" },
-]);
+];
 
 /** System navigation, pinned to the sidebar foot. */
 const NAV_FOOT = /** @type {NavItem[]} */ ([
-  { name: "jobs", hash: "#/jobs", label: "Job Monitor", icon: "film" },
   { name: "models", hash: "#/models", label: "Models", icon: "cpu" },
   { name: "system", hash: "#/system", label: "System status", icon: "system" },
   { name: "settings", hash: "#/settings", label: "Settings", icon: "settings" },
 ]);
 
 const NAV_COLLAPSED_KEY = "lvs-nav-collapsed";
+const THEME_KEY = "lvs-theme";
 const HEALTH_RETRY_MS = 10000;
+const narrowLayout = matchMedia("(max-width: 960px)");
 
 /** @type {HTMLElement|null} the `.content` main element. */
 let contentEl = null;
@@ -101,6 +108,11 @@ let topbarStatusEl = null;
 let navToggleEl = null;
 /** @type {HTMLSelectElement|null} the project switcher. */
 let switcherEl = null;
+let sidebarEl = null;
+let breadcrumbEl = null;
+let themeToggleEl = null;
+let navScrimEl = null;
+let drawerOpen = false;
 
 /* ============================================================================
  * Shell build
@@ -132,16 +144,32 @@ function buildNavItem(item) {
  * @returns {HTMLElement}
  */
 function buildSidebar() {
-  const foot = el("div", { class: "sidebar-foot" },
-    el("div", { class: "nav-section" }, "System"),
-    ...NAV_FOOT.map(buildNavItem),
-  );
-  const primary = NAV_PRIMARY.map(buildNavItem);
-  storyboardNavEl = primary.find((btn) => btn.dataset.route === "storyboard") || null;
-  return el("nav", { class: "sidebar", "aria-label": "Primary navigation" },
-    el("div", { class: "nav-section" }, "Studio"),
-    ...primary,
-    foot,
+  const make = NAV_MAKE.map(buildNavItem);
+  storyboardNavEl = make.find((btn) => btn.dataset.route === "storyboard") || null;
+  return el("nav", { class: "sidebar", id: "studio-navigation", "aria-label": "Studio navigation" },
+    el("a", { class: "brand", href: "#/", "aria-label": "Local Video Studio home" },
+      el("span", { class: "brand-mark" }, icon("logo", 22)),
+      el("span", { class: "brand-name" }, "local", el("small", {}, "VIDEO STUDIO")),
+    ),
+    el("div", { class: "nav-section" }, "Workspace"),
+    ...NAV_WORKSPACE.map(buildNavItem),
+    el("div", { class: "project-nav" },
+      el("div", { class: "nav-section" }, "Current project"),
+      el("div", { class: "project-switcher" },
+        (switcherEl = el("select", { disabled: true, "aria-label": "Current project", onchange: onSwitcherChange },
+          el("option", { value: "" }, "No project"))),
+      ),
+      el("div", { class: "nav-section" }, "Start"),
+      ...NAV_START.map(buildNavItem),
+      el("div", { class: "nav-section" }, "Make"),
+      ...make,
+      el("div", { class: "nav-section" }, "Finish"),
+      ...NAV_FINISH.map(buildNavItem),
+    ),
+    el("div", { class: "sidebar-foot" },
+      el("div", { class: "nav-section" }, "Studio tools"),
+      ...NAV_FOOT.map(buildNavItem),
+    ),
   );
 }
 
@@ -159,9 +187,16 @@ export function syncModeAwareNavigation() {
   storyboardNavEl.hidden = effectiveVideoMode(project) === "editorial";
 }
 
+export function syncProjectChrome() {
+  renderSwitcher();
+  syncModeAwareNavigation();
+  const route = parseRoute().name;
+  renderBreadcrumb(route);
+  renderProjectContext(route);
+}
+
 /**
- * Build the top bar: nav toggle, brand, project switcher, and the live status
- * slots (connection, mode, model, GPU/VRAM, jobs).
+ * Build the top bar with navigation, context, theme and live status.
  * @returns {HTMLElement}
  */
 function buildTopbar() {
@@ -169,23 +204,11 @@ function buildTopbar() {
     (navToggleEl = el("button", {
       class: "btn btn-ghost btn-sm nav-toggle",
       type: "button",
-      title: "Collapse navigation",
-      "aria-label": "Toggle navigation",
+      "aria-controls": "studio-navigation",
       onclick: toggleNav,
     }, icon("menu", 16))),
-    el("div", { class: "brand" },
-      el("span", { class: "brand-mark" }, icon("logo", 22)),
-      el("span", { class: "brand-name" }, "Local Video Studio"),
-      el("span", { class: "brand-sub" }, "local-first production"),
-    ),
+    (breadcrumbEl = el("div", { class: "breadcrumb" })),
     el("div", { class: "topbar-spacer" }),
-    el("div", { class: "project-switcher" },
-      (switcherEl = el("select", {
-        disabled: true,
-        "aria-label": "Project",
-        onchange: onSwitcherChange,
-      }, el("option", { value: "" }, "No project"))),
-    ),
     (topbarStatusEl = el("div", { class: "topbar-status", "aria-label": "Status" },
       el("span", { "data-slot": "connection" }),
       el("span", { "data-slot": "mode" }),
@@ -193,6 +216,10 @@ function buildTopbar() {
       el("span", { "data-slot": "gpu" }),
       el("span", { "data-slot": "jobs" }),
     )),
+    (themeToggleEl = el("button", {
+      class: "btn btn-ghost btn-sm theme-toggle", type: "button",
+      onclick: () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true),
+    })),
   );
 }
 
@@ -204,10 +231,13 @@ function renderShell() {
   if (!app) return;
   app.setAttribute("aria-busy", "false");
   app.replaceChildren(
-    buildTopbar(),
     (bodyEl = el("div", { class: "body" },
-      buildSidebar(),
-      (contentEl = el("main", { class: "content" })),
+      (sidebarEl = buildSidebar()),
+      el("div", { class: "studio-body" },
+        buildTopbar(),
+        (contentEl = el("main", { class: "content", id: "studio-content", tabindex: -1 })),
+      ),
+      (navScrimEl = el("div", { class: "nav-scrim", hidden: true, "aria-hidden": "true", onclick: () => closeDrawer(true) })),
     )),
   );
 }
@@ -216,14 +246,38 @@ function renderShell() {
  * Navigation (persisted collapse)
  * ==========================================================================*/
 
-/** Keep the toggle's title in sync with the current nav state. */
-function syncToggleTitle() {
-  if (navToggleEl) navToggleEl.title = state.navCollapsed ? "Expand navigation" : "Collapse navigation";
+function syncNavigation() {
+  const narrow = narrowLayout.matches;
+  bodyEl.classList.toggle("drawer-open", narrow && drawerOpen);
+  sidebarEl.inert = narrow && !drawerOpen;
+  contentEl.inert = narrow && drawerOpen;
+  navScrimEl.hidden = !narrow || !drawerOpen;
+  const expanded = narrow ? drawerOpen : !state.navCollapsed;
+  const label = expanded ? "Close navigation" : "Open navigation";
+  navToggleEl.title = label;
+  navToggleEl.setAttribute("aria-label", label);
+  navToggleEl.setAttribute("aria-expanded", String(expanded));
+}
+
+function closeDrawer(restoreFocus = false) {
+  if (!drawerOpen) return;
+  drawerOpen = false;
+  syncNavigation();
+  if (restoreFocus) navToggleEl.focus();
 }
 
 function toggleNav() {
+  if (narrowLayout.matches) {
+    if (drawerOpen) closeDrawer(true);
+    else {
+      drawerOpen = true;
+      syncNavigation();
+      (sidebarEl.querySelector('[aria-current="page"]') || sidebarEl.querySelector(".brand")).focus();
+    }
+    return;
+  }
   state.navCollapsed = bodyEl.classList.toggle("nav-collapsed");
-  syncToggleTitle();
+  syncNavigation();
   try { localStorage.setItem(NAV_COLLAPSED_KEY, state.navCollapsed ? "1" : "0"); } catch { /* storage unavailable */ }
 }
 
@@ -234,7 +288,28 @@ function restoreNav() {
       state.navCollapsed = true;
     }
   } catch { /* storage unavailable */ }
-  syncToggleTitle();
+  syncNavigation();
+  narrowLayout.addEventListener("change", () => {
+    const restoreFocus = narrowLayout.matches && sidebarEl.contains(document.activeElement);
+    drawerOpen = false;
+    syncNavigation();
+    if (restoreFocus) navToggleEl.focus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && drawerOpen) closeDrawer(true);
+  });
+}
+
+function setTheme(theme, persist = false) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const label = dark ? "Switch to light theme" : "Switch to dark theme";
+  themeToggleEl.title = label;
+  themeToggleEl.setAttribute("aria-label", label);
+  themeToggleEl.replaceChildren(icon(dark ? "sun" : "moon", 18));
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage unavailable */ }
+  }
 }
 
 /* ============================================================================
@@ -317,9 +392,11 @@ function renderJobCount() {
 function renderSwitcher() {
   if (!switcherEl) return;
   const select = switcherEl;
-  select.replaceChildren(el("option", { value: "" }, "No project"));
-  for (const p of state.projects) {
-    select.append(el("option", { value: p.id }, `${p.title} (${p.slug})`));
+  const options = [["", "No project"], ...state.projects.map((project) => [project.id, project.title])];
+  const unchanged = select.options.length === options.length
+    && options.every(([value, label], index) => select.options[index].value === value && select.options[index].text === label);
+  if (!unchanged) {
+    select.replaceChildren(...options.map(([value, label]) => el("option", { value }, label)));
   }
   select.disabled = state.connection !== "online" || state.projects.length === 0;
   select.value = state.currentProjectId && state.projects.some((p) => p.id === state.currentProjectId)
@@ -336,7 +413,9 @@ function onSwitcherChange(ev) {
   // Re-render the current screen so any project-bound form (e.g. Project
   // Details) is rebuilt for the newly selected project instead of saving to the
   // wrong id if the old form is still mounted.
-  onRoute();
+  const route = parseRoute().name;
+  if (route === "scene-editor") navigate(effectiveVideoMode(p) === "editorial" ? "#/editorial" : "#/storyboard");
+  else onRoute();
 }
 
 /* ============================================================================
@@ -441,8 +520,7 @@ async function bootProjects() {
     // Keep the existing in-memory list (e.g. a just-created project) rather than
     // clearing it because a background boot fetch failed.
   }
-  renderSwitcher();
-  syncModeAwareNavigation();
+  syncProjectChrome();
   // A mounted screen whose rows resolve project titles (Job Monitor) re-renders
   // only on job-feed frames; without a change to the job set no further frame
   // arrives, so poke the live hook to pick up the freshly loaded projects.
@@ -524,6 +602,7 @@ function startJobFeed() {
  */
 const SCREENS = {
   dashboard: renderDashboard,
+  projects: renderDashboard,
   "new-project": renderNewProject,
   project: renderProject,
   script: renderScript,
@@ -543,24 +622,55 @@ const SCREENS = {
   "not-found": renderNotFound,
 };
 
+function renderBreadcrumb(route) {
+  const projectTools = [...NAV_START, ...NAV_MAKE, ...NAV_FINISH];
+  const tool = projectTools.find((item) => item.name === route);
+  const project = state.projects.find((item) => item.id === state.currentProjectId);
+  const label = tool?.label || [...NAV_WORKSPACE, ...NAV_FOOT].find((item) => item.name === route)?.label
+    || ({ "new-project": "New project", "scene-editor": "Scene editor" })[route];
+  const showProject = project && (tool || route === "scene-editor");
+  breadcrumbEl.textContent = ["Workspace", showProject ? project.title : null, label].filter(Boolean).join(" / ");
+}
+
+function renderProjectContext(route) {
+  const screen = contentEl.firstElementChild;
+  const head = screen?.querySelector(".screen-head");
+  if (!head) return;
+  screen.querySelector(".project-context")?.remove();
+  const projectRoute = [...NAV_START, ...NAV_MAKE, ...NAV_FINISH].some((item) => item.name === route)
+    || route === "scene-editor";
+  const project = projectRoute && state.projects.find((item) => item.id === state.currentProjectId);
+  if (!project) return;
+  const editorial = effectiveVideoMode(project) === "editorial";
+  head.after(el("div", { class: "project-context" },
+    route !== "project" ? el("a", { href: "#/project" }, project.title) : el("strong", {}, project.title),
+    el("span", {}, `${editorial ? "Editorial" : "Classic"} · ${project.aspect_ratio} · ${fmtDuration(project.target_duration)} target`),
+    route === "project" ? el("a", { href: editorial ? "#/editorial" : "#/storyboard" },
+      editorial ? "Open Editorial" : "Open Storyboard") : null,
+  ));
+}
+
 /**
  * Render the content area for the current route and highlight the active nav
  * item.
  */
 function renderRoute() {
   const route = parseRoute();
+  const activeRoute = route.name === "scene-editor" ? "storyboard" : route.name;
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    if (btn.dataset.route === route.name) btn.setAttribute("aria-current", "page");
+    if (btn.dataset.route === activeRoute) btn.setAttribute("aria-current", "page");
     else btn.removeAttribute("aria-current");
   });
   if (!contentEl) return;
   registerLiveUpdate(null);
   const renderer = SCREENS[route.name];
   contentEl.replaceChildren(renderer(route));
-  // Keep the top-bar project switcher in sync with the current selection and
-  // the (possibly just-created) project list on every navigation.
-  renderSwitcher();
-  syncModeAwareNavigation();
+  contentEl.scrollTop = 0;
+  if (drawerOpen) {
+    closeDrawer();
+    contentEl.focus({ preventScroll: true });
+  }
+  syncProjectChrome();
 }
 
 /**
@@ -571,6 +681,9 @@ async function init() {
   state.config = await loadConfig();
   restoreCurrentProject();
   renderShell();
+  let theme = "light";
+  try { theme = localStorage.getItem(THEME_KEY) || theme; } catch { /* storage unavailable */ }
+  setTheme(theme);
   restoreNav();
   initAlertSound();
   renderRoute();

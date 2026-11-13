@@ -68,11 +68,11 @@ def test_storyboard_route_is_a_safe_pointer_for_editorial_projects() -> None:
     assert 'effectiveVideoMode(snap.project) === "editorial"' in source
     # The pointer replaces the grid and hides the Classic controls...
     assert "region.replaceChildren(editorialPointerState())" in source
-    assert "introEl.hidden = true" in source
     assert "cancelAllBtn.hidden = true" in source
     assert "batchBar.replaceChildren()" in source
     # ...and the Classic view restores them on the next accepted load.
-    assert "introEl.hidden = false" in source
+    assert "updateBatchBar();" in source
+    assert "updateCancelAll();" in source
     # The pointer points at the real owners of the content.
     pointer = source.split("function editorialPointerState()", 1)[1].split("\n}", 1)[0]
     assert 'navigate("#/editorial")' in pointer

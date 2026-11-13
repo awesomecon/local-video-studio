@@ -17,7 +17,7 @@ def test_breeze_controls_are_attached_to_the_generation_panel() -> None:
     source = VOICE_JS.read_text(encoding="utf-8")
 
     assert 'const breezeGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("3. Generate narration with a model"')
+    panel_start = source.index('section("Narration settings"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "breezeGrid," in source[panel_start:panel_end]
 
@@ -42,12 +42,12 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
 
     # The panel is built and attached to the narration-generation section.
     assert "performancePanel(project, current, tags, provider, script, refresh)" in source
-    panel_start = source.index('section("3. Generate narration with a model"')
+    panel_start = source.index('section("Narration settings"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]
 
     # It is shown only for providers with native controls and forced off elsewhere.
-    assert 'new Set(["fish_s2_pro", "higgs_tts_3"])' in source
+    assert 'new Set(["fish_s2_pro", "higgs_tts_3", "fish_drama_3"])' in source
     assert "performance.syncProvider(provider.value)" in source
 
     # Each artifact is identified by its stored provider. A mismatch
@@ -157,7 +157,7 @@ def test_complete_recorded_voiceover_can_be_recorded_imported_and_activated() ->
     api = (VOICE_JS.parent.parent / "api.js").read_text(encoding="utf-8")
     recorder = (VOICE_JS.parent.parent / "voice-recorder.js").read_text(encoding="utf-8")
 
-    assert 'section("2. Use your recorded voiceover"' in source
+    assert 'section("Choose a narration source"' in source
     assert 'purpose: "voiceover"' in source
     assert '"Record full voiceover"' in source
     assert '"Import full voiceover"' in source
@@ -209,7 +209,7 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
 
     # The panel is built and attached to the narration-generation section.
     assert 'const geminiGrid = el("div", { class: "pref-grid" }' in source
-    panel_start = source.index('section("3. Generate narration with a model"')
+    panel_start = source.index('section("Narration settings"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     panel = source[panel_start:panel_end]
     assert "geminiGrid," in panel
@@ -217,7 +217,7 @@ def test_gemini_provider_is_listed_key_gated_and_attached() -> None:
 
     # The profile selector is suspended for Gemini and the generate button
     # stays disabled until a key is present.
-    assert "voice.disabled = gemini;" in source
+    assert 'voice.disabled = gemini || (ming && mingTask.value === "voice_design");' in source
     assert 'provider.value === "gemini_tts" && !geminiReady()' in source
     # The readiness state machine (badges per health state) lives in the
     # shared builder; both Voice and Settings render it.
@@ -271,7 +271,7 @@ def test_worker_controls_report_honest_loaded_states() -> None:
     assert block.count("canUnload: true") == 2
     assert "health.loaded === true" in block.split("canUnload: true", 1)[0]
     assert "Request release of any cached model weights" in block
-    assert block.count("canUnload: false") == 5
+    assert block.count("canUnload: false") == 6
 
     # The panel binds the status line and the Unload button to the same view,
     # re-applies it on provider change, and re-reads the snapshot after the

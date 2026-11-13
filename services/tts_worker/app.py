@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ProviderName = Literal[
     "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice", "breeze_tts_2",
-    "higgs_tts_3",
+    "higgs_tts_3", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
 ]
 
 
@@ -61,6 +61,7 @@ class GeneratePayload(BaseModel):
     max_new_tokens: int | None = None
     speaker: str = "Ryan"
     voice_instruction: str = ""
+    ming_task: Literal["tts", "voice_design", "freeform"] = "tts"
     num_step: int | None = None
     guidance_scale: float | None = None
     speed: float | None = None
@@ -1107,11 +1108,17 @@ def create_app(provider: SpeechProvider, *, output_root: Path) -> FastAPI:
     @app.post("/jobs/{job_id}/cancel")
     def cancel(job_id: str) -> dict[str, bool]:
         canceled.add(job_id)
+        cancel_provider = getattr(provider, "cancel", None)
+        if callable(cancel_provider):
+            cancel_provider(job_id)
         return {"canceled": True}
 
     @app.post("/jobs/{job_id}/reset_cancel")
     def reset_cancel(job_id: str) -> dict[str, bool]:
         canceled.discard(job_id)
+        reset_provider = getattr(provider, "reset_cancel", None)
+        if callable(reset_provider):
+            reset_provider(job_id)
         return {"canceled": False}
 
     return app
@@ -1123,11 +1130,14 @@ def main() -> None:
         "--provider",
         choices=(
             "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
-            "breeze_tts_2", "higgs_tts_3",
+            "breeze_tts_2", "higgs_tts_3", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         ),
         required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--tokenizer-path", type=Path)
+    parser.add_argument("--source-path", type=Path)
+    parser.add_argument("--runtime-path", type=Path)
+    parser.add_argument("--runtime-port", type=int)
     parser.add_argument("--output-root", type=Path, default=Path("~/ai/projects"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
@@ -1142,7 +1152,17 @@ def main() -> None:
         "breeze_tts_2": BreezeProvider,
         "higgs_tts_3": HiggsTTS3Provider,
     }
-    provider = classes[args.provider](args.model_path.expanduser(), args.tokenizer_path)
+    if args.provider in {"fish_drama_3", "ming_tts_tiny", "ming_tts_05b"}:
+        from services.tts_worker.ming_drama import DramaProvider, MingSmallProvider, MingTinyProvider
+
+        provider_class = {"fish_drama_3": DramaProvider, "ming_tts_tiny": MingTinyProvider,
+                          "ming_tts_05b": MingSmallProvider}[args.provider]
+        provider = provider_class(
+            args.model_path.expanduser(), source_path=args.source_path,
+            runtime_path=args.runtime_path, runtime_port=args.runtime_port,
+        )
+    else:
+        provider = classes[args.provider](args.model_path.expanduser(), args.tokenizer_path)
     uvicorn.run(create_app(provider, output_root=args.output_root), host=args.host, port=args.port)
 
 

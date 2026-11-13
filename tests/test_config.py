@@ -17,7 +17,8 @@ def test_default_configuration_is_local_and_expands_paths() -> None:
     # 3 worker 8198 + SGLang-Omni child 8199) so selection
     # never claims one.
     assert config.ports.reserved == [
-        1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199,
+        1234, 8188, 8190, 8191, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200,
+        8201, 8202, 8203, 8204,
     ]
     assert config.paths.project_root == Path.home() / "ai/projects"
     assert Path(config.cache_environment()["TORCH_HOME"]) == Path.home() / "ai/cache/torch"

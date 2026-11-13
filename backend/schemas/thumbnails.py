@@ -19,6 +19,7 @@ ThumbnailFontPreset = Literal["impact", "clean", "editorial"]
 ThumbnailLayoutPreset = Literal["stacked", "split", "banner"]
 ThumbnailImageModel = Literal[
     "krea", "qwen_image", "qwen_image_native_text", "ideogram4_local",
+    "qwen_image_21", "qwen_image_21_native_text",
 ]
 ThumbnailIdeogramPromptMode = Literal["quick", "precise"]
 

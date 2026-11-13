@@ -42,6 +42,11 @@ export function renderNewProject(_route) {
   const fpsInput = el("input", { id: "np-fps", type: "number", min: "1", max: "240", step: "1", value: "24" });
   const widthInput = el("input", { id: "np-width", type: "number", min: "1", step: "1", value: "1920", style: { width: "110px" } });
   const heightInput = el("input", { id: "np-height", type: "number", min: "1", step: "1", value: "1080", style: { width: "110px" } });
+  aspectSelect.addEventListener("change", () => {
+    const [width, height] = { "16:9": [1920, 1080], "9:16": [1080, 1920], "1:1": [1080, 1080] }[aspectSelect.value];
+    widthInput.value = String(width);
+    heightInput.value = String(height);
+  });
   const resolutionRow = el("div", { class: "row", style: { gap: "6px" } }, widthInput, "×", heightInput);
   const styleInput = el("input", { id: "np-style", type: "text", value: "documentary" });
   const audienceInput = el("input", { id: "np-audience", type: "text", value: "general" });
@@ -74,6 +79,10 @@ export function renderNewProject(_route) {
 
   const submitBtn = el("button", { class: "btn btn-primary", type: "submit" }, "Create project");
   const errRegion = el("div", { class: "mt" });
+  const advanced = el("details", { class: "studio-disclosure" },
+    el("summary", {}, "Advanced project settings"),
+    el("div", { class: "grid-2" }, fFps, fResolution, fNarrator, fQuality),
+  );
 
   // Keep the duration hint honest about what the chosen control mode does.
   const durationHint = fDuration.querySelector(".hint");
@@ -89,7 +98,11 @@ export function renderNewProject(_route) {
   /* --- validation (mirrors ProjectCreate) ------------------------------ */
   function validate() {
     let ok = true;
-    const fail = (wrap, msg) => { setFieldError(wrap, msg); ok = false; };
+    const fail = (wrap, msg) => {
+      setFieldError(wrap, msg);
+      if (advanced.contains(wrap)) advanced.open = true;
+      ok = false;
+    };
     const pass = (wrap) => setFieldError(wrap, null);
 
     const title = titleInput.value.trim();
@@ -142,11 +155,13 @@ export function renderNewProject(_route) {
     };
     try {
       const snap = await createProject(state.config, body);
-      state.currentProjectId = snap.project.id;
-      persistCurrentProject(snap.project.id);
       upsertProject(snap.project);
       toast("good", "Project created", snap.project.title);
-      navigate("#/project");
+      if (form.isConnected) {
+        state.currentProjectId = snap.project.id;
+        persistCurrentProject(snap.project.id);
+        navigate("#/script");
+      }
     } catch (err) {
       errRegion.replaceChildren(errorPanel(err,
         el("button", { class: "btn", type: "button", onclick: doCreate }, "Try again"),
@@ -162,15 +177,14 @@ export function renderNewProject(_route) {
     await doCreate();
   }
 
-  const form = el("form", { onsubmit: onSubmit },
+  const form = el("form", { onsubmit: onSubmit, novalidate: true },
     el("div", { class: "grid-2" }, fTitle, fTopic),
     fVideoMode,
     el("div", { class: "grid-2" }, fDuration, fAspect),
     fDurationMode,
-    el("div", { class: "grid-2" }, fFps, fResolution),
     el("div", { class: "grid-2" }, fStyle, fAudience),
-    el("div", { class: "grid-2" }, fNarrator, fQuality),
     fInstructions,
+    advanced,
     el("div", { class: "row mt" }, submitBtn),
     errRegion,
   );
@@ -179,10 +193,17 @@ export function renderNewProject(_route) {
     el("div", { class: "screen-head" },
       el("h1", {}, "New Project"),
     ),
-    el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Project details"),
-      el("p", { class: "muted small" }, "Title and topic are required — the backend plans scenes from them. Leave the other fields at their defaults unless you know better."),
-      form,
+    el("div", { class: "brief-layout" },
+      el("section", { class: "panel" },
+        el("h2", { class: "panel-title" }, "Project brief"),
+        form,
+      ),
+      el("aside", {},
+        el("section", { class: "panel" },
+          el("h2", { class: "panel-title" }, "Video styles"),
+          el("p", { class: "muted small" }, "Classic builds a storyboard of scenes and shots. Editorial builds a sequence of motion-graphics compositions from your narration."),
+        ),
+      ),
     ),
   );
 }
