@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from backend.core.resources import resource_path
@@ -93,6 +93,7 @@ class BackendRegistry:
         *,
         mock_mode: bool = False,
         secret_store: LocalSecretStore | None = None,
+        start_qwen_image_21: Callable[[], None] | None = None,
     ) -> BackendRegistry:
         registry = cls()
         llm = config.get("llm", {})
@@ -119,6 +120,7 @@ class BackendRegistry:
         registry.register(QwenImage21Backend(
             endpoint=str(qwen21.get("endpoint", "http://127.0.0.1:8200")),
             generation_timeout=float(qwen21.get("generation_timeout_seconds", 3600)),
+            start_service=start_qwen_image_21,
         ))
         # Ideogram 4 runs locally through its own workflow; registered alongside
         # Qwen Image (kept for fallback/A-B testing) — neither replaces the other.

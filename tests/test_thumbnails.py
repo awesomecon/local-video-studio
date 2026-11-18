@@ -182,6 +182,57 @@ def test_qwen_native_text_uses_exact_copy_prompt_and_same_2512_backend(
     assert result.metadata["settings"]["native_text"] is True
 
 
+def test_managed_qwen_thumbnail_waits_for_service_before_generating(tmp_path, monkeypatch):
+    config = load_config(environ={
+        "LOCAL_VIDEO_STUDIO__BACKENDS__QWEN_IMAGE_21__MANAGED": "true",
+        "LOCAL_VIDEO_STUDIO__BACKENDS__QWEN_IMAGE_21__SOURCE_PATH": str(tmp_path),
+        "LOCAL_VIDEO_STUDIO__PATHS__GENERATION_CACHE_ROOT": str(tmp_path / "cache"),
+    })
+    service = PipelineService(
+        config, database_path=tmp_path / "studio.sqlite3", project_root=tmp_path / "projects",
+        temp_root=tmp_path / "tmp", mock_mode=False,
+        snapshot_provider=lambda: (GPUSnapshot(0, "Test GPU", 24, 1, 23, 0),),
+    )
+    worker = service.qwen_image_21_worker
+    assert worker is not None
+    backend = service.registry.get("qwen_image_21_comfyui")
+    events = []
+
+    def ensure_running(*, before_start):
+        before_start()
+        events.append("start")
+        return True
+
+    def health():
+        events.append("health")
+        return {"status": "healthy"}
+
+    def generate(request):
+        events.append("generate")
+        output = request.output_dir / "generated.png"
+        Image.new("RGB", (1280, 720)).save(output)
+        return GenerationResult(outputs=(output,), metadata={})
+
+    monkeypatch.setattr(worker, "ensure_running", ensure_running)
+    monkeypatch.setattr(worker, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(backend, "health", health)
+    monkeypatch.setattr(backend, "generate", generate)
+    project = make_project(service)
+    plan = ThumbnailPlan.model_validate(service.thumbnails.snapshot(project.id)["plan"])
+    service.thumbnails.save_plan(project.id, plan.model_copy(update={
+        "image_model": "qwen_image_21_native_text",
+    }))
+    job = service.thumbnails.queue_candidate(project.id, ThumbnailCandidateRequest())
+    assert events == []
+    try:
+        service.thumbnails.run_candidate_job(job.id)
+        assert service.jobs.get(job.id).status is JobStatus.COMPLETED
+        assert events == ["start", "health", "generate"]
+    finally:
+        service.shutdown()
+    assert events[-1] == "stop"
+
+
 def test_ideogram_thumbnail_prompt_uses_horizontal_saved_styling(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     plan = ThumbnailPlan(

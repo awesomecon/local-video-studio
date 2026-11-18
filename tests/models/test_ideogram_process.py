@@ -12,7 +12,7 @@ from backend.workers.ideogram_process import IdeogramWorkerSupervisor
 @pytest.fixture(autouse=True)
 def simulated_posix_launcher(monkeypatch):
     """Fake-process ownership tests exercise the POSIX launcher, on any host."""
-    monkeypatch.setattr("backend.workers.ideogram_process.platform", SimpleNamespace(system=lambda: "Linux"))
+    monkeypatch.setattr("backend.workers.comfyui_process.platform", SimpleNamespace(system=lambda: "Linux"))
 
 
 class FakeProcess:

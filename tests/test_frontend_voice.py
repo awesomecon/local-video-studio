@@ -41,7 +41,7 @@ def test_delivery_tags_panel_is_provider_scoped_and_wired_into_generation() -> N
     source = VOICE_JS.read_text(encoding="utf-8")
 
     # The panel is built and attached to the narration-generation section.
-    assert "performancePanel(project, current, tags, provider, script, refresh)" in source
+    assert "performancePanel(project, current, tags, provider, script, refreshTags)" in source
     panel_start = source.index('section("Narration settings"')
     panel_end = source.index("workerControlsPanel(models, refresh)", panel_start)
     assert "performance," in source[panel_start:panel_end]

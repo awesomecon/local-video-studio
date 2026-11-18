@@ -22,6 +22,7 @@ from .performance import (
     PerformanceProvider,
     PerformanceScript,
     PerformanceSegment,
+    count_inserted_tags,
     count_spoken_words,
     normalize_tagged_layout,
     validate_tagged,
@@ -105,7 +106,7 @@ Hard rules:
 - Keep free-form descriptions specific and readable.
 - Intensity: {intensity} (subtle = a few cues, balanced = moderate, expressive = frequent but still natural).
 {notes_line}
-Return only the JSON object constrained by the provided response schema. Echo each segment's index unchanged."""
+Return a JSON object with a segments array. Each entry must have an index and a tagged string containing the full segment with at least one cue. Echo each segment's index unchanged."""
 
 _HIGGS_SYSTEM_PROMPT = """You are a voice-delivery director for Higgs Audio v3 narration.
 You receive numbered narration segments. For each one, return the exact same spoken words with official Higgs control tokens inserted.
@@ -125,7 +126,7 @@ Hard rules:
 - Target natural long-form YouTube narration, not cartoon acting.
 - Intensity: {intensity} (subtle = a few controls, balanced = moderate, expressive = frequent but still natural).
 {notes_line}
-Return only the JSON object constrained by the provided response schema. Echo each segment's index unchanged."""
+Return a JSON object with a segments array. Each entry must have an index and a tagged string containing the full segment with at least one control token. Echo each segment's index unchanged."""
 
 
 class PerformanceTagger:
@@ -205,6 +206,13 @@ class PerformanceTagger:
         schema = PerformanceTaggedBatch.model_json_schema()
         schema["required"] = list(schema["properties"])
         schema["additionalProperties"] = False
+        schema["properties"]["segments"]["minItems"] = 1
+        # Require the actual output fields on the wire while keeping the
+        # parser's positional recovery for models that omit the index.
+        segment = schema["$defs"]["PerformanceTaggedSegment"]
+        segment["required"] = ["index", "tagged"]
+        segment["additionalProperties"] = False
+        segment["properties"]["tagged"]["minLength"] = 1
         return schema
 
     @staticmethod
@@ -349,9 +357,18 @@ class PerformanceTagger:
         if not isinstance(repaired, str) or not repaired:
             return None
         normalized = normalize_tagged_layout(repaired, provider)
-        if validate_tagged(segment.source, normalized, provider):
+        if self._candidate_errors(segment, normalized, provider):
             return None
         return normalized
+
+    @staticmethod
+    def _candidate_errors(
+        segment: PerformanceSegment, candidate: str, provider: PerformanceProvider,
+    ) -> list[str]:
+        errors = validate_tagged(segment.source, candidate, provider)
+        if not errors and not count_inserted_tags(segment.source, candidate, provider):
+            errors.append("the segment had no delivery cues")
+        return errors
 
     def _tag_batch(
         self,
@@ -396,7 +413,7 @@ class PerformanceTagger:
             errors = (
                 ["the segment was missing from the model response"]
                 if normalized is None
-                else validate_tagged(segment.source, normalized, provider)
+                else self._candidate_errors(segment, normalized, provider)
             )
             if not errors:
                 results.append(normalized)

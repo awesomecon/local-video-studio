@@ -335,6 +335,9 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_local_first(self) -> AppConfig:
+        qwen = self.backends.qwen_image_21
+        if qwen.managed and not (qwen.enabled and qwen.endpoint and qwen.source_path):
+            raise ValueError("managed qwen_image_21 requires enabled=true, endpoint, and source_path")
         if self.network.allow_remote_backends:
             return self
         endpoints = {"llm": self.llm.base_url}

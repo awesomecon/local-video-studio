@@ -1460,11 +1460,22 @@ class TTSManager:
             context=self._video_context(project),
             provider=provider,
         )
+        self._require_generated_cues(script, warnings)
         script.source_sha256 = hashlib.sha256(
             script.source_text.encode("utf-8"),
         ).hexdigest()
         self.save_performance_script(project_id, script)
         return script, warnings
+
+    @staticmethod
+    def _require_generated_cues(script: PerformanceScript, warnings: list[str]) -> None:
+        if script.tag_count == 0:
+            raise BackendError(
+                BackendErrorCode.INVALID_RESPONSE,
+                "The local LLM produced no valid delivery cues.",
+                retryable=True,
+                details=warnings[0] if warnings else None,
+            )
 
     def regenerate_performance_segment(
         self,
@@ -1478,10 +1489,9 @@ class TTSManager:
         """Re-tag one segment with the local LLM and persist the updated script.
 
         Only the named segment is re-sent to the LLM (with the per-segment
-        repair/degrade logic); every other segment keeps its stored tags.  The
-        regenerated segment is validated by the tagger, so it is always safe to
-        persist.  ``accept=True`` on save preserves any previously-accepted
-        hand edits on the other segments.
+        repair logic). If regeneration produces valid cues, only the selected
+        segment is replaced. ``accept=True`` on save preserves previously
+        accepted hand edits on the other segments.
         """
         project = self.pipeline._project(project_id)
         script = self.get_performance_script(project_id, provider)
@@ -1503,10 +1513,8 @@ class TTSManager:
             language=language, model=model, context=context,
             provider=script.provider,
         )
-        new_tagged = result.segments[0].tagged
-        for s in script.segments:
-            if s.key == key:
-                s.tagged = new_tagged
+        self._require_generated_cues(result, warnings)
+        segment.tagged = result.segments[0].tagged
         self.save_performance_script(project_id, script, accept=True)
         return script, warnings
 

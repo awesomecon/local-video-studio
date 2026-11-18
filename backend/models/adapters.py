@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import httpx
 
@@ -222,9 +222,17 @@ class QwenImage2512Backend(ComfyUIBackend):
 class QwenImage21Backend(ComfyUIBackend):
     """Native Qwen-Image-2.1 INT8 workflow in a separate local service."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, start_service: Callable[[], None] | None = None, **kwargs: Any,
+    ) -> None:
         kwargs.setdefault("model_name", "Qwen-Image-2.1")
         super().__init__(*args, **kwargs)
+        self._start_service = start_service
+
+    def load(self) -> None:
+        if self._start_service is not None:
+            self._start_service()
+        super().load()
 
     def descriptor(self) -> BackendDescriptor:
         return BackendDescriptor(

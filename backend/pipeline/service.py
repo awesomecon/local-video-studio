@@ -175,6 +175,7 @@ from backend.timeline import (
 from backend.thumbnails import ThumbnailStudioService
 from backend.tts import NarrationRequest, TTSManager
 from backend.tts.audio import wav_duration
+from backend.workers.comfyui_process import QwenImage21WorkerSupervisor
 from backend.workers.gpu import GPUSnapshot, query_nvidia_smi
 from backend.workers.ideogram_process import IdeogramWorkerSupervisor
 from backend.workers.tts_processes import TTSWorkerSupervisor
@@ -293,12 +294,18 @@ class PipelineService:
         self._job_control_lock = threading.RLock()
         self._stopping = False
         self.jobs = PersistentJobQueue(self.database, control_lock=self._job_control_lock)
+        self.qwen_image_21_worker = (
+            QwenImage21WorkerSupervisor.from_config(config)
+            if config.backends.qwen_image_21.managed and not self.mock_mode
+            else None
+        )
         self.registry = BackendRegistry.from_config(
             config.model_dump(mode="python"), mock_mode=self.mock_mode,
             # One user-private file per provider key under the app-data dir; keys are
             # never written into projects, logs, or diagnostics. Environment
             # variables always take precedence over stored values.
             secret_store=LocalSecretStore(config.paths.app_data / "secrets"),
+            start_qwen_image_21=self._start_qwen_image_21 if self.qwen_image_21_worker else None,
         )
         self.generation_cache = self._build_generation_cache(config)
         self._snapshot_provider = snapshot_provider or query_nvidia_smi
@@ -3600,7 +3607,11 @@ class PipelineService:
                     # A canceled/failed row may still own a winding-down child.
                     cancel_media_processes_for_job(job.id)
         try:
-            self.ideogram_worker.stop()
+            try:
+                if self.qwen_image_21_worker is not None:
+                    self.qwen_image_21_worker.stop()
+            finally:
+                self.ideogram_worker.stop()
         finally:
             self.tts_workers.stop_all()
 
@@ -4630,7 +4641,7 @@ class PipelineService:
                     with self._gpu_lock:
                         if resolved.backend_name == "qwen_image_21_comfyui":
                             if not self._prepare_comfy_backend(resolved.backend_name):
-                                self._check_qwen_image_vram()
+                                self._check_qwen_image_vram("Qwen-Image-2.1")
                         try:
                             resolved.backend.load()
                             generated = resolved.backend.generate(request)
@@ -6710,7 +6721,7 @@ class PipelineService:
                 )
         reusing_resident = self._prepare_comfy_backend(backend_name)
         if not reusing_resident:
-            self._check_qwen_image_vram()
+            self._check_qwen_image_vram("Qwen-Image-2.1" if qwen21 else "Qwen-Image-2512")
         request = GenerationRequest(
             job_id=f"{project.id}:qwen-image-{'2.1' if qwen21 else '2512'}:{scene.seed}",
             output_dir=directory,
@@ -6760,19 +6771,25 @@ class PipelineService:
             )
             raise
 
-    def _check_qwen_image_vram(self) -> None:
+    def _start_qwen_image_21(self) -> None:
+        assert self.qwen_image_21_worker is not None
+        self.qwen_image_21_worker.ensure_running(
+            before_start=lambda: self._check_qwen_image_vram("Qwen-Image-2.1"),
+        )
+
+    def _check_qwen_image_vram(self, model_name: str) -> None:
         required = self.config.gpu.minimum_free_vram_gb_for_heavy_job
         try:
             snapshots = self._snapshot_provider()
         except BackendError as exc:
             raise PipelineError(
-                "System-wide GPU memory cannot be inspected before the Qwen-Image-2512 job."
+                f"System-wide GPU memory cannot be inspected before the {model_name} job."
             ) from exc
         free = max(snapshot.free_gb for snapshot in snapshots)
         if free < required:
             raise PipelineError(
                 f"Free system VRAM {free:.1f} GiB is below the {required:g} GiB required for "
-                "Qwen-Image-2512. Release cached ComfyUI models or unload the externally "
+                f"{model_name}. Release cached ComfyUI models or unload the externally "
                 "managed LLM in its router UI, then retry."
             )
 

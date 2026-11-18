@@ -96,7 +96,7 @@ export function renderVoice(_route) {
     return screen;
   }
   const body = el("div", { class: "panel-body" }, loadingState(4));
-  const load = async () => {
+  const load = async ({ voiceDraft } = {}) => {
     body.replaceChildren(loadingState(4));
     try {
       const [snapshot, voices, models, narrations, tags] = await Promise.all([
@@ -107,7 +107,7 @@ export function renderVoice(_route) {
         getPerformanceTags(state.config, state.currentProjectId),
       ]);
       body.replaceChildren(build(
-        snapshot, voices.voices || [], models.models || {}, narrations, tags, load,
+        snapshot, voices.voices || [], models.models || {}, narrations, tags, load, voiceDraft,
       ));
     } catch (err) {
       body.replaceChildren(errorPanel(err,
@@ -123,7 +123,7 @@ export function renderVoice(_route) {
   return screen;
 }
 
-function build(snapshot, voices, models, narrations, tags, refresh) {
+function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) {
   const project = snapshot.project;
   /** classic|editorial — drives the mode-aware timing badges and help text. */
   const videoMode = effectiveVideoMode(project);
@@ -271,7 +271,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     modelOption("breeze_tts_2", "Breeze TTS 2 (≈3.5B)", models),
     modelOption("higgs_tts_3", "Higgs TTS 3 4B", models),
     modelOption("gemini_tts", "Gemini TTS (Google, cloud)", models));
-  provider.value = current.provider || "qwen_tts";
+  provider.value = voiceDraft?.provider || current.provider || "qwen_tts";
   const chatterboxBuiltIn = "__chatterbox_builtin__";
   const qwenBuiltInPrefix = "__qwen_builtin__:";
   const higgsBuiltIn = "__higgs_default__";
@@ -357,6 +357,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const pause = el("input", { type: "number", class: "input", min: "0", max: "5000",
     step: "50", value: current.pause_ms ?? 350 });
   const script = el("textarea", { class: "input", rows: "9",
+    value: voiceDraft?.script || "",
     placeholder: "Leave blank to use planned scene narration." });
   const hasPlannedNarration = (snapshot.scenes || []).some(
     (scene) => String(scene.narration || "").trim());
@@ -540,7 +541,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     field("Step instruction", instruction, "A model-supported edit description."));
   const enhanceRow = el("label", { class: "check-row" }, enhance,
     " Preserve Qwen audio and run a Step expressive-edit pass");
-  const performance = performancePanel(project, current, tags, provider, script, refresh);
+  const refreshTags = () => refresh({ voiceDraft: { provider: provider.value, script: script.value } });
+  const performance = performancePanel(project, current, tags, provider, script, refreshTags);
 
   let recordedBlob = null;
   let recordedUrl = null;
@@ -780,7 +782,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     finally { saveVoice.disabled = false; syncGenerateEnabled(); }
   };
 
-  const generationSettings = el("details", { class: "studio-disclosure" },
+  const generationSettings = el("details", { class: "studio-disclosure", open: !!voiceDraft },
     el("summary", {}, "Generate narration with a model"));
   const openGeneration = el("button", { class: "source-card", type: "button" },
     el("span", { class: "sc-icon" }, icon("mic", 20)),

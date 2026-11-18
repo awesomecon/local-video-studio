@@ -474,7 +474,12 @@ def test_tagger_tags_segments_via_fake_llm() -> None:
     assert script.tag_count == 2
     call = fake.complete_calls[0]
     assert call["structured"] is True
-    assert call["json_schema"] is not None
+    schema = call["json_schema"]
+    assert schema["properties"]["segments"]["minItems"] == 1
+    segment_schema = schema["$defs"]["PerformanceTaggedSegment"]
+    assert segment_schema["required"] == ["index", "tagged"]
+    assert segment_schema["additionalProperties"] is False
+    assert segment_schema["properties"]["tagged"]["minLength"] == 1
     assert call["thinking_budget_tokens"] == 3000
     assert call["temperature"] == 0.4
     assert call["model"] == "fake-local-model"
@@ -589,7 +594,12 @@ def test_tagger_repairs_a_failed_segment_individually() -> None:
     assert "I thought everything was normal." not in repair_user
 
 
-def test_tagger_repairs_a_segment_with_empty_output() -> None:
+@pytest.mark.parametrize(("candidate", "error"), [
+    ({"tagged": ""}, "tagged text is empty"),
+    ({"text": "Then the lights went out."}, "tagged text is empty"),
+    ({"tagged": "Then the lights went out."}, "the segment had no delivery cues"),
+])
+def test_tagger_repairs_a_segment_without_cues(candidate: dict[str, str], error: str) -> None:
     sources = [
         "I thought everything was normal.",
         "Then the lights went out.",
@@ -601,10 +611,9 @@ def test_tagger_repairs_a_segment_with_empty_output() -> None:
             return {"segments": [
                 {"index": 0, "tagged": "[shouting] Then the lights went out."},
             ]}
-        # Initial call returns segment 1 with an empty tagged field.
         return {"segments": [
             {"index": 0, "tagged": "[calm] I thought everything was normal."},
-            {"index": 1, "tagged": ""},
+            {"index": 1, **candidate},
         ]}
 
     fake = FakeLLM(responder)
@@ -613,7 +622,7 @@ def test_tagger_repairs_a_segment_with_empty_output() -> None:
     assert script.segments[0].tagged == "[calm] I thought everything was normal."
     assert script.segments[1].tagged == "[shouting] Then the lights went out."
     repair_user = fake.complete_calls[1]["messages"][-1]["content"]
-    assert "tagged text is empty" in repair_user
+    assert error in repair_user
 
 
 def test_tagger_repairs_over_tagged_segment_down_to_the_ceiling() -> None:
@@ -1721,3 +1730,40 @@ def test_performance_tags_regenerate_api_errors(
     )
     assert response.status_code == 422
     assert "unknown segment key" in response.text
+
+
+def test_performance_tagging_preserves_saved_cues_when_the_model_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, service = _api_service(tmp_path, monkeypatch)
+    project = service.create_project(ProjectCreate(title="Keep cues", topic="test", target_duration=2))
+    source = "Then the lights went out."
+    _add_scenes(service, project, [source])
+    service.update_project(project.id, {"selected_llm_model": "fake-local-model"})
+    client = TestClient(app)
+    base = f"/api/projects/{project.id}/tts/performance-tags"
+
+    def empty_response(messages: Any, calls: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"segments": [{"index": 0, "text": source}]}
+
+    _enable_fake_llm(service, monkeypatch, empty_response)
+    failed = client.post(base, json={})
+    assert failed.status_code == 502
+    assert failed.json()["detail"]["code"] == "invalid_response"
+    assert client.get(base).json()["script"] is None
+
+    _enable_fake_llm(service, monkeypatch, _tagged_responder({source: f"[whispering] {source}"}))
+    generated = client.post(base, json={})
+    assert generated.status_code == 200
+    saved = generated.json()["script"]
+    assert generated.json()["tag_count"] == 1
+
+    _enable_fake_llm(service, monkeypatch, empty_response)
+    for url, request in (
+        (base, {"force": True}),
+        (f"{base}/regenerate", {"key": saved["segments"][0]["key"]}),
+    ):
+        failed = client.post(url, json=request)
+        assert failed.status_code == 502
+        assert "no valid delivery cues" in failed.json()["detail"]["message"]
+        assert client.get(base).json()["script"] == saved

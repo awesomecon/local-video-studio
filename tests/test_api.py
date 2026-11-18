@@ -865,10 +865,11 @@ def test_frontend_project_settings_and_asset_delivery(tmp_path: Path) -> None:
 def test_llm_model_selection_validates_discovery_and_persists_project(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    advertised = ({"id": "local-model", "object": "model"},)
     monkeypatch.setattr(
         LocalLLMBackend,
         "discover_models",
-        lambda self: ({"id": "local-model", "object": "model"},),
+        lambda self: advertised,
     )
     app = create_app(
         load_config(environ={}),
@@ -891,6 +892,21 @@ def test_llm_model_selection_validates_discovery_and_persists_project(
     snapshot = client.get(f"/api/projects/{project_id}").json()
     assert snapshot["project"]["selected_llm_model"] == "local-model"
     assert client.put("/api/llm/models", json={"model": "missing"}).status_code == 409
+
+    advertised = ({"id": "renamed-model", "object": "model"},)
+    listed = client.get("/api/llm/models", params={"project_id": project_id})
+    assert listed.status_code == 200
+    assert listed.json()["models"] == [{"id": "renamed-model"}]
+    assert listed.json()["selected_model"] == "local-model"
+    assert listed.json()["resolved_model"] is None
+
+    replaced = client.put(
+        "/api/llm/models",
+        json={"model": "renamed-model", "project_id": project_id},
+    )
+    assert replaced.status_code == 200
+    listed = client.get("/api/llm/models", params={"project_id": project_id}).json()
+    assert listed["selected_model"] == listed["resolved_model"] == "renamed-model"
 
 
 def test_real_script_generation_requires_an_explicit_project_model(tmp_path: Path) -> None:

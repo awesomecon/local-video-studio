@@ -1006,17 +1006,21 @@ def create_app(
         backend = LocalLLMBackend(
             base_url=settings.llm.base_url,
             api_key_env=settings.llm.api_key_env,
-            model=configured_model,
             timeout_seconds=min(settings.llm.timeout_seconds, 3.0),
         )
-        health_result = backend.health(check_completion=False)
-        if health_result.get("status") != "healthy":
-            raise HTTPException(status_code=503, detail=health_result.get("error", {}))
+        try:
+            model_ids = [record["id"] for record in backend.discover_models()]
+        except BackendError as exc:
+            raise HTTPException(status_code=503, detail=exc.as_dict()) from None
+        selected_model = None if configured_model == "auto" else configured_model
+        resolved_model = selected_model if selected_model in model_ids else None
+        if selected_model is None and model_ids:
+            resolved_model = model_ids[0]
         return {
             "endpoint": settings.llm.base_url,
-            "models": [{"id": model_id} for model_id in health_result.get("models", [])],
-            "selected_model": None if configured_model == "auto" else configured_model,
-            "resolved_model": health_result.get("selected_model"),
+            "models": [{"id": model_id} for model_id in model_ids],
+            "selected_model": selected_model,
+            "resolved_model": resolved_model,
         }
 
     @application.put("/api/llm/models")

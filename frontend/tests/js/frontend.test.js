@@ -201,7 +201,7 @@ import {
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { editorialNextStep } from "../../js/pages/dashboard.js";
-import { performancePanel } from "../../js/pages/voice.js";
+import { performancePanel, renderVoice } from "../../js/pages/voice.js";
 import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
 import {
@@ -2864,6 +2864,49 @@ await recordAsync("voice tags: switching providers preserves edits and scopes sa
   eq(panel.querySelector("textarea").value, "[happy] Hello world.");
 });
 
+await recordAsync("voice tags: regeneration keeps the selected provider and script visible", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "tag-project";
+  const base = "/api/projects/tag-project";
+  const provider = "fish_drama_3";
+  const source = "Hello world.";
+  let tagged = `[calm] ${source}`;
+  const calls = stubFetch(({ method, url }) => {
+    if (url === base) {
+      return { payload: { project: { id: "tag-project", settings: { voice: { provider: "qwen_tts" } } } } };
+    }
+    if (url === `${base}/tts/performance-tags`) {
+      if (method === "POST") tagged = `[quietly] ${source}`;
+      const result = { tag_count: 1, script: { provider, segments: [{ key: "override", source, tagged }] } };
+      return { payload: { ...result, providers: { [provider]: result }, llm: { available: true } } };
+    }
+    return { payload: {} };
+  });
+
+  const screen = renderVoice();
+  try {
+    await flush();
+    const selection = () => screen.querySelector(`option[value="${provider}"]`).closest("select");
+    const override = () => screen.querySelector('textarea[rows="9"]');
+    selection().value = provider;
+    selection().dispatchEvent(new Event("change"));
+    override().value = source;
+    [...screen.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Regenerate Fish Drama")).click();
+    await flush(60);
+    const posted = calls.find((call) => call.method === "POST");
+    eq(posted.body.provider, provider);
+    eq(posted.body.text, source);
+    eq(selection().value, provider);
+    eq(override().value, source);
+    assert(override().closest("details").open, "narration settings remain open");
+    eq(screen.querySelector("#perfseg-0").value, `[quietly] ${source}`);
+  } finally {
+    screen.remove();
+    state.currentProjectId = null;
+  }
+});
+
 /* --- 14. Shot stale exposure ---------------------------------------------- */
 
 const STALE_SHOT = {
@@ -4011,6 +4054,50 @@ await recordAsync("models page: keeps the model panels, drops the environment pa
     assert(!text.includes(moved), `environment panel still present: ${moved}`);
   }
   restore();
+});
+
+await recordAsync("models page: a missing saved model can be replaced", async () => {
+  const restore = withStudioState("online");
+  const oldFetch = globalThis.fetch;
+  state.currentProjectId = "p-1";
+  let savedModel = "old-model";
+  const calls = stubFetch((call) => {
+    if (call.url === "/api/system/status") return { payload: SYSTEM_STATUS_FIXTURE };
+    if (call.url === "/api/models?project_id=p-1") return { payload: MODEL_LIST_FIXTURE };
+    if (call.url === "/api/llm/models" && call.method === "PUT") {
+      savedModel = call.body.model;
+      return { payload: { selected_model: savedModel } };
+    }
+    if (call.url === "/api/llm/models?project_id=p-1") {
+      return { payload: {
+        endpoint: "http://127.0.0.1:1234/v1",
+        selected_model: savedModel,
+        resolved_model: savedModel === "new-model" ? savedModel : null,
+        models: [{ id: "new-model" }],
+      } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  try {
+    const screen = renderModels({ name: "models", param: null });
+    await flush();
+    const select = screen.querySelector("select");
+    const save = [...screen.querySelectorAll("button")].find((button) => button.textContent === "Use for this project");
+    assert(screen.textContent.includes("old-model unavailable"), "shows the stale selection");
+    eq(select.value, "", "no replacement is selected automatically");
+    assert(save.disabled, "save requires an explicit replacement");
+    select.value = "new-model";
+    select.dispatchEvent(new Event("change"));
+    assert(!save.disabled, "the user can save the advertised model");
+    save.click();
+    await flush();
+    eq(calls.find((call) => call.method === "PUT").body, { model: "new-model", project_id: "p-1" });
+    eq(screen.querySelector("select").value, "new-model");
+    assert(!screen.textContent.includes("old-model unavailable"), "reloading shows the new selection");
+  } finally {
+    globalThis.fetch = oldFetch;
+    restore();
+  }
 });
 
 record("route: #/system parses to the system screen", () => {

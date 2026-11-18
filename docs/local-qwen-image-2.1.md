@@ -5,6 +5,24 @@ under `backends.qwen_image_21`. Keep the existing ComfyUI installation for other
 models. The new runtime must support `TextEncodeQwenImage21` and the Qwen-Image-2.1
 model architecture; the older Qwen-Image-2512 runtime is insufficient.
 
+To have Studio launch an existing isolated installation when a job first needs it,
+add the following to `config/local.yaml`, with `source_path` set to the directory
+containing your `start.sh` launcher. The launcher must run ComfyUI in the foreground
+and forward its arguments to `main.py` after any defaults.
+
+```yaml
+backends:
+  qwen_image_21:
+    managed: true
+    source_path: /path/to/ComfyUI-QwenImage21
+    startup_timeout_seconds: 120
+```
+
+Studio waits for the Qwen node before submitting a workflow. It reuses a compatible
+service already running at the endpoint and stops only its own worker when Studio
+shuts down. Startup output is written to `logs/qwen-image-2.1.log` under the
+configured Studio app-data directory.
+
 Download only after checking disk space and approving the download. The workflow
 uses these files from [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1):
 

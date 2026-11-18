@@ -537,7 +537,8 @@ class ThumbnailStudioService:
                     result = self._dispatch_ideogram4(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
                 elif image_model in {"qwen_image", "qwen_image_native_text", "qwen_image_21", "qwen_image_21_native_text"}:
-                    result = self._dispatch_qwen_image(project, plan, temporary, job.id, seed)
+                    with self.pipeline._gpu_lock:
+                        result = self._dispatch_qwen_image(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
                 else:
                     result = self._dispatch_krea(project, plan, temporary, job.id, seed)
@@ -955,7 +956,7 @@ class ThumbnailStudioService:
         workflow_version = "qwen-image-2.1-thumbnail-int8-v1" if qwen21 else _QWEN_THUMBNAIL_WORKFLOW_VERSION
         reusing_resident = self.pipeline._prepare_comfy_backend(backend_name)
         if not reusing_resident:
-            self.pipeline._check_qwen_image_vram()
+            self.pipeline._check_qwen_image_vram("Qwen-Image-2.1" if qwen21 else "Qwen-Image-2512")
         parameters = {
             "width": _QWEN_THUMBNAIL_WIDTH,
             "height": _QWEN_THUMBNAIL_HEIGHT,

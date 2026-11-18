@@ -166,8 +166,10 @@ function routerModelPanel() {
   async function load() {
     region.replaceChildren(loadingState(2));
     try {
-      const info = await llmModels(state.config, state.currentProjectId);
-      const select = el("select", { class: "input" },
+      const projectId = state.currentProjectId;
+      const info = await llmModels(state.config, projectId);
+      const selectionAvailable = info.models.some((model) => model.id === info.selected_model);
+      const select = el("select", { class: "input", disabled: !info.models.length },
         el("option", { value: "" }, "Choose a model…"),
         ...info.models.map((model) =>
           el("option", { value: model.id, selected: model.id === info.selected_model }, model.id)),
@@ -175,15 +177,15 @@ function routerModelPanel() {
       const save = el("button", {
         class: "btn btn-primary btn-sm",
         type: "button",
-        disabled: !state.currentProjectId || !info.models.length || !info.selected_model,
+        disabled: !projectId || !selectionAvailable,
       }, "Use for this project");
-      select.onchange = () => { save.disabled = !state.currentProjectId || !select.value; };
+      select.onchange = () => { save.disabled = !projectId || !select.value; };
       save.onclick = async () => {
         save.disabled = true;
         try {
           await selectLlmModel(state.config, {
             model: select.value,
-            project_id: state.currentProjectId,
+            project_id: projectId,
           });
           toast("good", "Script model saved for this project");
           load();
@@ -197,14 +199,16 @@ function routerModelPanel() {
           el("dl", { class: "kv" },
             el("dt", {}, "Router"), el("dd", { class: "mono" }, info.endpoint),
             el("dt", {}, "Project selection"), el("dd", {},
-              info.selected_model ? badge("good", info.selected_model) : badge("warning", "required")),
+              selectionAvailable ? badge("good", info.selected_model)
+                : badge("warning", info.selected_model ? `${info.selected_model} unavailable` : "required")),
             el("dt", {}, "Router currently resolves"), el("dd", { class: "mono" }, info.resolved_model || "—"),
           ),
-          state.currentProjectId
+          projectId
             ? el("div", { class: "field" },
                 el("label", {}, "Use this router model for script and planning"), select,
                 el("div", { class: "hint" },
-                  "A model must be explicitly selected before Studio sends any script-generation request."),
+                  info.models.length ? "Choose a model before generating a script."
+                    : "The router is reachable and currently advertises no models."),
                 save,
               )
             : el("p", { class: "small muted" },
