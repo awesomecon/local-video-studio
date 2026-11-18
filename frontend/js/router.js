@@ -21,6 +21,7 @@
 
 const ROUTES = [
   { re: /^#\/?$/, name: "dashboard", param: null },
+  { re: /^#\/projects$/, name: "projects", param: null },
   { re: /^#\/new$/, name: "new-project", param: null },
   { re: /^#\/project$/, name: "project", param: null },
   { re: /^#\/script$/, name: "script", param: null },

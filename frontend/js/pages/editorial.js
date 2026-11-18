@@ -3,7 +3,7 @@
  * (video_mode === "editorial"), where the Project Details panel stays a
  * compact status surface. Classic and legacy projects are never shown the
  * workspace: they get an empty state pointing at the Project screen (where
- * the Video Style is set) instead.
+ * the workflow is set) instead.
  *
  * Data flow (explicit navigation / Refresh / plan generation):
  *  - one load issues at most two reads: the project snapshot
@@ -61,7 +61,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
-import { effectiveVideoMode } from "../video-mode.js";
+import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 import {
   editorialPlanState,
   projectEditorialApiPath,
@@ -255,7 +255,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       el("div", { class: "panel-title" }, "Editorial canvas"),
       emptyState(
         "Classic project",
-        "This project uses the Classic scene-based pipeline, so it has no Editorial composition workspace. Switch the Video Style to Editorial on the Project screen to build motion-graphics compositions.",
+        "This project uses the Classic workflow. Open Storyboard to edit its shots, or choose the Editorial workflow in Project brief.",
         [
           el("button", { class: "btn", type: "button", onclick: () => navigate("#/project") }, "Open Project screen"),
         ],
@@ -272,14 +272,27 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
   function noPlanState(editorial) {
     const actions = [];
     const generateUrl = usableUrl(editorial.generate_url);
-    if (generateUrl) {
-      actions.push(buildGeneratePlanButton(generateUrl, errors, () => load(), ctrl));
+    const needsScript = typeof editorial.has_narration === "boolean" && !snapRef?.scenes?.length;
+    const needsNarration = editorial.has_narration === false && !needsScript;
+    if (needsScript) {
+      actions.push(el("a", { class: "btn btn-primary", href: "#/script" }, "Open Script"));
+    } else {
+      if (needsNarration) {
+        actions.push(el("a", { class: "btn btn-primary", href: "#/voice" }, "Add narration"));
+      }
+      if (generateUrl) {
+        const generate = buildGeneratePlanButton(generateUrl, errors, () => load(), ctrl);
+        if (needsNarration) generate.classList.remove("btn-primary");
+        actions.push(generate);
+      }
     }
     return el("section", { class: "panel" },
       el("div", { class: "panel-title" }, "Editorial canvas"),
       emptyState(
         "No Edit Plan yet",
-        "This editorial project has no Edit Plan. Generating one plans the whole sequence from the script and narration. It can take a while, and it changes nothing else.",
+        needsScript ? "Write or generate the script to start planning the picture."
+          : needsNarration ? "Add narration to plan against its timing. You can also generate a draft Edit Plan from the script."
+            : "Generate the Edit Plan to lay out what appears on screen as the narration plays.",
         actions,
       ),
       el("div", { class: "panel-body" },
@@ -287,7 +300,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         el("ol", { class: "ed-workflow" },
           el("li", {}, "Generate the Edit Plan from the script and narration."),
           el("li", {}, "Review the sequence: tune timings, templates, text, motion, and assets."),
-          el("li", {}, "Preview the deterministic canvas right here, or in a new tab."),
+          el("li", {}, "Play the cut with narration and check the timing of the text and visuals."),
           el("li", {}, "Render the final video from the Export screen."),
         ),
       ),
@@ -351,8 +364,9 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       );
     }
     if (noteHost) {
+      const notes = [];
       if (planState.kind === "stale") {
-        noteHost.replaceChildren(el("div", { class: "banner banner-warning" },
+        notes.push(el("div", { class: "banner banner-warning" },
           badge("warning", "Stale", false),
           el("div", {},
             el("div", {}, planState.reasons.length
@@ -360,15 +374,23 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
               : "Tracked inputs changed since this plan was generated:"),
             ...planState.reasons.map((reason) => el("div", { class: "muted small" }, reason)),
             el("div", { class: "muted small" },
-              "Stale plans are preserved on purpose: the preview still shows the last generated plan."),
+              "The preview uses the saved plan. Review the changes and use AI revision to update the cut."),
           ),
         ));
       } else if (planState.kind === "untracked") {
-        noteHost.replaceChildren(el("p", { class: "muted small" },
+        notes.push(el("p", { class: "muted small" },
           "This plan may predate provenance tracking, so its freshness can't be verified. It is still usable; the preview shows it as-is."));
-      } else {
-        noteHost.replaceChildren();
       }
+      const missing = editorialMediaIssues(editorial);
+      if (missing.length) {
+        notes.push(el("div", { class: "row wrap mt" },
+          badge("warning", missingEditorialMediaLabel(missing.length), false),
+          el("button", { class: "btn btn-sm", type: "button",
+            onclick: () => selectComposition(missing[0].compositionId),
+          }, "Open first affected composition"),
+        ));
+      }
+      noteHost.replaceChildren(...notes);
     }
   }
 
@@ -401,6 +423,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       if (fresh.project && fresh.project.id === projectId) snapRef = fresh;
       paintStatusAndNotes((fresh.editorial && typeof fresh.editorial === "object") ? fresh.editorial : {});
       paintSettingsHost((fresh.editorial && typeof fresh.editorial === "object") ? fresh.editorial : {});
+      if (previewOn) mountPreviewFrame();
     } catch (err) {
       // The setting itself saved; only the confirmation refresh failed.
       errors.replaceChildren(errorPanel(err));
@@ -430,9 +453,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         title: `${sum.id}: ${templateLabel(sum.template)}`,
         onclick: () => {
           if (ctrl.busy !== "") return; // one mutation in flight at a time
-          selectedId = sum.id;
-          syncStripSelection();
-          paintDetailHost();
+          selectComposition(sum.id);
         },
       },
         el("span", { class: "ed-card-head" },
@@ -449,6 +470,14 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       return card;
     });
     return el("div", { class: "ed-strip", role: "list", "aria-label": "Sequence" }, ...cards);
+  }
+
+  function selectComposition(id) {
+    if (ctrl.busy !== "" || !lastSums?.some((composition) => composition.id === id)) return;
+    selectedId = id;
+    syncStripSelection();
+    paintDetailHost();
+    seekPreview();
   }
 
   /** Keep the strip's selected-card highlight in sync after a selection. */
@@ -525,6 +554,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
           const updated = await call();
           ctrl.busy = "";
           paintWorkspace(updated);
+          void tick();
           return updated;
         } catch (err) {
           ctrl.busy = "";
@@ -535,6 +565,14 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         }
       },
     };
+  }
+
+  function seekPreview(frame = previewFrame) {
+    if (frame === previewFrame && selectedId) {
+      frame?.contentWindow?.postMessage(
+        { type: "editorial-select-composition", id: selectedId }, window.location.origin,
+      );
+    }
   }
 
   /**
@@ -555,11 +593,10 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     previewFrame = el("iframe", {
       class: "ed-preview-frame",
       title: "Editorial preview",
-      style: {
-        width: `min(100%, calc(66vh * ${ratio.number.toFixed(4)}))`,
-        aspectRatio: ratio.css,
-      },
+      style: { aspectRatio: ratio.css },
     });
+    const frame = previewFrame;
+    frame.addEventListener("load", () => seekPreview(frame));
     previewFrame.src = `${previewUrl}?ts=${Date.now()}`;
     previewWell.replaceChildren(previewFrame);
   }
@@ -616,14 +653,21 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       projectId,
     );
     const showPreview = el("button", {
-      class: "btn btn-sm", type: "button", "data-ed-preview-toggle": "1",
+      class: `btn btn-sm${previewOn ? "" : " btn-primary"}`, type: "button", "data-ed-preview-toggle": "1",
+      "aria-expanded": String(previewOn), "aria-controls": "editorial-preview",
     }, previewOn ? "Hide preview" : "Show preview");
     showPreview.addEventListener("click", () => {
       if (ctrl.busy !== "" || !previewUrl) return;
       previewOn = !previewOn;
       showPreview.textContent = previewOn ? "Hide preview" : "Show preview";
+      showPreview.classList.toggle("btn-primary", !previewOn);
+      showPreview.setAttribute("aria-expanded", String(previewOn));
       previewWell.hidden = !previewOn;
       if (previewOn) mountPreviewFrame();
+      else {
+        previewFrame = null;
+        previewWell.replaceChildren();
+      }
     });
     const downloadHref = safeEditPlanDownloadUrl(
       (snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
@@ -632,7 +676,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     );
 
     const ctx = mutationCtx();
-    const leftCol = el("div", { class: "ed-col" },
+    const sequenceCol = el("div", { class: "ed-col ed-sequence" },
       el("section", { class: "panel" },
         el("div", { class: "row" },
           el("span", { class: "panel-title" }, "Sequence"),
@@ -643,9 +687,12 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         (noteHost = el("div", {})),
         buildStrip(summary.compositions),
       ),
-      el("section", { class: "panel" },
+    );
+    const canvasCol = el("div", { class: "ed-col ed-canvas" },
+      el("section", { class: "panel ed-preview-panel" },
         el("div", { class: "row" },
-          el("span", { class: "panel-title" }, "Preview"),
+          el("h2", { class: "panel-title" }, "Canvas preview"),
+          el("span", { class: "spacer" }),
           previewUrl ? showPreview : null,
           previewUrl
             ? el("a", {
@@ -657,7 +704,14 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
               "Preview is unavailable for this project's snapshot metadata.")
             : null,
         ),
-        (previewWell = el("div", { class: "ed-preview-well", hidden: !previewOn })),
+        (previewWell = el("div", { id: "editorial-preview", class: "ed-preview-well", hidden: !previewOn })),
+        el("div", { class: "row mt" },
+          el("a", { class: "btn btn-sm", href: "#/export" }, "Continue to Export"),
+        ),
+      ),
+      el("section", { class: "panel" },
+        el("div", { class: "panel-title" }, "Composition"),
+        (detailHost = el("div", { class: "stack" })),
       ),
       el("section", { class: "panel" },
         el("div", { class: "panel-title" }, "AI revision"),
@@ -666,17 +720,13 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         buildRevisionControl(null, ctx),
       ),
     );
-    const rightCol = el("div", { class: "ed-col" },
+    const settingsCol = el("div", { class: "ed-col ed-settings" },
       el("section", { class: "panel" },
         el("div", { class: "panel-title" }, "Display settings"),
         (settingsHost = el("div", { class: "stack" })),
       ),
-      el("section", { class: "panel" },
-        el("div", { class: "panel-title" }, "Composition"),
-        (detailHost = el("div", { class: "stack" })),
-      ),
     );
-    workspaceRoot = el("div", { class: "ed-layout" }, leftCol, rightCol);
+    workspaceRoot = el("div", { class: "ed-layout" }, sequenceCol, canvasCol, settingsCol);
     body.replaceChildren(errors, workspaceRoot);
     paintStatusAndNotes((snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
       ? snapRef.editorial : {});

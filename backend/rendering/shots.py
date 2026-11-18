@@ -67,6 +67,7 @@ _IMAGE_VISUAL_TYPES = {
     VisualType.KREA2_STILL,
     VisualType.IDEOGRAM4_STILL,
     VisualType.QWEN_IMAGE_STILL,
+    VisualType.QWEN_IMAGE_21_STILL,
     VisualType.FLUX_STILL,
     VisualType.IMAGE_MOTION,
 }

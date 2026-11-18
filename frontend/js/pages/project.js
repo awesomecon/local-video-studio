@@ -6,7 +6,7 @@
  *  - Editable fields mirror the backend `ProjectEdit` contract (extra="forbid"):
  *    title, topic, video_mode, duration_mode, target_duration, aspect_ratio,
  *    fps, resolution, style, audience, narrator_preference, visual_quality,
- *    instructions. `video_mode` ("Video Style") omitted on old projects is
+ *    instructions. `video_mode` ("Workflow") omitted on old projects is
  *    classic; a mode change is a brief-level change and is only PATCHed when
  *    it differs from the saved value.
  *  - Read-only provenance: status, directory, selected script model, created /
@@ -117,8 +117,8 @@ import {
   emptyState,
 } from "../ui.js";
 import { navigate } from "../router.js";
-import { registerLiveUpdate } from "../app.js";
-import { effectiveVideoMode } from "../video-mode.js";
+import { registerLiveUpdate, syncProjectChrome } from "../app.js";
+import { effectiveVideoMode, VIDEO_MODE_OPTIONS } from "../video-mode.js";
 
 /** Editable brief fields and how they map to controls. */
 const TEXT_FIELDS = [
@@ -137,10 +137,6 @@ const NUMBER_FIELDS = [
 ];
 const ASPECT_OPTIONS = ["16:9", "9:16", "1:1"];
 const DURATION_MODE_OPTIONS = ["fixed", "llm"];
-const VIDEO_MODE_OPTIONS = [
-  { value: "classic", label: "Classic — Existing scene-based generator" },
-  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
-];
 const BRIEF_FIELDS = new Set([
   "title", "topic", "style", "audience", "visual_quality", "instructions",
   "duration_mode", "video_mode",
@@ -202,10 +198,9 @@ function buildScreen(projectId) {
   load(body, provenance, editorialRegion, projectId);
 
   registerLiveUpdate(() => refreshProvenance(provenance, editorialRegion, projectId));
-  return el("div", {},
-    panel,
-    editorialRegion,
-    provenancePanel,
+  return el("div", { class: "brief-layout" },
+    el("div", {}, panel, editorialRegion),
+    el("aside", {}, provenancePanel),
   );
 
   /** @param {HTMLElement} region @param {HTMLElement} prov @param {HTMLElement} editorial @param {string} id */
@@ -275,8 +270,8 @@ function buildForm(snap, projectId) {
   const fTitle = textField(inputs, "title", p.title, { required: true, max: 1000, hint: "Required, up to 1000 characters." });
   const fTopic = textField(inputs, "topic", p.topic, { required: true, max: 500, hint: "Required, up to 500 characters." });
   const fVideoMode = selectField(inputs, "video_mode", effectiveVideoMode(p), VIDEO_MODE_OPTIONS, {
-    label: "Video Style",
-    hint: "Classic: the existing scene-based generator. Editorial: motion-graphics compositions.",
+    label: "Workflow",
+    hint: "Choose where you’ll build and edit the picture.",
   });
   const fDuration = numberField(inputs, "target_duration", p.target_duration, { min: 0.0001, step: "any", hint: "Greater than 0." });
   const fDurationMode = selectField(inputs, "duration_mode", p.duration_mode || "fixed", DURATION_MODE_OPTIONS, {
@@ -285,7 +280,10 @@ function buildForm(snap, projectId) {
   const fAspect = selectField(inputs, "aspect_ratio", p.aspect_ratio, ASPECT_OPTIONS);
   const fFps = numberField(inputs, "fps", p.fps, { min: 1, max: 240, step: 1, hint: "1–240." });
   const fResolution = resolutionField(inputs, p.resolution, { hint: "Positive pixels." });
-  const fStyle = textField(inputs, "style", p.style, { required: true, max: 100, hint: "Required, up to 100 characters." });
+  const fStyle = textField(inputs, "style", p.style, {
+    label: "Creative direction", required: true, max: 100,
+    hint: "Guide the writing and imagery, for example a cinematic documentary.",
+  });
   const fAudience = textField(inputs, "audience", p.audience, { required: true, max: 100, hint: "Required, up to 100 characters." });
   const fNarrator = textField(inputs, "narrator_preference", p.narrator_preference || "", { nullable: true, max: 300, hint: "Optional, up to 300 characters." });
   const fQuality = textField(inputs, "visual_quality", p.visual_quality, { required: true, max: 100, hint: "Required, up to 100 characters." });
@@ -394,6 +392,7 @@ function buildForm(snap, projectId) {
       const result = await editProject(state.config, projectId, body);
       const saved = result.project;
       upsertProject(saved);
+      if (state.currentProjectId === projectId) syncProjectChrome();
       // Update baseline to the saved project so further edits diff correctly.
       Object.assign(baseline, readProjectFields(saved));
       const inv = result.invalidated_stages || [];
@@ -1294,9 +1293,9 @@ export function buildCompositionControls(data, ctx) {
       buildTemplateControl(data, ctx)),
   ];
   const textGroup = buildTextControls(data, ctx);
-  if (textGroup) groups.push(compositionControlGroup("Deterministic text", textGroup));
+  if (textGroup) groups.push(compositionControlGroup("On-screen text", textGroup));
   const eventGroup = buildEventControls(data, ctx);
-  if (eventGroup) groups.push(compositionControlGroup("Event actions", eventGroup));
+  if (eventGroup) groups.push(compositionControlGroup("Motion events", eventGroup));
   const assetGroup = buildAssetControls(data, ctx);
   if (assetGroup) groups.push(compositionControlGroup("Planned assets", assetGroup));
   return el("div", { class: "stack ed-ctrl" }, ...groups);
@@ -1305,7 +1304,7 @@ export function buildCompositionControls(data, ctx) {
 /** One labeled field cluster inside the composition editor. */
 function compositionControlGroup(label, ...items) {
   return el("div", { class: "ed-ctrl-group" },
-    el("div", { class: "ed-ctrl-label" }, label), ...items);
+    el("h3", { class: "ed-ctrl-label" }, label), ...items);
 }
 
 function revisionCompositionText(item) {

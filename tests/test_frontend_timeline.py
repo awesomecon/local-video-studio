@@ -149,11 +149,12 @@ def test_app_shell_hides_storyboard_for_editorial_projects() -> None:
     )[0]
     assert "effectiveVideoMode(project) === \"editorial\"" in sync
     assert "storyboardNavEl.hidden" in sync
-    # It runs on every route render (so the sidebar never shows the previous
-    # project's mode) and after the project list reconciles.
+    # The shell syncs project navigation on every route and after list reconciliation.
     route = app.split("function renderRoute()", 1)[1].split("\n}", 1)[0]
-    assert "syncModeAwareNavigation();" in route
+    assert "syncProjectChrome();" in route
     boot = app.split("async function bootProjects()", 1)[1].split("\n}", 1)[0]
-    assert "syncModeAwareNavigation();" in boot
+    assert "syncProjectChrome();" in boot
+    chrome = app.split("export function syncProjectChrome()", 1)[1].split("\n}", 1)[0]
+    assert "syncModeAwareNavigation();" in chrome
     # The storyboard button is kept by reference for the sync to toggle.
-    assert "storyboardNavEl = primary.find(" in app
+    assert "storyboardNavEl = make.find(" in app

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 
 from backend.core import load_config
-from backend.models import QwenImage2512Backend
+from backend.models import QwenImage2512Backend, QwenImage21Backend
 from backend.pipeline import PipelineService
 from backend.schemas import AssetType, ProjectCreate, Scene, VisualType
 from backend.workers.gpu import GPUSnapshot
@@ -100,6 +100,54 @@ def test_qwen_image_scene_dispatches_text_capable_fp8_workflow(tmp_path: Path) -
     assert prompt["8"]["inputs"]["seed"] == 2512
     assert '"OPEN LATE"' in prompt["5"]["inputs"]["text"]
     assert '"NIGHT MARKET"' in prompt["5"]["inputs"]["text"]
+
+
+def test_qwen21_scene_records_actual_workflow_and_model(tmp_path: Path) -> None:
+    pipeline = _service(tmp_path)
+    project = pipeline.create_project(ProjectCreate(title="Qwen 2.1", topic="signage", target_duration=10))
+    scene = Scene(
+        project_id=project.id, index=0, title="Sign", duration=5,
+        visual_type=VisualType.QWEN_IMAGE_21_STILL,
+        visual_prompt="A red storefront sign", negative_prompt="watermark", seed=21,
+        settings={"on_screen_text": ["OPEN LATE"]},
+    )
+    pipeline.database.save_scene(scene)
+    pipeline.store.save_scene(project.slug, scene)
+    submitted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"system": {}})
+        if request.url.path == "/prompt":
+            submitted.update(json.loads(request.content)["prompt"])
+            return httpx.Response(200, json={"prompt_id": "qwen21"})
+        if request.url.path == "/history/qwen21":
+            return httpx.Response(200, json={"qwen21": {
+                "status": {"status_str": "success"},
+                "outputs": {"8": {"images": [{"filename": "qwen21.png", "type": "output"}]}},
+            }})
+        if request.url.path == "/view":
+            return httpx.Response(200, content=b"test-image")
+        if request.url.path == "/free":
+            return httpx.Response(200)
+        raise AssertionError(request.url.path)
+
+    pipeline.registry.register(QwenImage21Backend(
+        poll_interval=0,
+        client_factory=lambda **kw: httpx.Client(transport=httpx.MockTransport(handler), **kw),
+    ), replace=True)
+    asset = pipeline.generate_scene(scene.id)
+    assert asset.backend == "qwen_image_21_comfyui"
+    assert asset.model == "Qwen-Image-2.1"
+    assert asset.model_version == "2.1"
+    assert asset.quantization == "int8_convrot"
+    assert asset.workflow_version == "qwen-image-2.1-int8-v1"
+    assert asset.settings["steps"] == 25
+    assert submitted["4"]["class_type"] == "TextEncodeQwenImage21"
+    assert '"OPEN LATE"' in submitted["4"]["inputs"]["prompt"]
+    assert submitted["4"]["inputs"]["negative_prompt"] == "watermark"
+    assert submitted["6"]["inputs"]["cfg"] == 1.0
+    assert submitted["6"]["inputs"]["seed"] == 21
 
 
 def test_qwen_image_canvas_presets_and_validation(tmp_path: Path) -> None:

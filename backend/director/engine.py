@@ -579,7 +579,7 @@ class DirectorEngine:
                     "text_overlay_layout": "auto",
                     "text_overlay_colors": ["#F2EEE5", "#E78A2E"],
                 })
-            elif scene.visual_type is VisualType.QWEN_IMAGE_STILL:
+            elif scene.visual_type in {VisualType.QWEN_IMAGE_STILL, VisualType.QWEN_IMAGE_21_STILL}:
                 settings["on_screen_text"] = scene.graphic_text
             elif scene.visual_type is VisualType.IMAGE_MOTION:
                 settings["image_motion_source"] = scene.image_motion_source
@@ -675,6 +675,7 @@ class DirectorEngine:
                         "locked"
                         if scene.visual_type in {
                             VisualType.KREA2_STILL, VisualType.QWEN_IMAGE_STILL,
+                            VisualType.QWEN_IMAGE_21_STILL,
                             VisualType.IDEOGRAM4_STILL, VisualType.TEXT_OVERLAY_STILL,
                         }
                         else scene.camera_instruction

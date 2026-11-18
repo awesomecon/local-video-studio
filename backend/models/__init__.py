@@ -8,6 +8,7 @@ from .adapters import (
     Ideogram4LocalBackend,
     Krea2Backend,
     QwenImage2512Backend,
+    QwenImage21Backend,
     WanBackend,
     WhisperBackend,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "MockGeneratorBackend",
     "MockLLMBackend",
     "QwenImage2512Backend",
+    "QwenImage21Backend",
     "RegenerationImpact",
     "ResolvedLaneTarget",
     "ResolvedReference",

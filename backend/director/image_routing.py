@@ -40,6 +40,7 @@ class ImageModelOption(StrEnum):
 
     KREA = "krea"
     QWEN_IMAGE = "qwen_image"
+    QWEN_IMAGE_21 = "qwen_image_21"
     IDEOGRAM4_LOCAL = "ideogram4_local"
 
 
@@ -48,6 +49,7 @@ class ImageModelOption(StrEnum):
 IMAGE_MODEL_BACKENDS: dict[str, str] = {
     ImageModelOption.KREA.value: "krea2_comfyui",
     ImageModelOption.QWEN_IMAGE.value: "qwen_image_2512_comfyui",
+    ImageModelOption.QWEN_IMAGE_21.value: "qwen_image_21_comfyui",
     ImageModelOption.IDEOGRAM4_LOCAL.value: "ideogram4_local_comfyui",
 }
 
@@ -56,6 +58,7 @@ IMAGE_MODEL_BACKENDS: dict[str, str] = {
 IMAGE_MODEL_DIRNAMES: dict[str, str] = {
     ImageModelOption.KREA.value: "krea",
     ImageModelOption.QWEN_IMAGE.value: "qwen",
+    ImageModelOption.QWEN_IMAGE_21.value: "qwen21",
     ImageModelOption.IDEOGRAM4_LOCAL.value: "ideogram",
 }
 
@@ -68,6 +71,7 @@ ROUTABLE_VISUAL_TYPES = {
     "krea2_still",
     "ideogram4_still",
     "qwen_image_still",
+    "qwen_image_21_still",
     "flux_still",
 }
 
@@ -232,6 +236,8 @@ def resolve_preferred_image_model(
         return ImageModelOption.IDEOGRAM4_LOCAL.value
     if vt == "qwen_image_still":
         return ImageModelOption.QWEN_IMAGE.value
+    if vt == "qwen_image_21_still":
+        return ImageModelOption.QWEN_IMAGE_21.value
     if vt == "image_motion" and image_motion_source == "qwen_image_2512":
         return ImageModelOption.QWEN_IMAGE.value
     return ImageModelOption.KREA.value

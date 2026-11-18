@@ -116,6 +116,7 @@ export function renderJobs(_route) {
   const chipRow = el("div", { class: "row" });
   const summary = el("span", { class: "small muted" });
   const projectSelect = el("select", {
+    class: "input",
     "aria-label": "Filter by project",
     onchange: (ev) => {
       projectFilter = /** @type {HTMLSelectElement} */ (ev.target).value;
@@ -123,20 +124,16 @@ export function renderJobs(_route) {
     },
   });
 
-  const controls = el("div", { class: "row" },
+  const controls = el("div", { class: "row jobs-filters" },
     chipRow, summary, el("span", { class: "spacer" }), projectSelect);
-  const body = el("div", { class: "stack" });
-  const screen = el("div", { class: "screen" },
-    el("div", { class: "screen-head" }, el("h1", {}, "Job Monitor")),
-    el("div", { class: "panel" },
-      el("div", { class: "row" },
-        el("span", { class: "panel-title" }, "Jobs"),
-        feedSlot,
-        el("span", { class: "spacer" }),
-        refreshBtn,
-      ),
-      el("div", { class: "panel-body stack" }, controls, body),
+  const body = el("div", { class: "jobs-list" });
+  const screen = el("div", { class: "screen jobs-screen" },
+    el("div", { class: "screen-head" },
+      el("h1", {}, "Job Monitor"),
+      el("div", { class: "screen-actions" }, feedSlot, refreshBtn),
     ),
+    controls,
+    body,
   );
 
   /** job id → {node, stamp}; row elements persist across feed frames. */
@@ -260,12 +257,12 @@ export function renderJobs(_route) {
       seen.add(job.id);
       let entry = rows.get(job.id);
       if (!entry) {
-        entry = { node: el("div", { class: "panel", "data-job": job.id }), stamp: "" };
+        entry = { node: el("article", { class: "job-row", "data-job": job.id }), stamp: "" };
         rows.set(job.id, entry);
       }
       const stamp = rowStamp(job, ctx);
       if (entry.stamp !== stamp) {
-        entry.node.replaceChildren(el("div", { class: "panel-body stack" }, ...jobBody(job, ctx)));
+        entry.node.replaceChildren(...jobBody(job, ctx));
         entry.stamp = stamp;
       }
       body.append(entry.node);
@@ -320,54 +317,49 @@ export function renderJobs(_route) {
     const project = ctx.projectsById.get(job.project_id);
     const params = job.parameters || {};
     const isTerminal = TERMINAL.includes(job.status);
-    const parts = [
-      el("div", { class: "row" },
-        jobStatusBadge(job.status),
-        badge("neutral", stageLabel(job.stage), false),
+    const main = el("div", { class: "job-what stack" },
+      el("div", { class: "row job-name" },
+        el("h2", { class: "job-stage" }, stageLabel(job.stage)),
         params.parent_job_id
           ? el("span", { class: "tag", title: `part of job ${params.parent_job_id}` }, "batch")
           : null,
         el("span", { class: "small muted" }, job.backend || "—"),
-        el("span", { class: "spacer" }),
-        el("span", { class: "small muted mono" }, `job ${shortId(job.id)}`),
       ),
-      el("div", { class: "small muted" },
+      el("div", { class: "job-ctx" },
         project ? project.title : `project ${shortId(job.project_id)}`,
         job.scene_id ? ` · scene ${shortId(job.scene_id)}` : "",
       ),
-    ];
+    );
+    const meta = el("div", { class: "job-meta" },
+      el("span", { class: "job-id" }, `job ${shortId(job.id)}`),
+      timesRow(job),
+    );
 
     const current = typeof params.current_stage === "string" ? params.current_stage : "";
     if (current && !isTerminal && job.status !== "queued") {
-      parts.push(el("div", { class: "small" },
+      main.append(el("div", { class: "small" },
         el("span", { class: "muted" }, "Current stage: "),
         el("span", {}, currentStageLabel(current)),
       ));
     }
 
-    parts.push(timesRow(job));
-
     if (job.status === "queued") {
       const pos = ctx.queuePos.get(job.id);
-      parts.push(el("div", { class: "small muted" },
+      main.append(el("div", { class: "small muted" },
         pos ? `Queue position #${pos}` : "Queued",
         job.priority ? ` · priority ${job.priority}` : "",
       ));
     } else if (!isTerminal) {
-      parts.push(progress(job.progress || 0));
+      main.append(progress(job.progress || 0));
     }
 
     if (job.attempt_count > 0) {
-      parts.push(el("div", { class: "small muted" },
+      meta.append(el("div", { class: "small muted" },
         `Attempt ${job.attempt_count} of ${job.max_attempts || "—"}`));
     }
 
     if (isTerminal && job.status !== "completed" && job.error) {
-      parts.push(el("div", { class: "warning-list" },
-        el("div", { class: "witem crit" },
-          el("span", { class: "small mono" }, job.error),
-        ),
-      ));
+      main.append(el("div", { class: "job-failure small mono" }, job.error));
     }
 
     const actions = [];
@@ -418,10 +410,12 @@ export function renderJobs(_route) {
       actions.push(retryBtn);
     }
 
-    if (actions.length) {
-      parts.push(el("div", { class: "row" }, ...actions));
-    }
-    return parts;
+    return [main,
+      el("div", { class: "job-state" },
+        jobStatusBadge(job.status),
+        el("div", { class: "job-actions" }, ...actions),
+      ), meta,
+    ];
   }
 
   function renderFeedBadge() {

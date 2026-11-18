@@ -27,6 +27,7 @@ import { getProject, captionsModels, generateCaptions } from "../api.js";
 import { loadingState, errorPanel, badge, toast, toastError, stageChip } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
 import { providerLabel } from "./voice.js";
+import { createRenderMonitor } from "../render-monitor.js";
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -52,6 +53,8 @@ export function renderCaptions(_route) {
 function captionsScreenBody() {
   const alignmentBody = el("div", { class: "panel-body" });
   const captionsBody = el("div", { class: "panel-body" });
+  const historyBody = el("div", { hidden: true });
+  const monitor = createRenderMonitor();
 
   /**
    * @param {{skeleton?: boolean}} [opts] — omit the skeleton on live refreshes
@@ -74,6 +77,7 @@ function captionsScreenBody() {
         captionsModels(state.config),
       ]);
       if (token !== inflight) return;
+      monitor.update(snap);
       const assets = /** @type {import("../api.js").Asset[]} */ (snap.assets || []);
       const captions = assets.filter((a) => (a.settings || {}).role === "captions");
       const timings = assets.filter((a) => (a.settings || {}).role === "caption_timing");
@@ -81,7 +85,11 @@ function captionsScreenBody() {
       const stages = (/** @type {any} */ (snap.stage_state) || {}).stages || {};
       modelInfo = fetchedModelInfo;
       alignmentBody.replaceChildren(buildAlignment(fetchedModelInfo));
-      captionsBody.replaceChildren(build(captions, timings, takes, stages.subtitles));
+      const { current, history } = groupCaptionGenerations(captions, timings, takes);
+      captionsBody.replaceChildren(build(current, captions, stages.subtitles));
+      const historyOpen = historyBody.querySelector(".caption-history")?.open || false;
+      historyBody.hidden = !history.length;
+      historyBody.replaceChildren(...(history.length ? [historyPanel(history, historyOpen)] : []));
       hasContent = true;
     } catch (err) {
       if (token !== inflight || hasContent) return;
@@ -101,7 +109,6 @@ function captionsScreenBody() {
   );
   const captionsPanel = el("div", { class: "panel" },
     el("div", { class: "row" },
-      el("span", { class: "panel-title" }, "Captions"),
       el("span", { class: "spacer" }),
       el("button", {
         class: "btn btn-primary btn-sm",
@@ -129,7 +136,11 @@ function captionsScreenBody() {
   // appear as the render runs.
   registerLiveUpdate(() => load({ skeleton: false }));
   load();
-  return el("div", { class: "stack" }, alignmentPanel, captionsPanel);
+  return el("div", { class: "stack captions-workspace" },
+    el("div", { class: "captions-review" }, monitor.element, captionsPanel),
+    alignmentPanel,
+    historyBody,
+  );
 }
 
 /**
@@ -306,21 +317,19 @@ export function groupCaptionGenerations(captions, timings, narrationTakes = []) 
 }
 
 /**
+ * @param {CaptionGeneration|null} current
  * @param {import("../api.js").Asset[]} captions
- * @param {import("../api.js").Asset[]} timings
- * @param {import("../api.js").Asset[]} narrationTakes
  * @param {{status?: string, outputs?: string[]}|undefined} stage
  * @returns {HTMLElement}
  */
-function build(captions, timings, narrationTakes, stage) {
+function build(current, captions, stage) {
   const audioDerived = captions.some((caption) => caption.settings?.audio_derived);
-  const { current, history } = groupCaptionGenerations(captions, timings, narrationTakes);
   const parts = [
     el("div", { class: "warning-list" },
       el("div", { class: "witem" },
         audioDerived
           ? "Captions are aligned to word timestamps from the generated narration audio. Generated SRT and ASS files can be opened from their local API links."
-          : "Captions use deterministic mock timings until the local alignment model runs in a real render — see the alignment model panel above.",
+          : "Captions use deterministic mock timings until the local alignment model runs in a real render.",
       ),
     ),
   ];
@@ -331,7 +340,6 @@ function build(captions, timings, narrationTakes, stage) {
     ));
   } else {
     parts.push(currentGenerationCard(current));
-    if (history.length) parts.push(historyPanel(history));
   }
 
   parts.push(
@@ -354,7 +362,7 @@ function build(captions, timings, narrationTakes, stage) {
  */
 function currentGenerationCard(generation) {
   const source = generation.srt || generation.ass || generation.timings;
-  return el("div", { class: "panel" },
+  return el("div", { class: "caption-current" },
     el("div", { class: "row" },
       el("span", { class: "panel-title" }, "Current captions"),
       badge("good", "current", false),
@@ -458,9 +466,10 @@ function provenanceRows(asset) {
  * date, the narration take it aligned against, and its files (still
  * openable through their archive links, or marked archived when not).
  * @param {CaptionGeneration[]} history
+ * @param {boolean} open
  * @returns {HTMLElement}
  */
-function historyPanel(history) {
+function historyPanel(history, open) {
   const rows = history.map((generation) => {
     const files = [["SRT", generation.srt], ["ASS", generation.ass], ["Word timings", generation.timings]];
     return el("div", { class: "caption-history-row" },
@@ -478,7 +487,7 @@ function historyPanel(history) {
       );
   });
   return el("div", { class: "panel" },
-    el("details", { class: "caption-history" },
+    el("details", { class: "caption-history", open },
       el("summary", {},
         `${history.length} previous generation${history.length === 1 ? "" : "s"} — aligned to earlier narration takes`),
       ...rows,

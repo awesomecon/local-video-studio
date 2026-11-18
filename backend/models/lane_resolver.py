@@ -109,6 +109,9 @@ LANE_TARGETS: dict[ShotLane, dict[VisualType, LaneTarget]] = {
         VisualType.QWEN_IMAGE_STILL: LaneTarget(
             "qwen_image_2512_comfyui", Capability.TEXT_TO_IMAGE,
         ),
+        VisualType.QWEN_IMAGE_21_STILL: LaneTarget(
+            "qwen_image_21_comfyui", Capability.TEXT_TO_IMAGE,
+        ),
         VisualType.IMAGE_MOTION: LaneTarget(
             "krea2_comfyui", Capability.TEXT_TO_IMAGE,
         ),

@@ -200,7 +200,8 @@ import {
   previewAspectRatio,
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
-import { performancePanel } from "../../js/pages/voice.js";
+import { editorialNextStep } from "../../js/pages/dashboard.js";
+import { performancePanel, renderVoice } from "../../js/pages/voice.js";
 import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
 import {
@@ -542,9 +543,31 @@ record("video-mode: reset restores the saved mode", () => {
 record("video-mode: New Project form defaults the selector to classic", () => {
   const node = renderNewProject({ name: "new-project", param: null });
   const sel = node.querySelector("#np-video-mode");
-  assert(sel, "the Video Style selector is present");
+  assert(sel, "the Workflow selector is present");
   eq(sel.value, "classic", "defaults to classic");
   eq([...sel.options].map((o) => o.value), ["classic", "editorial"], "option order");
+  assert(node.querySelector(".brief-style-preview").closest("[hidden]"), "Classic hides the Archive Dossier example");
+  sel.value = "editorial";
+  sel.dispatchEvent(new Event("change"));
+  assert(!node.querySelector(".brief-style-preview").closest("[hidden]"), "Editorial shows the Archive Dossier example");
+});
+
+record("dashboard: Editorial guidance follows narration, visuals, review and delivery", () => {
+  const snapshot = { scenes: [{}], editorial: { has_narration: false, has_edit_plan: false } };
+  eq(editorialNextStep({ ...snapshot, scenes: [] })[0], "#/script");
+  eq(editorialNextStep(snapshot)[0], "#/voice");
+  snapshot.editorial.has_narration = true;
+  eq(editorialNextStep(snapshot)[1], "Build Edit Plan");
+  snapshot.editorial.has_edit_plan = true;
+  snapshot.editorial.media_issues = { intro: ["photo missing"], closing: ["document missing"] };
+  eq(editorialNextStep(snapshot)[1], "Replace 2 missing visuals");
+  snapshot.editorial.media_issues = {};
+  snapshot.editorial.plan_status = "stale";
+  eq(editorialNextStep(snapshot)[1], "Review Edit Plan changes");
+  snapshot.editorial.plan_status = "current";
+  eq(editorialNextStep(snapshot)[1], "Review the cut");
+  snapshot.stage_state = { stages: { render_final: { status: "completed" } } };
+  eq(editorialNextStep(snapshot)[0], "#/export");
 });
 
 await recordAsync("video-mode: New Project POST carries the selected video_mode", async () => {
@@ -1048,11 +1071,11 @@ async function renderExportScreen(projectId, snap, history = RENDER_HISTORY_EMPT
   return { screen, calls };
 }
 
-function renderControlsPanel(screen) {
+function preflightPanel(screen) {
   const panel = [...screen.querySelectorAll(".panel")].find(
-    (p) => (p.querySelector(".panel-title")?.textContent || "") === "Render controls",
+    (p) => (p.querySelector(".panel-title")?.textContent || "") === "Before you render",
   );
-  assert(panel, "the render controls panel rendered");
+  assert(panel, "the preflight panel rendered");
   return panel;
 }
 
@@ -1181,7 +1204,7 @@ record("export: editorial_visual stage gets a readable label", () => {
 await recordAsync("export: classic screen keeps the unchanged presentation", async () => {
   const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
   const { screen, calls } = await renderExportScreen(CLASSIC_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
+  const panel = preflightPanel(screen);
   eq(panel.querySelector("p.muted.small").textContent,
     "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.");
   const summary = panel.querySelector("dl.kv");
@@ -1203,7 +1226,7 @@ await recordAsync("export: classic screen keeps the unchanged presentation", asy
 await recordAsync("export: legacy project (omitted video_mode) keeps the classic presentation", async () => {
   const snap = exportSnapshot(LEGACY_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
   const { screen } = await renderExportScreen(LEGACY_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
+  const panel = preflightPanel(screen);
   eq(panel.querySelector("p.muted.small").textContent,
     "Uses existing local narration and scene visuals. It does not contact the LLM, run TTS, or generate graphics.");
   assert(panel.querySelector("dl.kv").textContent.includes("Scene visuals"), "scene visuals row kept");
@@ -1216,7 +1239,7 @@ await recordAsync("export: editorial screen shows the additive workflow (current
   const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT,
     { stages: { editorial_visual: { status: "completed" } } });
   const { screen, calls } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
+  const panel = preflightPanel(screen);
   eq(panel.querySelector("p.muted.small").textContent,
     "Uses the existing Edit Plan, registered assets, narration, music, and captions. " +
     "It does not contact the LLM, run TTS, or generate replacement assets.");
@@ -1239,7 +1262,7 @@ await recordAsync("export: editorial screen shows the additive workflow (current
 await recordAsync("export: editorial stale plan remains usable (never broken)", async () => {
   const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_STALE);
   const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
+  const panel = preflightPanel(screen);
   const text = panel.querySelector("dl.kv").textContent;
   assert(text.includes("Edit Plan"), "Edit Plan row present");
   assert(text.includes("stale"), "stale status surfaced");
@@ -1253,7 +1276,7 @@ await recordAsync("export: editorial stale plan remains usable (never broken)", 
 await recordAsync("export: editorial untracked plan remains usable", async () => {
   const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_UNTRACKED);
   const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
-  const text = renderControlsPanel(screen).querySelector("dl.kv").textContent;
+  const text = preflightPanel(screen).querySelector("dl.kv").textContent;
   assert(text.includes("Edit Plan"), "Edit Plan row present");
   assert(text.includes("freshness unverified"), "explains the unverifiable plan");
   assert(text.includes("still renderable"), "untracked plan stays renderable");
@@ -1265,7 +1288,7 @@ await recordAsync("export: editorial missing/malformed metadata falls back to no
   for (const editorial of [undefined, { has_edit_plan: false }, "corrupt", 42]) {
     const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, editorial);
     const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
-    const text = renderControlsPanel(screen).querySelector("dl.kv").textContent;
+    const text = preflightPanel(screen).querySelector("dl.kv").textContent;
     assert(text.includes("Edit Plan"), `Edit Plan row survives ${String(typeof editorial)}`);
     assert(text.includes("not generated"), `missing plan stated for ${String(typeof editorial)}`);
     assert(!text.includes("broken"), "malformed metadata never reads as broken");
@@ -1287,11 +1310,11 @@ await recordAsync("export: active editorial render shows the canvas stage label"
   const snap = exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT,
     { stages: { editorial_visual: { status: "running" } }, jobs: [job] });
   const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
-  assert(panel.textContent.includes("Rendering Editorial canvas"), "readable label for the active sub-stage");
-  assert(panel.textContent.includes("Preparing"), "job status badge present");
-  assert(panel.textContent.includes("job job-xe1"), "job id shown");
-  eq(chipRowBadges(panel)[0], "Editorial canvas: Running", "running chip status");
+  const actions = screen.querySelector(".delivery-actions");
+  assert(actions.textContent.includes("Rendering Editorial canvas"), "readable label for the active sub-stage");
+  assert(actions.textContent.includes("Preparing"), "job status badge present");
+  assert(actions.textContent.includes("job job-xe1"), "job id shown");
+  eq(chipRowBadges(preflightPanel(screen))[0], "Editorial canvas: Running", "running chip status");
 });
 
 await recordAsync("export: building the readiness summary issues no network requests", async () => {
@@ -1334,8 +1357,7 @@ await recordAsync("export: editorial force-render confirmation explains the addi
   state.currentProjectId = EDITORIAL_EXPORT_PROJECT.id;
   const screen = renderExport({ name: "export", param: null });
   await flush();
-  const panel = renderControlsPanel(screen);
-  const forceBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Re-render final video");
+  const forceBtn = [...screen.querySelectorAll(".delivery-actions button")].find((b) => b.textContent === "Re-render final video");
   assert(forceBtn, "force button present");
   forceBtn.click();
   await flush();
@@ -1369,8 +1391,7 @@ await recordAsync("export: classic force-render confirmation is unchanged", asyn
   state.currentProjectId = CLASSIC_EXPORT_PROJECT.id;
   const screen = renderExport({ name: "export", param: null });
   await flush();
-  const panel = renderControlsPanel(screen);
-  const forceBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Re-render final video");
+  const forceBtn = [...screen.querySelectorAll(".delivery-actions button")].find((b) => b.textContent === "Re-render final video");
   assert(forceBtn, "force button present");
   forceBtn.click();
   await flush();
@@ -1559,7 +1580,7 @@ await recordAsync("export rerun: each deterministic stage row exposes a Re-run b
     CLASSIC_EXPORT_PROJECT.id,
     exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS }),
   );
-  const classicButtons = stageRerunButtons(renderControlsPanel(classic.screen));
+  const classicButtons = stageRerunButtons(preflightPanel(classic.screen));
   eq(classicButtons.length, 6, "classic has six deterministic stages including score mix");
   assert(classicButtons.every((b) => !b.disabled), "no active job, so all are enabled");
 
@@ -1567,7 +1588,7 @@ await recordAsync("export rerun: each deterministic stage row exposes a Re-run b
     EDITORIAL_EXPORT_PROJECT.id,
     exportSnapshot(EDITORIAL_EXPORT_PROJECT, EDIT_PLAN_CURRENT),
   );
-  const edButtons = stageRerunButtons(renderControlsPanel(editorial.screen));
+  const edButtons = stageRerunButtons(preflightPanel(editorial.screen));
   eq(edButtons.length, 7, "editorial adds the Editorial canvas stage");
   closeModals();
 });
@@ -1575,7 +1596,7 @@ await recordAsync("export rerun: each deterministic stage row exposes a Re-run b
 await recordAsync("export rerun: Re-run confirms scope then posts force to the stage endpoint", async () => {
   const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
   const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
-  const row = renderControlsPanel(screen).querySelector(".row.mt");
+  const row = preflightPanel(screen).querySelector(".row.mt");
   const rerunButtons = [...row.querySelectorAll("button")];
   eq(rerunButtons.length, 6, "one Re-run per stage row");
   rerunButtons[5].click(); // thumbnails is the last classic stage
@@ -1600,7 +1621,7 @@ await recordAsync("export rerun: Re-run confirms scope then posts force to the s
 await recordAsync("export rerun: canceling the confirmation issues no request", async () => {
   const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS });
   const { screen, calls } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
-  const row = renderControlsPanel(screen).querySelector(".row.mt");
+  const row = preflightPanel(screen).querySelector(".row.mt");
   [...row.querySelectorAll("button")][1].click(); // timeline (score mix leads the row)
   await flush();
   const modal = document.querySelector("dialog.modal");
@@ -1624,11 +1645,11 @@ await recordAsync("export rerun: Re-run buttons are disabled while a determinist
   };
   const snap = exportSnapshot(CLASSIC_EXPORT_PROJECT, undefined, { scenes: CLASSIC_SCENES, assets: CLASSIC_ASSETS, jobs: [job] });
   const { screen } = await renderRerunControls(CLASSIC_EXPORT_PROJECT.id, snap);
-  const panel = renderControlsPanel(screen);
+  const panel = preflightPanel(screen);
   const rerunButtons = stageRerunButtons(panel);
   assert(rerunButtons.length > 0, "buttons present");
   assert(rerunButtons.every((b) => b.disabled), "every Re-run button is disabled while a stage job runs");
-  const runBtn = [...panel.querySelectorAll("button")].find((b) => b.textContent === "Render final video");
+  const runBtn = [...screen.querySelectorAll(".delivery-actions button")].find((b) => b.textContent === "Render final video");
   assert(runBtn.disabled, "the full render is disabled too");
   closeModals();
 });
@@ -2843,6 +2864,49 @@ await recordAsync("voice tags: switching providers preserves edits and scopes sa
   eq(panel.querySelector("textarea").value, "[happy] Hello world.");
 });
 
+await recordAsync("voice tags: regeneration keeps the selected provider and script visible", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "tag-project";
+  const base = "/api/projects/tag-project";
+  const provider = "fish_drama_3";
+  const source = "Hello world.";
+  let tagged = `[calm] ${source}`;
+  const calls = stubFetch(({ method, url }) => {
+    if (url === base) {
+      return { payload: { project: { id: "tag-project", settings: { voice: { provider: "qwen_tts" } } } } };
+    }
+    if (url === `${base}/tts/performance-tags`) {
+      if (method === "POST") tagged = `[quietly] ${source}`;
+      const result = { tag_count: 1, script: { provider, segments: [{ key: "override", source, tagged }] } };
+      return { payload: { ...result, providers: { [provider]: result }, llm: { available: true } } };
+    }
+    return { payload: {} };
+  });
+
+  const screen = renderVoice();
+  try {
+    await flush();
+    const selection = () => screen.querySelector(`option[value="${provider}"]`).closest("select");
+    const override = () => screen.querySelector('textarea[rows="9"]');
+    selection().value = provider;
+    selection().dispatchEvent(new Event("change"));
+    override().value = source;
+    [...screen.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Regenerate Fish Drama")).click();
+    await flush(60);
+    const posted = calls.find((call) => call.method === "POST");
+    eq(posted.body.provider, provider);
+    eq(posted.body.text, source);
+    eq(selection().value, provider);
+    eq(override().value, source);
+    assert(override().closest("details").open, "narration settings remain open");
+    eq(screen.querySelector("#perfseg-0").value, `[quietly] ${source}`);
+  } finally {
+    screen.remove();
+    state.currentProjectId = null;
+  }
+});
+
 /* --- 14. Shot stale exposure ---------------------------------------------- */
 
 const STALE_SHOT = {
@@ -3539,6 +3603,8 @@ record("voice-worker: the status table distinguishes every loaded state", () => 
   const cases = [
     // [entry, expected message, expected canUnload]
     [null, "This provider is not registered on the backend.", false],
+    [{ health: { status: "disabled" }, managed: true }, "Disabled in configuration.", false],
+    [{ health: { status: "not_installed" }, managed: true }, "Needs installation. Model downloads are explicit and must preserve 50 GiB free.", false],
     [{ health: { status: "healthy", loaded: true } }, "Loaded and ready.", true],
     [{ health: { status: "healthy", loaded: false } }, "Worker running — model loads on first use.", false],
     [{ health: { status: "healthy", loaded: undefined } }, "Worker reachable.", true],
@@ -3988,6 +4054,50 @@ await recordAsync("models page: keeps the model panels, drops the environment pa
     assert(!text.includes(moved), `environment panel still present: ${moved}`);
   }
   restore();
+});
+
+await recordAsync("models page: a missing saved model can be replaced", async () => {
+  const restore = withStudioState("online");
+  const oldFetch = globalThis.fetch;
+  state.currentProjectId = "p-1";
+  let savedModel = "old-model";
+  const calls = stubFetch((call) => {
+    if (call.url === "/api/system/status") return { payload: SYSTEM_STATUS_FIXTURE };
+    if (call.url === "/api/models?project_id=p-1") return { payload: MODEL_LIST_FIXTURE };
+    if (call.url === "/api/llm/models" && call.method === "PUT") {
+      savedModel = call.body.model;
+      return { payload: { selected_model: savedModel } };
+    }
+    if (call.url === "/api/llm/models?project_id=p-1") {
+      return { payload: {
+        endpoint: "http://127.0.0.1:1234/v1",
+        selected_model: savedModel,
+        resolved_model: savedModel === "new-model" ? savedModel : null,
+        models: [{ id: "new-model" }],
+      } };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  try {
+    const screen = renderModels({ name: "models", param: null });
+    await flush();
+    const select = screen.querySelector("select");
+    const save = [...screen.querySelectorAll("button")].find((button) => button.textContent === "Use for this project");
+    assert(screen.textContent.includes("old-model unavailable"), "shows the stale selection");
+    eq(select.value, "", "no replacement is selected automatically");
+    assert(save.disabled, "save requires an explicit replacement");
+    select.value = "new-model";
+    select.dispatchEvent(new Event("change"));
+    assert(!save.disabled, "the user can save the advertised model");
+    save.click();
+    await flush();
+    eq(calls.find((call) => call.method === "PUT").body, { model: "new-model", project_id: "p-1" });
+    eq(screen.querySelector("select").value, "new-model");
+    assert(!screen.textContent.includes("old-model unavailable"), "reloading shows the new selection");
+  } finally {
+    globalThis.fetch = oldFetch;
+    restore();
+  }
 });
 
 record("route: #/system parses to the system screen", () => {

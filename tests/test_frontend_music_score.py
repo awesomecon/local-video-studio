@@ -102,7 +102,7 @@ def test_soundtrack_players_distinguish_music_only_from_voice_mix() -> None:
 def test_score_styles_use_the_existing_tokens() -> None:
     css = _css("components.css")
     assert ".score-layout" in css
-    assert ".score-col-studio" in css
+    assert ".score-sidebar" in css
     assert ".sc-timeline" in css or ".score-timeline" in css
     # Every new class is painted with shared tokens, not a new palette.
     for token in ("var(--accent)", "var(--text-2)", "var(--surface-2)",

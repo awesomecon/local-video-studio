@@ -48,6 +48,7 @@ import { loadingState, emptyState, errorPanel, badge, stageChip, icon } from "..
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute, sceneEditorHash } from "../router.js";
 import { effectiveVideoMode } from "../video-mode.js";
+import { createRenderMonitor } from "../render-monitor.js";
 import { compiledShotSpans, compiledSpanSeconds, fmtSecs, shotSummary, staleReason } from "../shots.js";
 
 /** Width of the sticky label column: read from the shared CSS custom
@@ -90,15 +91,18 @@ export function renderTimeline(_route) {
  */
 function timelinePanel() {
   const body = el("div", { class: "panel-body" });
+  const monitor = createRenderMonitor();
+  let detachPlayhead = () => {};
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
   refreshBtn.onclick = () => load(body);
 
   const panel = el("div", { class: "panel" },
     el("div", { class: "row" },
-      el("span", { class: "panel-title" }, "Timeline"),
+      el("span", { class: "panel-title" }, "Sequence"),
       el("span", { class: "spacer" }),
       refreshBtn,
     ),
+    monitor.element,
     body,
   );
 
@@ -119,23 +123,21 @@ function timelinePanel() {
     try {
       const snap = await getProject(state.config, state.currentProjectId);
       if (token !== inflight) return;
+      monitor.update(snap);
+      detachPlayhead();
       if (effectiveVideoMode(snap.project) === "editorial") {
         await loadEditorialTimeline(region, snap, zoom, {
           isStale: () => token !== inflight,
           reload: () => load(region),
         });
-        return;
+      } else {
+        const scenes = (snap.scenes || []).sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+        const stages = snap.stage_state?.stages || {};
+        region.replaceChildren(scenes.length
+          ? buildTimeline(scenes, snap.assets || [], stages, snap.project, zoom, view)
+          : emptyState("No scenes yet", "Run planning from the Script screen to draft scenes."));
       }
-      const scenes = (snap.scenes || []).sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-      if (!scenes.length) {
-        region.replaceChildren(emptyState("No scenes yet", "Run planning from the Script screen to draft scenes."));
-        return;
-      }
-      const stages = (snap.stage_state && /** @type {any} */ (snap.stage_state).stages) || {};
-      const assets = snap.assets || [];
-      region.replaceChildren(
-        buildTimeline(scenes, assets, stages, snap.project, zoom, view),
-      );
+      if (token === inflight) detachPlayhead = connectPlayhead(region, monitor.video, zoom);
     } catch (err) {
       if (token !== inflight) return;
       region.replaceChildren(errorPanel(err,
@@ -148,6 +150,32 @@ function timelinePanel() {
   registerLiveUpdate(() => load(body, { skeleton: false }));
   load(body);
   return panel;
+}
+
+function connectPlayhead(region, video, zoom) {
+  const grid = region.querySelector(".tl-grid");
+  const ruler = grid?.querySelector(".tl-ruler");
+  if (!video || !ruler) return () => {};
+  const playhead = el("span", { class: "tl-playhead", "aria-hidden": "true" });
+  grid.append(playhead);
+  const update = () => {
+    const position = Math.min(ruler.clientWidth, video.currentTime * (zoom.scale || 0));
+    playhead.style.left = `${LABEL_COL_PX + position}px`;
+  };
+  ruler.addEventListener("click", (event) => {
+    if (!Number.isFinite(video.duration) || !zoom.scale) return;
+    const time = (event.clientX - ruler.getBoundingClientRect().left) / zoom.scale;
+    video.currentTime = Math.min(video.duration, Math.max(0, time));
+  });
+  ruler.classList.add("is-seekable");
+  video.addEventListener("timeupdate", update);
+  const observer = new ResizeObserver(update);
+  observer.observe(ruler);
+  update();
+  return () => {
+    observer.disconnect();
+    video.removeEventListener("timeupdate", update);
+  };
 }
 
 /* ============================================================================
@@ -442,9 +470,9 @@ function buildEditorialTimeline(summary, snap, zoom) {
   const ruler = el("div", { class: "tl-ruler" });
   const compLane = el("div", { class: "tl-lane tl-lane-scenes" });
   const eventsLane = el("div", { class: "tl-lane tl-lane-overlays" });
-  const narrationLane = el("div", { class: "tl-lane tl-lane-audio" });
-  const musicLane = el("div", { class: "tl-lane tl-lane-audio" });
-  const captionsLane = el("div", { class: "tl-lane tl-lane-audio" });
+  const narrationLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-narration" });
+  const musicLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-music" });
+  const captionsLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-captions" });
   const sizedLanes = [ruler, compLane, eventsLane, narrationLane, musicLane, captionsLane];
 
   let rendered = false;
@@ -545,7 +573,7 @@ function buildEditorialTimeline(summary, snap, zoom) {
         : badge("warning", `over target by ${fmtDuration(gap)}`);
 
   return el("div", { class: "stack" },
-    el("div", { class: "row", style: { alignItems: "center" } },
+    el("div", { class: "row tl-toolbar" },
       el("span", { class: "small" },
         `${summary.compositions.length} compositions · ${fmtDuration(total)} total`),
       timingBasisBadge(summary.timingBasis),
@@ -702,9 +730,9 @@ function buildTimeline(scenes, assets, stages, project, zoom, view) {
   const ruler = el("div", { class: "tl-ruler" });
   const sceneLane = el("div", { class: "tl-lane tl-lane-scenes" });
   const overlayLane = el("div", { class: "tl-lane tl-lane-overlays" });
-  const narrationLane = el("div", { class: "tl-lane tl-lane-audio" });
-  const musicLane = el("div", { class: "tl-lane tl-lane-audio" });
-  const captionsLane = el("div", { class: "tl-lane tl-lane-audio" });
+  const narrationLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-narration" });
+  const musicLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-music" });
+  const captionsLane = el("div", { class: "tl-lane tl-lane-audio tl-lane-captions" });
   const sizedLanes = [ruler, sceneLane, overlayLane, narrationLane, musicLane, captionsLane];
 
   let rendered = false;
@@ -821,8 +849,9 @@ function buildTimeline(scenes, assets, stages, project, zoom, view) {
         : badge("warning", `over target by ${fmtDuration(gap)}`);
 
   return el("div", { class: "stack" },
-    el("div", { class: "row", style: { alignItems: "center" } },
+    el("div", { class: "row tl-toolbar" },
       el("span", { class: "small" }, `${scenes.length} scenes · ${fmtDuration(total)} total · target ${fmtDuration(target)}`),
+      gapBadge,
       el("span", { class: "spacer" }),
       el("span", { class: "tl-zoom" },
         el("span", { class: "muted small" }, "Zoom"),
@@ -830,7 +859,6 @@ function buildTimeline(scenes, assets, stages, project, zoom, view) {
         zoomValue,
         fitBtn,
       ),
-      gapBadge,
     ),
     viewport,
     el("p", { class: "muted small" },

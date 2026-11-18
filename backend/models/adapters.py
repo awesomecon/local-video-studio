@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import httpx
 
@@ -211,6 +211,36 @@ class QwenImage2512Backend(ComfyUIBackend):
             model_version="2512",
             quantization="fp8_e4m3fn",
             device=descriptor.device,
+            vram_required_gb=20.0,
+            capabilities=frozenset({Capability.TEXT_TO_IMAGE}),
+            supported_inputs=("prompt", "negative_prompt", "seed", "workflow_json"),
+            supported_outputs=("image",),
+            heavyweight=True,
+        )
+
+
+class QwenImage21Backend(ComfyUIBackend):
+    """Native Qwen-Image-2.1 INT8 workflow in a separate local service."""
+
+    def __init__(
+        self, *args: Any, start_service: Callable[[], None] | None = None, **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("model_name", "Qwen-Image-2.1")
+        super().__init__(*args, **kwargs)
+        self._start_service = start_service
+
+    def load(self) -> None:
+        if self._start_service is not None:
+            self._start_service()
+        super().load()
+
+    def descriptor(self) -> BackendDescriptor:
+        return BackendDescriptor(
+            backend_name="qwen_image_21_comfyui",
+            model_name=self.model_name,
+            model_version="2.1",
+            quantization="int8_convrot",
+            device="external-local-service",
             vram_required_gb=20.0,
             capabilities=frozenset({Capability.TEXT_TO_IMAGE}),
             supported_inputs=("prompt", "negative_prompt", "seed", "workflow_json"),

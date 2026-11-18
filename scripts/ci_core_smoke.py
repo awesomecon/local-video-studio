@@ -224,7 +224,7 @@ def smoke(completed: list[str]) -> None:
                     page.goto(origin + "/#/", wait_until="domcontentloaded")
                     page.locator('#app[aria-busy="false"]').wait_for()
                     assert "Failed to load" not in page.locator("#app").inner_text()
-                    assert page.get_by_role("button", name="Dashboard", exact=True).count() > 0
+                    assert page.get_by_role("button", name="Studio", exact=True).count() > 0
                     assert not errors, "Browser raised an uncaught exception"
             completed.append("chromium-ui-boot")
             response = client.post("/api/projects", json={

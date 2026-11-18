@@ -11,11 +11,7 @@ import { state, persistCurrentProject, upsertProject } from "../state.js";
 import { createProject } from "../api.js";
 import { field, setFieldError, errorPanel, toast } from "../ui.js";
 import { navigate } from "../router.js";
-
-const VIDEO_MODE_OPTIONS = [
-  { value: "classic", label: "Classic — Existing scene-based generator" },
-  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
-];
+import { VIDEO_MODE_OPTIONS } from "../video-mode.js";
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -42,6 +38,11 @@ export function renderNewProject(_route) {
   const fpsInput = el("input", { id: "np-fps", type: "number", min: "1", max: "240", step: "1", value: "24" });
   const widthInput = el("input", { id: "np-width", type: "number", min: "1", step: "1", value: "1920", style: { width: "110px" } });
   const heightInput = el("input", { id: "np-height", type: "number", min: "1", step: "1", value: "1080", style: { width: "110px" } });
+  aspectSelect.addEventListener("change", () => {
+    const [width, height] = { "16:9": [1920, 1080], "9:16": [1080, 1920], "1:1": [1080, 1080] }[aspectSelect.value];
+    widthInput.value = String(width);
+    heightInput.value = String(height);
+  });
   const resolutionRow = el("div", { class: "row", style: { gap: "6px" } }, widthInput, "×", heightInput);
   const styleInput = el("input", { id: "np-style", type: "text", value: "documentary" });
   const audienceInput = el("input", { id: "np-audience", type: "text", value: "general" });
@@ -53,9 +54,9 @@ export function renderNewProject(_route) {
   const fTitle = field({ label: "Title", input: titleInput, hint: "Required, up to 1000 characters. The slug is generated from this." });
   const fTopic = field({ label: "Topic", input: topicInput, hint: "Required." });
   const fVideoMode = field({
-    label: "Video Style",
+    label: "Workflow",
     input: videoModeSelect,
-    hint: "Classic uses the existing scene-based generator; Editorial builds motion-graphics compositions.",
+    hint: "Choose where you’ll build and edit the picture.",
   });
   const fDuration = field({ label: "Target duration (seconds)", input: durationInput, hint: "Greater than 0." });
   const fDurationMode = field({
@@ -66,7 +67,11 @@ export function renderNewProject(_route) {
   const fAspect = field({ label: "Aspect ratio", input: aspectSelect });
   const fFps = field({ label: "FPS", input: fpsInput, hint: "1–240." });
   const fResolution = field({ label: "Resolution (width × height)", input: resolutionRow, hint: "Positive pixels; 1920×1080 for 16:9, 1080×1920 for 9:16." });
-  const fStyle = field({ label: "Style", input: styleInput, hint: "e.g. documentary, cinematic." });
+  const fStyle = field({
+    label: "Creative direction",
+    input: styleInput,
+    hint: "Guide the writing and imagery, for example a cinematic documentary.",
+  });
   const fAudience = field({ label: "Audience", input: audienceInput, hint: "e.g. general, technical." });
   const fNarrator = field({ label: "Narrator preference", input: narratorInput, hint: "Optional free-form preference for the voice stage." });
   const fQuality = field({ label: "Visual quality", input: qualityInput, hint: "Backend default: balanced." });
@@ -74,6 +79,10 @@ export function renderNewProject(_route) {
 
   const submitBtn = el("button", { class: "btn btn-primary", type: "submit" }, "Create project");
   const errRegion = el("div", { class: "mt" });
+  const advanced = el("details", { class: "studio-disclosure" },
+    el("summary", {}, "Advanced project settings"),
+    el("div", { class: "grid-2" }, fFps, fResolution, fNarrator, fQuality),
+  );
 
   // Keep the duration hint honest about what the chosen control mode does.
   const durationHint = fDuration.querySelector(".hint");
@@ -86,10 +95,34 @@ export function renderNewProject(_route) {
   durationModeSelect.addEventListener("change", refreshDurationHint);
   refreshDurationHint();
 
+  const archiveSample = el("section", { class: "panel", hidden: true },
+    el("h2", { class: "panel-title" }, "Visual style"),
+    el("figure", { class: "brief-style-preview" },
+      el("div", { class: "brief-archive-sample", "aria-hidden": "true" },
+        el("span", {}, "1949"), el("span", {}, "The Mars Project")),
+      el("figcaption", {},
+        el("strong", {}, "Archive Dossier"),
+        el("p", { class: "muted small" }, "Archival documents, bold dates, and dramatic reveals."),
+      ),
+    ),
+  );
+  const classicSummary = el("section", { class: "panel" },
+    el("h2", { class: "panel-title" }, "Classic workflow"),
+    el("p", { class: "muted small" }, "Script → Storyboard → Narration → Export"),
+  );
+  videoModeSelect.addEventListener("change", () => {
+    archiveSample.hidden = videoModeSelect.value !== "editorial";
+    classicSummary.hidden = !archiveSample.hidden;
+  });
+
   /* --- validation (mirrors ProjectCreate) ------------------------------ */
   function validate() {
     let ok = true;
-    const fail = (wrap, msg) => { setFieldError(wrap, msg); ok = false; };
+    const fail = (wrap, msg) => {
+      setFieldError(wrap, msg);
+      if (advanced.contains(wrap)) advanced.open = true;
+      ok = false;
+    };
     const pass = (wrap) => setFieldError(wrap, null);
 
     const title = titleInput.value.trim();
@@ -142,11 +175,13 @@ export function renderNewProject(_route) {
     };
     try {
       const snap = await createProject(state.config, body);
-      state.currentProjectId = snap.project.id;
-      persistCurrentProject(snap.project.id);
       upsertProject(snap.project);
       toast("good", "Project created", snap.project.title);
-      navigate("#/project");
+      if (form.isConnected) {
+        state.currentProjectId = snap.project.id;
+        persistCurrentProject(snap.project.id);
+        navigate("#/script");
+      }
     } catch (err) {
       errRegion.replaceChildren(errorPanel(err,
         el("button", { class: "btn", type: "button", onclick: doCreate }, "Try again"),
@@ -162,15 +197,14 @@ export function renderNewProject(_route) {
     await doCreate();
   }
 
-  const form = el("form", { onsubmit: onSubmit },
+  const form = el("form", { onsubmit: onSubmit, novalidate: true },
     el("div", { class: "grid-2" }, fTitle, fTopic),
     fVideoMode,
     el("div", { class: "grid-2" }, fDuration, fAspect),
     fDurationMode,
-    el("div", { class: "grid-2" }, fFps, fResolution),
     el("div", { class: "grid-2" }, fStyle, fAudience),
-    el("div", { class: "grid-2" }, fNarrator, fQuality),
     fInstructions,
+    advanced,
     el("div", { class: "row mt" }, submitBtn),
     errRegion,
   );
@@ -179,10 +213,12 @@ export function renderNewProject(_route) {
     el("div", { class: "screen-head" },
       el("h1", {}, "New Project"),
     ),
-    el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Project details"),
-      el("p", { class: "muted small" }, "Title and topic are required — the backend plans scenes from them. Leave the other fields at their defaults unless you know better."),
-      form,
+    el("div", { class: "brief-layout" },
+      el("section", { class: "panel" },
+        el("h2", { class: "panel-title" }, "Project brief"),
+        form,
+      ),
+      el("aside", {}, classicSummary, archiveSample),
     ),
   );
 }

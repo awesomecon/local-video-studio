@@ -19,11 +19,11 @@ def supervisor(tmp_path: Path, ready: bool) -> IdeogramWorkerSupervisor:
 
 
 def test_existing_service_does_not_require_local_launcher(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.workers.ideogram_process.platform", SimpleNamespace(system=lambda: "Windows"))
+    monkeypatch.setattr("backend.workers.comfyui_process.platform", SimpleNamespace(system=lambda: "Windows"))
     assert supervisor(tmp_path, True).ensure_running() is False
 
 
 def test_native_windows_managed_script_has_clear_restriction(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.workers.ideogram_process.platform", SimpleNamespace(system=lambda: "Windows"))
+    monkeypatch.setattr("backend.workers.comfyui_process.platform", SimpleNamespace(system=lambda: "Windows"))
     with pytest.raises(BackendError, match="native Windows"):
         supervisor(tmp_path, False).ensure_running()

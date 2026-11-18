@@ -65,6 +65,7 @@ class EvidenceClass(StrEnum):
 class EditorialImageModel(StrEnum):
     KREA = "krea"
     QWEN_IMAGE = "qwen_image"
+    QWEN_IMAGE_21 = "qwen_image_21"
     IDEOGRAM4_LOCAL = "ideogram4_local"
 
 

@@ -53,6 +53,8 @@ def test_qwen_image_2512_is_available_in_thumbnail_studio() -> None:
     page = read("frontend/js/pages/thumbnails.js")
     assert '{ value: "qwen_image", label: "Qwen-Image-2512' in page
     assert '{ value: "qwen_image_native_text", label: "Qwen-Image-2512 · native text rendering"' in page
+    assert '{ value: "qwen_image_21", label: "Qwen-Image-2.1' in page
+    assert '{ value: "qwen_image_21_native_text", label: "Qwen-Image-2.1 · native text rendering"' in page
     assert 'imageModel.value === "qwen_image"' in page
     assert 'imageModel.value === "qwen_image_native_text"' in page
     assert "it may misspell, alter, or omit your wording" in page

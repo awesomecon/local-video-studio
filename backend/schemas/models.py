@@ -82,6 +82,7 @@ class VisualType(StrEnum):
     KREA2_STILL = "krea2_still"
     IDEOGRAM4_STILL = "ideogram4_still"
     QWEN_IMAGE_STILL = "qwen_image_still"
+    QWEN_IMAGE_21_STILL = "qwen_image_21_still"
     FLUX_STILL = "flux_still"
     IMAGE_MOTION = "image_motion"
     TITLE_CARD = "title_card"
@@ -162,6 +163,7 @@ class ImageModelPreference(StrEnum):
     AUTOMATIC = "automatic"
     KREA = "krea"
     QWEN_IMAGE = "qwen_image"
+    QWEN_IMAGE_21 = "qwen_image_21"
     IDEOGRAM4_LOCAL = "ideogram4_local"
 
 

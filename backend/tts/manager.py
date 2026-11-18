@@ -42,6 +42,7 @@ _PROVIDER_DIR = {
     "fish_s2_pro": "fish", "voxcpm2": "voxcpm", "omnivoice": "omnivoice",
     "index_tts_2_5": "index", "breeze_tts_2": "breeze", "higgs_tts_3": "higgs",
     "gemini_tts": "gemini",
+    "fish_drama_3": "fish-drama-3", "ming_tts_tiny": "ming-tiny", "ming_tts_05b": "ming-05b",
 }
 _DEFAULT_CHUNK = {
     "qwen_tts": 60.0, "step_audio_editx": 20.0, "chatterbox": 45.0,
@@ -50,13 +51,30 @@ _DEFAULT_CHUNK = {
     "breeze_tts_2": 30.0, "higgs_tts_3": 30.0,
     # Gemini TTS output is bounded per call; keep narration lines short.
     "gemini_tts": 30.0,
+    "fish_drama_3": 30.0, "ming_tts_tiny": 20.0, "ming_tts_05b": 30.0,
 }
+_ISOLATED_SPEECH = frozenset({"fish_drama_3", "ming_tts_tiny", "ming_tts_05b"})
 
 
 class TTSManager:
     def __init__(self, pipeline: Any) -> None:
         self.pipeline = pipeline
         self._activation_lock = threading.Lock()
+        self._active_speech: dict[str, tuple[Any, str]] = {}
+        self._speech_lock = threading.Lock()
+
+    def cancel_active(self, job_id: str) -> None:
+        """Forward cancellation only to a chunk owned by this narration job."""
+        with self._speech_lock:
+            active = self._active_speech.get(job_id)
+        if active is not None:
+            backend, chunk_id = active
+            backend.cancel(chunk_id)
+
+    def _check_speech_canceled(self, job_id: str) -> None:
+        job = self.pipeline.jobs.get(job_id)
+        if job is not None and job.status is JobStatus.CANCELED:
+            raise BackendError(BackendErrorCode.CANCELED, "Narration job was canceled.")
 
     def create_voice_profile(
         self,
@@ -281,7 +299,10 @@ class TTSManager:
             self.get_voice_profile(project_id, request.voice_profile_id)
             if request.voice_profile_id else None
         )
-        if profile is None and request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts"}:
+        if profile is None and request.provider not in {
+            "chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts",
+            "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
+        }:
             raise ValueError(f"{request.provider} requires an authorized reference voice")
         if profile is None and request.enhance_with_step:
             raise ValueError("Step enhancement requires an authorized reference voice")
@@ -341,6 +362,14 @@ class TTSManager:
             raise
         try:
             for index, (chunk, chunk_spec) in enumerate(zip(chunks, chunk_specs), start=1):
+                if request.provider in _ISOLATED_SPEECH:
+                    self._check_speech_canceled(job_id)
+                    chunk_id = f"{job_id}:{index}"
+                    reset = getattr(backend, "reset_cancel", None)
+                    if callable(reset):
+                        reset(chunk_id)
+                    with self._speech_lock:
+                        self._active_speech[job_id] = (backend, chunk_id)
                 filename = f"{index:04d}.wav"
                 settings = {
                     "filename": filename,
@@ -352,6 +381,7 @@ class TTSManager:
                     "temperature": request.temperature,
                     "speaker": request.speaker,
                     "voice_instruction": request.voice_instruction,
+                    "ming_task": request.ming_task,
                     "guidance_scale": request.guidance_scale,
                     "inference_timesteps": request.inference_timesteps,
                     "num_steps": request.num_steps,
@@ -368,6 +398,8 @@ class TTSManager:
                         settings=settings,
                     ))
                     last_result = result
+                    if request.provider in _ISOLATED_SPEECH:
+                        self._check_speech_canceled(job_id)
                     output = result.outputs[0]
                     duration = wav_duration(output)
                     metadata = {
@@ -408,6 +440,8 @@ class TTSManager:
                     if isinstance(exc, BackendError) and exc.retryable:
                         break
         finally:
+            with self._speech_lock:
+                self._active_speech.pop(job_id, None)
             try:
                 if request.unload_after or request.enhance_with_step or worker_started:
                     backend.unload()
@@ -803,6 +837,14 @@ class TTSManager:
         worker_started = self.pipeline.tts_workers.ensure_running_if_managed(request.provider)
         try:
             backend.load()
+            if request.provider in _ISOLATED_SPEECH:
+                self._check_speech_canceled(job_id)
+                chunk_id = f"{job_id}:{chunk_index}"
+                reset = getattr(backend, "reset_cancel", None)
+                if callable(reset):
+                    reset(chunk_id)
+                with self._speech_lock:
+                    self._active_speech[job_id] = (backend, chunk_id)
             result = backend.generate(GenerationRequest(
                 job_id=f"{job_id}:{chunk_index}", output_dir=directory,
                 prompt=str(selected["text"]), seed=request.seed,
@@ -817,6 +859,7 @@ class TTSManager:
                     "temperature": request.temperature,
                     "speaker": request.speaker,
                     "voice_instruction": request.voice_instruction,
+                    "ming_task": request.ming_task,
                     "guidance_scale": request.guidance_scale,
                     "inference_timesteps": request.inference_timesteps,
                     "num_steps": request.num_steps,
@@ -826,7 +869,11 @@ class TTSManager:
                     "gemini_model": request.gemini_model,
                 },
             ))
+            if request.provider in _ISOLATED_SPEECH:
+                self._check_speech_canceled(job_id)
         finally:
+            with self._speech_lock:
+                self._active_speech.pop(job_id, None)
             try:
                 if request.unload_after or request.enhance_with_step or worker_started:
                     backend.unload()
@@ -1413,11 +1460,22 @@ class TTSManager:
             context=self._video_context(project),
             provider=provider,
         )
+        self._require_generated_cues(script, warnings)
         script.source_sha256 = hashlib.sha256(
             script.source_text.encode("utf-8"),
         ).hexdigest()
         self.save_performance_script(project_id, script)
         return script, warnings
+
+    @staticmethod
+    def _require_generated_cues(script: PerformanceScript, warnings: list[str]) -> None:
+        if script.tag_count == 0:
+            raise BackendError(
+                BackendErrorCode.INVALID_RESPONSE,
+                "The local LLM produced no valid delivery cues.",
+                retryable=True,
+                details=warnings[0] if warnings else None,
+            )
 
     def regenerate_performance_segment(
         self,
@@ -1431,10 +1489,9 @@ class TTSManager:
         """Re-tag one segment with the local LLM and persist the updated script.
 
         Only the named segment is re-sent to the LLM (with the per-segment
-        repair/degrade logic); every other segment keeps its stored tags.  The
-        regenerated segment is validated by the tagger, so it is always safe to
-        persist.  ``accept=True`` on save preserves any previously-accepted
-        hand edits on the other segments.
+        repair logic). If regeneration produces valid cues, only the selected
+        segment is replaced. ``accept=True`` on save preserves previously
+        accepted hand edits on the other segments.
         """
         project = self.pipeline._project(project_id)
         script = self.get_performance_script(project_id, provider)
@@ -1456,10 +1513,8 @@ class TTSManager:
             language=language, model=model, context=context,
             provider=script.provider,
         )
-        new_tagged = result.segments[0].tagged
-        for s in script.segments:
-            if s.key == key:
-                s.tagged = new_tagged
+        self._require_generated_cues(result, warnings)
+        segment.tagged = result.segments[0].tagged
         self.save_performance_script(project_id, script, accept=True)
         return script, warnings
 

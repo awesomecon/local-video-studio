@@ -12,8 +12,8 @@
  *  - While a render job is active the panel shows its status, progress and a
  *    Cancel action (POST /api/jobs/{id}/cancel).
  *  - The final video path and QC file path come from the project's stage
- *    state (render_final / quality_control outputs). The QC report itself
- *    has no read endpoint, so only its path and completion are shown.
+ *    state (render_final / quality_control outputs). The project snapshot
+ *    also carries the QC results for the current preview.
  *  - A completed, recorded final-render asset has a project-scoped local
  *    download link.
  *  - Every re-render preserves the previous final MP4 in the project's
@@ -48,6 +48,8 @@ import {
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute } from "../router.js";
+import { createRenderMonitor } from "../render-monitor.js";
+import { editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
 
@@ -188,15 +190,22 @@ export function renderExport(_route) {
  */
 function exportPanel() {
   const body = el("div", { class: "panel-body" });
+  const monitor = createRenderMonitor();
+  const preflightBody = el("div");
+  const deliveryBody = el("div", { class: "stack" });
+  const delivery = el("div", { class: "delivery-layout" },
+    el("div", { class: "stack" }, monitor.element, preflightBody),
+    deliveryBody,
+  );
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
   refreshBtn.onclick = () => load(body);
 
   const panel = el("div", { class: "panel" },
     el("div", { class: "row" },
-      el("span", { class: "panel-title" }, "Render & Export"),
       el("span", { class: "spacer" }),
       refreshBtn,
     ),
+    delivery,
     body,
   );
 
@@ -228,7 +237,12 @@ function exportPanel() {
       );
       const active = jobs.find((j) => !TERMINAL.includes(j.status)) || null;
       const last = jobs.slice().sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0] || null;
-      region.replaceChildren(build(snap, stages, active, last, thumbnails, history));
+      monitor.update(snap, { final: true });
+      const stagesOpen = preflightBody.querySelector(".studio-disclosure")?.open || false;
+      const { settings, preflight, outputs } = build(snap, stages, active, last, thumbnails, history, stagesOpen);
+      preflightBody.replaceChildren(preflight);
+      deliveryBody.replaceChildren(...settings);
+      region.replaceChildren(outputs);
       hasContent = true;
     } catch (err) {
       if (token !== inflight || hasContent) return;
@@ -252,9 +266,9 @@ function exportPanel() {
  * @param {import("../api.js").GenerationJob|null} last
  * @param {import("../api.js").ThumbnailStudioSnapshot} thumbnails
  * @param {{renders?: import("../api.js").RenderHistoryEntry[]}|null} history
- * @returns {HTMLElement}
+ * @param {boolean} stagesOpen
  */
-function build(snap, stages, active, last, thumbnails, history) {
+function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
   const project = snap.project;
   const mode = exportVideoMode(project);
   const parts = [];
@@ -304,9 +318,9 @@ function build(snap, stages, active, last, thumbnails, history) {
   );
 
   /* --- video spec ------------------------------------------------------- */
-  parts.push(
-    el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Video spec"),
+  const videoSpec =
+    el("section", { class: "panel delivery-settings" },
+      el("h2", { class: "panel-title" }, "Delivery settings"),
       el("div", { class: "panel-body" },
         el("dl", { class: "kv" },
           el("dt", {}, "Resolution"),
@@ -319,15 +333,20 @@ function build(snap, stages, active, last, thumbnails, history) {
           el("dd", {}, fmtDuration(project.target_duration || 0)),
         ),
       ),
-    ),
-  );
+    );
 
   /* --- render controls --------------------------------------------------- */
+  const editorial = mode === "editorial" ? snap.editorial : null;
+  const missingMedia = editorialMediaIssues(editorial).length;
+  const fix = editorial?.has_narration === false ? ["#/voice", "Add narration"]
+    : editorial?.has_edit_plan === false ? ["#/editorial", "Build Edit Plan"]
+      : missingMedia ? ["#/editorial", missingEditorialMediaLabel(missingMedia)] : null;
+  const renderDisabled = Boolean(active || fix);
   const runBtn = el("button", {
-    class: "btn btn-primary", type: "button", disabled: Boolean(active),
+    class: "btn btn-primary", type: "button", disabled: renderDisabled,
   }, "Render final video");
   const forceBtn = el("button", {
-    class: "btn", type: "button", disabled: Boolean(active),
+    class: "btn", type: "button", disabled: renderDisabled,
   }, "Re-render final video");
   runBtn.onclick = () => doRender(false, project);
   forceBtn.onclick = () => doRender(true, project);
@@ -338,33 +357,43 @@ function build(snap, stages, active, last, thumbnails, history) {
       : el("span", { class: "muted small" }, "No render has been queued yet."),
   );
 
-  parts.push(
-    el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "Render controls"),
+  const renderActions = el("section", { class: "panel delivery-actions" },
+    el("h2", { class: "panel-title" }, "Render controls"),
+    el("div", { class: "panel-body stack" },
+      fix ? el("a", { class: "btn btn-primary", href: fix[0] }, fix[1]) : null,
+      runBtn,
+      forceBtn,
+      el("button", {
+        class: "btn", type: "button", disabled: renderDisabled,
+        onclick: () => doRerunStage("render_preview", project),
+      }, stages.render_preview?.status === "completed" ? "Re-render preview" : "Render preview"),
+      statusRegion,
+    ),
+  );
+
+  const preflight =
+    el("section", { class: "panel delivery-preflight" },
+      el("h2", { class: "panel-title" }, "Before you render"),
       el("div", { class: "panel-body" },
         el("p", { class: "muted small" }, exportDescriptionText(project)),
         renderInputSummary(snap, stages),
-        el("div", { class: "row" },
-          runBtn,
-          forceBtn,
-          el("span", { class: "spacer" }),
-          el("span", { class: "muted small" }, exportWorkflowText(project)),
+        el("p", { class: "muted small" }, exportWorkflowText(project)),
+        el("details", { class: "studio-disclosure mt", open: stagesOpen },
+          el("summary", {}, "Restart individual stages"),
+          el("div", { class: "row mt" },
+            mode === "editorial"
+              ? stageRerunCell("editorial_visual", stages.editorial_visual, { active, onRerun })
+              : null,
+            stageRerunCell("score_mix", stages.score_mix, { active, onRerun }),
+            stageRerunCell("timeline", stages.timeline, { active, onRerun }),
+            stageRerunCell("render_preview", stages.render_preview, { active, onRerun }),
+            stageRerunCell("quality_control", stages.quality_control, { active, onRerun }),
+            stageRerunCell("render_final", stages.render_final, { active, onRerun }),
+            stageRerunCell("thumbnails", stages.thumbnails, { active, onRerun }),
+          ),
         ),
-        el("div", { class: "row mt" },
-          mode === "editorial"
-            ? stageRerunCell("editorial_visual", stages.editorial_visual, { active, onRerun })
-            : null,
-          stageRerunCell("score_mix", stages.score_mix, { active, onRerun }),
-          stageRerunCell("timeline", stages.timeline, { active, onRerun }),
-          stageRerunCell("render_preview", stages.render_preview, { active, onRerun }),
-          stageRerunCell("quality_control", stages.quality_control, { active, onRerun }),
-          stageRerunCell("render_final", stages.render_final, { active, onRerun }),
-          stageRerunCell("thumbnails", stages.thumbnails, { active, onRerun }),
-        ),
-        statusRegion,
       ),
-    ),
-  );
+    );
 
   /* --- final output ------------------------------------------------------ */
   const finalStage = stages.render_final;
@@ -412,7 +441,23 @@ function build(snap, stages, active, last, thumbnails, history) {
     ),
   );
 
-  return el("div", { class: "stack" }, ...parts);
+  const report = snap.quality_report;
+  const quality = el("section", { class: "panel" },
+    el("h2", { class: "panel-title" }, "Preview quality report"),
+    report ? el("div", { class: "stack" },
+      el("div", { class: "row" },
+        badge(report.passed ? "good" : "critical", report.passed ? "Passed" : "Failed"),
+        el("span", { class: "small muted" }, `${report.inspected_files} files inspected`),
+      ),
+      report.issues.length ? el("ul", { class: "qc-issues" },
+        report.issues.map((issue) => el("li", {},
+          badge(issue.severity === "error" ? "critical" : issue.severity === "warning" ? "warning" : "neutral", issue.severity),
+          " ", issue.message,
+        )),
+      ) : el("p", { class: "muted small" }, "No issues reported."),
+    ) : el("p", { class: "muted small" }, "No quality report is available for the current preview."),
+  );
+  return { settings: [renderActions, videoSpec], preflight, outputs: el("div", { class: "stack" }, quality, ...parts) };
 }
 
 /**
@@ -705,7 +750,7 @@ function stageRerunCell(stage, st, { active, onRerun }) {
 export function renderInputSummary(snap, stages) {
   const editorial = exportVideoMode(snap.project) === "editorial";
   const assets = snap.assets || [];
-  const narrationReady = Boolean(
+  const narrationReady = (editorial ? snap.editorial?.has_narration : undefined) ?? Boolean(
     stages.narration && stages.narration.status === "completed"
     || assets.some((asset) => asset.settings && asset.settings.role === "narration")
   );
@@ -713,6 +758,11 @@ export function renderInputSummary(snap, stages) {
   const musicReady = assets.some((asset) => asset.settings && asset.settings.role === "music");
   const rows = editorial ? editPlanSummaryRow(snap) : sceneVisualsSummaryRow(snap, assets);
   if (editorial) {
+    const issues = editorialMediaIssues(snap.editorial);
+    if (issues.length) {
+      rows.push(el("dt", {}, "Editorial visuals"),
+        el("dd", {}, `${issues.length} missing`));
+    }
     // Strict booleans only: malformed values are omitted, never guessed.
     const display = editorialDisplaySettings(snap);
     if (display.captions !== null) {
@@ -731,7 +781,7 @@ export function renderInputSummary(snap, stages) {
     el("dd", {}, `${captionsReady ? "captions recorded"
         : editorial ? "captions derived from narration" : "captions derived from scenes"}; ${musicReady ? "music recorded" : "no music"}`),
   );
-  return el("dl", { class: "kv" }, ...rows);
+  return el("dl", { class: "kv delivery-inputs" }, ...rows);
 }
 
 /**

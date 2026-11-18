@@ -53,6 +53,7 @@ PROJECT_STORAGE_KEY = "lvs-current-project"  # keep in sync with frontend/js/sta
 
 ROUTES = [
     ("dashboard", "#/"),
+    ("projects", "#/projects"),
     ("new", "#/new"),
     ("project", "#/project"),
     ("script", "#/script"),

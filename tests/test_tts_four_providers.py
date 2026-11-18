@@ -35,6 +35,7 @@ COMPARISON_PROVIDERS = (
 )
 ALL_TTS_PROVIDERS = (
     "qwen_tts", "step_audio_editx", "chatterbox", *COMPARISON_PROVIDERS,
+    "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
 )
 
 

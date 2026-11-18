@@ -39,7 +39,7 @@ def test_editorial_route_is_wired_end_to_end() -> None:
     assert "editorial: renderEditorial," in app
     assert 'import { renderEditorial } from "./pages/editorial.js";' in app
     assert '{ name: "editorial", hash: "#/editorial", label: "Editorial", icon: "canvas" }' in app
-    nav = app.split("const NAV_PRIMARY = ", 1)[1].split("];", 1)[0]
+    nav = app.split("const NAV_FINISH = ", 1)[1].split("];", 1)[0]
     assert '{ name: "editorial", hash: "#/editorial"' in nav
     # The headless UI capture covers the new screen too.
     shots = (ROOT / "scripts" / "ui_shots.py").read_text(encoding="utf-8")
@@ -67,7 +67,7 @@ def test_editorial_workspace_reuses_the_strict_shared_builders() -> None:
     # The video-mode helper lives in the dependency-neutral shared module so
     # the app shell can use it without importing the page modules (which
     # import the shell's live-update hook back).
-    assert 'import { effectiveVideoMode } from "../video-mode.js";' in source
+    assert 'import { effectiveVideoMode,' in source and 'from "../video-mode.js";' in source
     # No second, drift-prone copy of the motion/template allowlists.
     assert "MOTION_PRIMITIVES" not in source
     assert "EDITORIAL_TEMPLATES" not in source
@@ -155,7 +155,7 @@ def test_editorial_workspace_uses_the_snapshot_plan_metadata() -> None:
     assert "editorialPlanState(editorial)" in source
     assert 'badge("warning", "Edit Plan is stale")' in source
     assert 'badge("neutral", "Edit Plan available")' in source
-    assert "Stale plans are preserved on purpose" in source
+    assert "The preview uses the saved plan" in source
     assert "may predate provenance tracking" in source
     # The no-plan state offers the guarded generator (bodyless POST via the
     # shared button) only for a usable snapshot URL.
@@ -219,7 +219,7 @@ def test_project_details_editorial_preview_states_plain_english_readiness() -> N
     # The dedicated workspace screen keeps its own banner (untouched).
     workspace = _js("pages/editorial.js")
     assert 'badge("warning", "Edit Plan is stale")' in workspace
-    assert "Stale plans are preserved on purpose" in workspace
+    assert "The preview uses the saved plan" in workspace
 
 
 def test_motion_primitive_allowlist_matches_the_backend_contract() -> None:

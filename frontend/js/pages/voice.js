@@ -15,7 +15,7 @@ import { effectiveVideoMode } from "../video-mode.js";
 import { geminiKeyPanel } from "../gemini-key.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
 
-const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3"]);
+const PERFORMANCE_TAG_PROVIDERS = new Set(["fish_s2_pro", "higgs_tts_3", "fish_drama_3"]);
 
 /** Preset voices for the remote Gemini TTS provider (see docs/gemini-tts.md).
  * Grouped by delivery so 30 options stay scannable; the flat list below stays
@@ -90,13 +90,13 @@ const GEMINI_MODEL_DEFAULT = "gemini-3.1-flash-tts-preview";
 
 export function renderVoice(_route) {
   const screen = el("div", { class: "screen" },
-    el("div", { class: "screen-head" }, el("h1", {}, "Voice")));
+    el("div", { class: "screen-head" }, el("h1", {}, "Voice & narration")));
   if (!state.currentProjectId) {
     screen.append(needsProject("Select a project in the top bar to manage narration."));
     return screen;
   }
   const body = el("div", { class: "panel-body" }, loadingState(4));
-  const load = async () => {
+  const load = async ({ voiceDraft } = {}) => {
     body.replaceChildren(loadingState(4));
     try {
       const [snapshot, voices, models, narrations, tags] = await Promise.all([
@@ -107,7 +107,7 @@ export function renderVoice(_route) {
         getPerformanceTags(state.config, state.currentProjectId),
       ]);
       body.replaceChildren(build(
-        snapshot, voices.voices || [], models.models || {}, narrations, tags, load,
+        snapshot, voices.voices || [], models.models || {}, narrations, tags, load, voiceDraft,
       ));
     } catch (err) {
       body.replaceChildren(errorPanel(err,
@@ -115,7 +115,7 @@ export function renderVoice(_route) {
     }
   };
   screen.append(el("div", { class: "panel" },
-    el("div", { class: "row" }, el("span", { class: "panel-title" }, "Local voice cloning"),
+    el("div", { class: "row" }, el("span", { class: "panel-title" }, "Master narration"),
       el("span", { class: "spacer" }),
       el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: load }, "Refresh")),
     body));
@@ -123,7 +123,7 @@ export function renderVoice(_route) {
   return screen;
 }
 
-function build(snapshot, voices, models, narrations, tags, refresh) {
+function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) {
   const project = snapshot.project;
   /** classic|editorial — drives the mode-aware timing badges and help text. */
   const videoMode = effectiveVideoMode(project);
@@ -265,10 +265,13 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     modelOption("voxcpm2", "VoxCPM2 2B", models),
     modelOption("omnivoice", "OmniVoice", models),
     modelOption("fish_s2_pro", "Fish Audio S2 Pro", models),
+    modelOption("fish_drama_3", "Fish Drama 3 Q4 (drama-rs)", models),
+    modelOption("ming_tts_tiny", "Ming 3 TTS Tiny", models),
+    modelOption("ming_tts_05b", "Ming 3 TTS 0.5B", models),
     modelOption("breeze_tts_2", "Breeze TTS 2 (≈3.5B)", models),
     modelOption("higgs_tts_3", "Higgs TTS 3 4B", models),
     modelOption("gemini_tts", "Gemini TTS (Google, cloud)", models));
-  provider.value = current.provider || "qwen_tts";
+  provider.value = voiceDraft?.provider || current.provider || "qwen_tts";
   const chatterboxBuiltIn = "__chatterbox_builtin__";
   const qwenBuiltInPrefix = "__qwen_builtin__:";
   const higgsBuiltIn = "__higgs_default__";
@@ -309,7 +312,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const chunkDefaults = {
     qwen_tts: 60, step_audio_editx: 20, chatterbox: 45, fish_s2_pro: 30,
     voxcpm2: 30, omnivoice: 30, index_tts_2_5: 30, breeze_tts_2: 30,
-    higgs_tts_3: 30, gemini_tts: 30,
+    higgs_tts_3: 30, gemini_tts: 30, fish_drama_3: 30, ming_tts_tiny: 20, ming_tts_05b: 30,
   };
   const chunkingExplanation = el("div", {
     class: "chunking-explainer", role: "note", "aria-live": "polite",
@@ -354,6 +357,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const pause = el("input", { type: "number", class: "input", min: "0", max: "5000",
     step: "50", value: current.pause_ms ?? 350 });
   const script = el("textarea", { class: "input", rows: "9",
+    value: voiceDraft?.script || "",
     placeholder: "Leave blank to use planned scene narration." });
   const hasPlannedNarration = (snapshot.scenes || []).some(
     (scene) => String(scene.narration || "").trim());
@@ -376,6 +380,20 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   const omniSpeed = el("input", { type: "number", class: "input", min: "0.5", max: "2",
     step: "0.05", value: current.speed ?? "", placeholder: "Model default (1.0)" });
   const cloneProviders = ["fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5", "breeze_tts_2"];
+  const voiceHint = el("span", {});
+  const mingTask = el("select", { class: "input" },
+    el("option", { value: "tts" }, "Narration / reference voice"),
+    el("option", { value: "voice_design" }, "Design a new voice"),
+    el("option", { value: "freeform" }, "Freeform delivery direction"));
+  mingTask.value = current.ming_task || "tts";
+  const mingDirection = el("input", { type: "text", class: "input", maxlength: "500",
+    value: current.voice_instruction || "", placeholder: "Describe the voice or delivery" });
+  const mingGrid = el("div", { class: "pref-grid" },
+    field("Ming task", mingTask, "Voice design creates a new voice. Freeform accepts delivery direction."),
+    field("Ming direction", mingDirection, "Required for voice design and freeform. Tiny cloning needs the exact reference transcript."));
+  const nativeSpeechNote = el("div", { class: "callout" },
+    el("p", { class: "small" }, "Drama Q4: Built with Fish Audio. Needs almost the entire 4090; "
+      + "release other GPU models before generation. Models are installed explicitly and never downloaded by generation."));
   const breezeEngine = el("select", { class: "input" },
     el("option", { value: "eager" }, "Eager — default, lower VRAM (~7.7 GiB)"),
     el("option", { value: "fast" }, "Fast — experimental, ~14.4 GiB VRAM (needs ~20 GiB free)"));
@@ -523,14 +541,15 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     field("Step instruction", instruction, "A model-supported edit description."));
   const enhanceRow = el("label", { class: "check-row" }, enhance,
     " Preserve Qwen audio and run a Step expressive-edit pass");
-  const performance = performancePanel(project, current, tags, provider, script, refresh);
+  const refreshTags = () => refresh({ voiceDraft: { provider: provider.value, script: script.value } });
+  const performance = performancePanel(project, current, tags, provider, script, refreshTags);
 
   let recordedBlob = null;
   let recordedUrl = null;
   const recordedName = el("input", {
     type: "text", class: "input", maxlength: "100", value: "My recorded voiceover",
   });
-  const recordedLabel = el("span", { class: "muted small" }, "No recording chosen yet.");
+  const recordedLabel = el("span", { class: "muted small" });
   const recordedPreview = el("audio", { controls: true, preload: "metadata", hidden: true });
   const setRecordedSource = (blob, label) => {
     if (recordedUrl) URL.revokeObjectURL(recordedUrl);
@@ -539,6 +558,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     recordedPreview.src = recordedUrl;
     recordedPreview.hidden = false;
     recordedLabel.textContent = label;
+    recordingDetails.hidden = false;
   };
   const plannedScript = (snapshot.scenes || [])
     .map((scene) => String(scene.narration || "").trim()).filter(Boolean).join("\n\n");
@@ -596,6 +616,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     const qwen = provider.value === "qwen_tts";
     const higgs = provider.value === "higgs_tts_3";
     const gemini = provider.value === "gemini_tts";
+    const ming = provider.value === "ming_tts_tiny" || provider.value === "ming_tts_05b";
+    const nativeSpeech = ming || provider.value === "fish_drama_3";
     const cloneOnly = cloneProviders.includes(provider.value);
     builtInOption.disabled = !chatterbox;
     higgsBuiltInOption.disabled = !higgs;
@@ -621,7 +643,15 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           voice.value.startsWith(qwenBuiltInPrefix))) {
       voice.value = voices[0]?.id || "";
     }
-    voice.disabled = gemini;
+    voice.disabled = gemini || (ming && mingTask.value === "voice_design");
+    voiceHint.textContent = ming
+      ? "A saved profile clones its voice. Leave blank for a default voice; voice design creates a new voice."
+      : nativeSpeech ? "Optional authorized reference profile; leave blank for a generated voice."
+      : cloneOnly ? "This model clones an authorized saved profile."
+      : "Qwen, Chatterbox, Higgs, and Gemini include reference-free voices.";
+    mingDirection.disabled = provider.value === "ming_tts_tiny" && mingTask.value === "tts";
+    mingGrid.hidden = !ming;
+    nativeSpeechNote.hidden = provider.value !== "fish_drama_3";
     const referenceFreeQwen = qwen && voice.value.startsWith(qwenBuiltInPrefix);
     enhance.disabled = !qwen || referenceFreeQwen;
     if (enhance.disabled) enhance.checked = false;
@@ -642,6 +672,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
   };
   provider.onchange = syncProviderControls;
   voice.onchange = syncProviderControls;
+  mingTask.onchange = syncProviderControls;
   // Buttons are declared before the first sync so the sync handler can gate
   // the Generate button (e.g. Gemini TTS without a key) without a TDZ error.
   const saveVoice = el("button", { class: "btn", type: "button" }, "Save voice settings");
@@ -655,9 +686,11 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     }
     const builtInQwen = voice.value.startsWith(qwenBuiltInPrefix);
     const builtIn = voice.value === chatterboxBuiltIn || builtInQwen || voice.value === higgsBuiltIn
-      || provider.value === "gemini_tts";
+      || provider.value === "gemini_tts"
+      || (["ming_tts_tiny", "ming_tts_05b"].includes(provider.value) && mingTask.value === "voice_design");
     const settings = {
       provider: provider.value, voice_profile_id: builtIn ? null : (voice.value || null),
+      ming_task: mingTask.value,
       language: language.value,
       seed: seedValue,
       chunk_seconds: chunk.value ? Number(chunk.value) : null, pause_ms: Number(pause.value),
@@ -675,6 +708,9 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       intensity: performance.intensity.value,
       performance_notes: performance.notes.value.trim(),
     };
+    if (provider.value === "ming_tts_tiny" || provider.value === "ming_tts_05b") {
+      settings.voice_instruction = mingDirection.disabled ? "" : mingDirection.value.trim();
+    }
     if (provider.value === "gemini_tts") {
       // Gemini uses its preset voices, never a cloned profile; its style
       // direction travels in the provider-specific fields below.
@@ -716,7 +752,7 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           + "and restart the dashboard) before generating with Gemini TTS.");
         return;
       }
-    } else if (!voice.value || (builtInChatterbox && provider.value !== "chatterbox") ||
+    } else if ((!voice.value && !["fish_drama_3", "ming_tts_tiny", "ming_tts_05b"].includes(provider.value)) || (builtInChatterbox && provider.value !== "chatterbox") ||
         (builtInQwen && provider.value !== "qwen_tts") ||
         (builtInHiggs && provider.value !== "higgs_tts_3")) {
       toast("critical", "Voice profile required", "Select or upload an authorized reference voice.");
@@ -746,10 +782,45 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
     finally { saveVoice.disabled = false; syncGenerateEnabled(); }
   };
 
-  return el("div", { class: "stack" },
-    el("div", { class: "consent-warning" }, icon("alert", 18),
-      el("span", {}, "Only clone a voice you own or have permission to use. Audio remains local.")),
-    section("1. Reference voice",
+  const generationSettings = el("details", { class: "studio-disclosure", open: !!voiceDraft },
+    el("summary", {}, "Generate narration with a model"));
+  const openGeneration = el("button", { class: "source-card", type: "button" },
+    el("span", { class: "sc-icon" }, icon("mic", 20)),
+    el("span", { class: "sc-body" },
+      el("span", { class: "sc-title" }, "Generate narration"),
+      el("span", { class: "sc-desc" }, "Choose a voice and generate a take from the script.")),
+  );
+  openGeneration.onclick = () => {
+    generationSettings.open = true;
+    generationSettings.scrollIntoView({ block: "start" });
+    generationSettings.querySelector("summary").focus({ preventScroll: true });
+  };
+  const recordingDetails = el("div", { class: "stack voice-recording-details", hidden: true },
+    el("div", { class: "vp-preview" },
+      el("div", { class: "row" }, recordedLabel), recordedPreview),
+    field("Take name", recordedName, "Shown in the narration-take library."),
+    el("div", { class: "row" }, useRecording),
+  );
+  const referenceSettings = el("details", { class: "studio-disclosure" },
+    el("summary", {}, "Reference voices and cloning"));
+  const workerSettings = el("details", { class: "studio-disclosure" },
+    el("summary", {}, "Model worker controls"), workerControlsPanel(models, refresh));
+  referenceSettings.append(el("div", { class: "consent-warning" }, icon("alert", 18),
+    el("span", {}, "Only clone a voice you own or have permission to use. Audio remains local.")));
+  const workbench = el("div", { class: "stack voice-workbench" },
+    section("Choose a narration source",
+      el("p", { class: "muted small" },
+        "Classic and Editorial both follow the actual duration when you use a recorded voiceover."),
+      el("div", { class: "source-grid voice-source-grid" }, recordVoiceover, importVoiceover, openGeneration, recordedFile),
+      recordingDetails),
+    takeLibraryPanel(
+      project.id, narrations.takes || [], narrations.active_asset_id || null,
+      snapshot.stage_state?.stages?.narration, refresh, videoMode,
+    ),
+    generationSettings, referenceSettings, workerSettings,
+  );
+  referenceSettings.append(
+    section("Reference voice",
       el("div", { class: "source-grid" }, recordCard, importCard, reference),
       previewBox,
       el("div", { class: "pref-grid" },
@@ -763,22 +834,12 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
         el("span", { class: "spacer" }),
         el("span", { class: "muted small" }, "Audio never leaves this machine.")),
       savedVoicesPanel(voices, project.id, refresh)),
-    section("2. Use your recorded voiceover",
-      el("p", { class: "muted small" },
-        "This becomes the master narration without running TTS or cloning your voice. "
-        + "Both Classic and Editorial modes follow its real duration."),
-      el("div", { class: "source-grid" }, recordVoiceover, importVoiceover, recordedFile),
-      el("div", { class: "vp-preview" },
-        el("div", { class: "row" }, recordedLabel), recordedPreview),
-      field("Take name", recordedName, "Shown in the narration-take library."),
-      el("div", { class: "row" }, useRecording)),
-    section("3. Generate narration with a model",
+  );
+  generationSettings.append(
+    section("Narration settings",
       el("div", { class: "pref-grid" },
         field("TTS model", provider, "Worker readiness is shown in the label."),
-        field("Voice", voice,
-          cloneProviders.includes(provider.value)
-            ? "This model clones an authorized saved profile."
-            : "Qwen, Chatterbox, Higgs, and Gemini include reference-free voices."),
+        field("Voice", voice, voiceHint),
         field("How should planned scenes be sent?", sceneGrouping,
           "Choose whether each scene starts a request or neighboring scenes share one."),
         field("Maximum text per TTS request", chunk,
@@ -798,6 +859,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
           : "This project has no planned narration yet. Enter text here or run planning from Script.")),
       breezeGrid,
       higgsNote,
+      mingGrid,
+      nativeSpeechNote,
       geminiNote,
       geminiGrid,
       voxGrid,
@@ -806,11 +869,8 @@ function build(snapshot, voices, models, narrations, tags, refresh) {
       stepGrid,
       performance,
       el("div", { class: "row" }, saveVoice, generate)),
-    workerControlsPanel(models, refresh),
-    takeLibraryPanel(
-      project.id, narrations.takes || [], narrations.active_asset_id || null,
-      snapshot.stage_state?.stages?.narration, refresh, videoMode,
-    ));
+  );
+  return workbench;
 }
 
 function languageSelect(value) {
@@ -887,6 +947,8 @@ function modelOption(value, label, models) {
   const suffix = ready ? "ready"
     : invalidKey ? "invalid API key"
     : needsKey ? "needs API key"
+    : health?.status === "not_installed" ? "needs installation"
+    : health?.status === "disabled" ? "disabled"
     : health?.status === "not_configured" ? "off"
     : entry?.managed ? "starts automatically"
     : "offline";
@@ -921,6 +983,14 @@ export function ttsWorkerStatus(entry) {
   }
   const health = (entry.health && typeof entry.health === "object") ? entry.health : null;
   const status = (health && typeof health.status === "string") ? health.status : null;
+  if (status === "not_installed" || status === "disabled") {
+    return {
+      message: status === "disabled" ? "Disabled in configuration."
+        : "Needs installation. Model downloads are explicit and must preserve 50 GiB free.",
+      canUnload: false,
+      unloadTitle: "Nothing to unload — this provider is not running.",
+    };
+  }
   if (status === "healthy") {
     if (health.loaded === true) {
       return {
@@ -1004,7 +1074,7 @@ function workerControlsPanel(models, refresh) {
       unload.disabled = false;
     }
   };
-  return section("3. Worker controls",
+  return section("Worker controls",
     el("p", { class: "muted small" },
       "Free VRAM between jobs. Stops only the worker process owned by this Studio; ",
       "an externally run worker is left running."),
@@ -1216,7 +1286,7 @@ function providerPerformancePanel(project, current, tags, provider, script, refr
     hidden: !PERFORMANCE_TAG_PROVIDERS.has(provider.value) },
     el("div", { class: "panel-title" }, "Delivery tags"),
     el("p", { class: "muted small" },
-      "Adds native delivery controls for Fish S2 Pro or Higgs TTS 3. Controls never reach "
+      "Adds native delivery controls for Fish S2 Pro, Drama 3, or Higgs TTS 3. Controls never reach "
       + "captions or a different model."),
     syntaxHint,
     statusLine,
@@ -1492,6 +1562,9 @@ export function providerLabel(provider) {
     step_audio_editx: "Step-Audio-EditX",
     chatterbox: "Chatterbox",
     fish_s2_pro: "Fish Audio S2 Pro",
+    fish_drama_3: "Fish Drama 3 Q4",
+    ming_tts_tiny: "Ming 3 TTS Tiny",
+    ming_tts_05b: "Ming 3 TTS 0.5B",
     voxcpm2: "VoxCPM2",
     omnivoice: "OmniVoice",
     index_tts_2_5: "IndexTTS 2.5",

@@ -97,6 +97,7 @@ const TYPE_LABELS = {
   wan_video: "Wan video",
   krea2_still: "Krea stills",
   qwen_image_still: "Qwen Image text stills",
+  qwen_image_21_still: "Qwen-Image-2.1 stills",
   flux_still: "Flux stills",
   image_motion: "image motion",
   title_card: "title cards",
@@ -109,6 +110,7 @@ const TYPE_LABELS = {
 /** Same grouping the backend uses when ordering a batch queue. */
 const BATCH_TYPE_ORDER = [
   "qwen_image_still",
+  "qwen_image_21_still",
   "krea2_still",
   "text_overlay_still",
   "image_motion",
@@ -120,6 +122,7 @@ const IMAGE_MODEL_LABELS = {
   krea: "Krea 2 stills",
   ideogram4_local: "Ideogram text images",
   qwen_image: "Qwen Image stills",
+  qwen_image_21: "Qwen-Image-2.1 stills",
 };
 
 function typeLabel(value) {
@@ -139,6 +142,7 @@ function effectiveImageModel(scene) {
   if (scene.needs_embedded_text) return "ideogram4_local";
   if (scene.visual_type === "ideogram4_still") return "ideogram4_local";
   if (scene.visual_type === "qwen_image_still") return "qwen_image";
+  if (scene.visual_type === "qwen_image_21_still") return "qwen_image_21";
   if (scene.visual_type === "image_motion"
       && scene.settings && scene.settings.image_motion_source === "qwen_image_2512") {
     return "qwen_image";
@@ -178,8 +182,6 @@ function boardPanel() {
     class: "btn btn-ghost btn-sm", type: "button", hidden: true,
   }, "Cancel all");
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
-  const introEl = el("p", { class: "muted small" },
-    "Generated previews stream from project-scoped local URLs. Generate a visual to fill a card.");
   const batchBar = el("div", { class: "row", style: { flexWrap: "wrap", alignItems: "center" } });
 
   /** @type {import("../api.js").Scene[]} */
@@ -188,6 +190,8 @@ function boardPanel() {
   let assets = [];
   /** @type {import("../api.js").GenerationJob[]} */
   let jobs = [];
+  let selectedSceneId = null;
+  const narrowBoard = matchMedia("(max-width: 740px)");
 
   const panel = el("div", { class: "panel" },
     el("div", { class: "row" },
@@ -197,7 +201,6 @@ function boardPanel() {
       cancelAllBtn,
       refreshBtn,
     ),
-    introEl,
     batchBar,
     body,
   );
@@ -272,7 +275,6 @@ function boardPanel() {
       // selection left this panel on the Classic view.
       if (effectiveVideoMode(snap.project) === "editorial") {
         summaryEl.replaceChildren();
-        introEl.hidden = true;
         cancelAllBtn.hidden = true;
         batchBar.replaceChildren();
         region.replaceChildren(editorialPointerState());
@@ -281,17 +283,18 @@ function boardPanel() {
       }
       // Classic: restore the scene controls (hidden while an Editorial
       // selection was active on this same panel) before painting the grid.
-      introEl.hidden = false;
       scenes = snap.scenes || [];
       assets = snap.assets || [];
       jobs = snap.jobs || [];
       const total = scenes.reduce((n, s) => n + (s.duration || 0), 0);
-      summaryEl.replaceChildren(`${scenes.length} scenes · ${fmtDuration(total)} total`);
+      const ready = scenes.filter((scene) =>
+        ["approved", "locked"].includes(scene.status) && !scene.shot_summary?.stale).length;
+      summaryEl.replaceChildren(`${ready} of ${scenes.length} scenes approved · ${fmtDuration(total)} total`);
       updateBatchBar();
       updateCancelAll();
       region.replaceChildren(
         scenes.length
-          ? el("div", { class: "scene-grid" }, ...scenes.map((s) => sceneCard(s)))
+          ? buildStoryboard()
           : emptyState("No scenes yet", "Run planning from the Script screen to draft scenes."),
       );
       hasContent = true;
@@ -301,6 +304,36 @@ function boardPanel() {
         el("button", { class: "btn", type: "button", onclick: () => load(region) }, "Retry"),
       ));
     }
+  }
+
+  function buildStoryboard() {
+    const previousDetails = body.querySelector(".board-details");
+    const selected = scenes.find((scene) => scene.id === selectedSceneId)
+      || scenes.find((scene) => !["approved", "locked"].includes(scene.status) || scene.shot_summary?.stale)
+      || scenes[0];
+    selectedSceneId = selected.id;
+    const inspector = el("aside", { class: "board-inspector panel", "aria-label": "Selected scene" });
+    const grid = el("div", { class: "scene-grid" }, scenes.map((scene) => sceneCard(scene, (item) => {
+      select(item, inspector.querySelector(".board-details")?.open);
+      if (narrowBoard.matches) {
+        inspector.scrollIntoView({ block: "start" });
+        inspector.querySelector("h2").focus({ preventScroll: true });
+      }
+    })));
+    function select(scene, detailsOpen = !narrowBoard.matches) {
+      selectedSceneId = scene.id;
+      for (const button of grid.querySelectorAll("[data-board-select]")) {
+        const active = button.dataset.boardSelect === selectedSceneId;
+        button.setAttribute("aria-pressed", String(active));
+        button.closest(".scene-card").classList.toggle("is-selected", active);
+      }
+      inspector.replaceChildren(
+        el("h2", { class: "panel-title", tabindex: -1 }, "Selected scene"),
+        bodyRegion(scene, activeJobFor(scene.id), latestAssetForScene(assets, scene.id, "visual"), detailsOpen),
+      );
+    }
+    select(selected, previousDetails?.open);
+    return el("div", { class: "board-layout" }, grid, inspector);
   }
 
   /**
@@ -432,14 +465,23 @@ function boardPanel() {
    * @param {import("../api.js").Scene} scene
    * @returns {HTMLElement}
    */
-  function sceneCard(scene) {
-    const job = activeJobFor(scene.id);
+  function sceneCard(scene, select) {
     const asset = latestAssetForScene(assets, scene.id, "visual");
     const card = el("article", {
       class: "scene-card" + (scene.locked ? " locked" : ""),
       dataset: { sceneId: scene.id },
     });
-    card.append(mediaRegion(scene, asset), bodyRegion(scene, job, asset));
+    card.append(
+      mediaRegion(scene, asset),
+      el("div", { class: "body" },
+        el("button", {
+          class: "board-scene-title", type: "button", dataset: { boardSelect: scene.id }, onclick: () => select(scene),
+          "aria-label": `Scene ${(scene.index ?? 0) + 1} · ${scene.title}`,
+        }, scene.title),
+        el("div", { class: "row board-card-meta" }, sceneStatusBadge(scene.status, scene.locked),
+          asset?.seed != null ? el("span", { class: "small muted mono" }, `seed ${asset.seed}`) : null),
+      ),
+    );
     return card;
   }
 
@@ -506,7 +548,6 @@ function mediaRegion(scene, asset) {
         el("span", { class: "muted small" }, "stored locally - media streaming not available yet"),
       ));
     }
-    if (asset.seed != null) media.append(el("span", { class: "seed-chip" }, `seed ${asset.seed}`));
   } else {
     media.append(el("div", { class: "media-placeholder" },
       el("span", { class: "kind" }, scene.visual_type || "no visual"),
@@ -514,6 +555,11 @@ function mediaRegion(scene, asset) {
     ));
   }
   if (scene.locked) media.append(el("span", { class: "lock-pill" }, "Locked"));
+  media.append(
+    el("span", { class: "board-media-label board-media-number", "aria-hidden": "true" },
+      String((scene.index ?? 0) + 1).padStart(2, "0")),
+    el("span", { class: "board-media-label board-media-duration" }, fmtDuration(scene.duration || 0)),
+  );
   return media;
 }
 
@@ -539,9 +585,10 @@ function mediaUrl(asset) {
  * @param {import("../api.js").Scene} scene
  * @param {import("../api.js").GenerationJob|null} job
  * @param {import("../api.js").Asset|null} asset
+ * @param {boolean} detailsOpen
  * @returns {HTMLElement}
  */
-function bodyRegion(scene, job, asset) {
+function bodyRegion(scene, job, asset, detailsOpen) {
   const body = el("div", { class: "body" });
   const num = (scene.index ?? 0) + 1;
   body.append(
@@ -570,7 +617,25 @@ function bodyRegion(scene, job, asset) {
       `Scene ${scene.status} - generate a visual to recover.`,
     ));
   }
-  body.append(el("div", { class: "sc-actions" }, ...actionButtons(scene, job, asset)));
+  body.append(el("section", { class: "board-section" },
+    el("h3", {}, "Review"),
+    el("div", { class: "sc-actions" }, ...actionButtons(scene, job, asset)),
+  ));
+  if (scene.visual_prompt || scene.narration) body.append(
+    el("details", { class: "board-section board-details", open: detailsOpen },
+      el("summary", {}, "Scene direction & narration"),
+      el("div", { class: "stack" },
+        scene.visual_prompt ? el("section", {},
+          el("h3", {}, "Visual direction"),
+          el("p", { class: "small muted" }, scene.visual_prompt),
+        ) : null,
+        scene.narration ? el("section", {},
+          el("h3", {}, "Narration"),
+          el("p", { class: "board-narration" }, scene.narration),
+        ) : null,
+      ),
+    ),
+  );
   return body;
 }
 
@@ -667,7 +732,11 @@ function actionButtons(scene, job, asset) {
     btns.push(act("Generate", () => generate(scene),
       { title: "Generate this scene's visual.", pendingLabel: "Generating…" }));
   }
-  if (scene.status === "generated") btns.push(act("Approve", () => approve(scene, false)));
+  if (scene.status === "generated") {
+    const approveBtn = act("Approve", () => approve(scene, false));
+    approveBtn.classList.add("btn-primary");
+    btns.unshift(approveBtn);
+  }
   if (scene.status === "generated" || scene.status === "approved") {
     btns.push(act("Lock", () => approve(scene, true),
       { title: "Lock prevents editing or regeneration until unlocked." }));

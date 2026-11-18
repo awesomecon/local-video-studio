@@ -47,6 +47,8 @@ H3_FIRST_FRAME_WORKFLOW_PATH = (
 
 KREA2_WORKFLOW_VERSION = "krea2-turbo-fp8-v1"
 QWEN_IMAGE_2512_WORKFLOW_VERSION = "qwen-image-2512-fp8-v1"
+QWEN_IMAGE_21_WORKFLOW_PATH = REPO_ROOT / "workflows" / "comfyui" / "qwen-image-2.1.workflow.json"
+QWEN_IMAGE_21_WORKFLOW_VERSION = "qwen-image-2.1-int8-v1"
 
 #: Reference roles that can condition an H3 generation through the first-frame
 #: input slot. Every other role would be silently ignored by the wired
@@ -347,9 +349,12 @@ def build_qwen_image_request(
     instructions, mirroring scene-scope behavior; mission-critical wording
     should still travel through HTML overlays.
     """
-    _reject_unsupported_references(
-        shot, references, _STILL_IMAGE_REFERENCE_ROLES, "qwen_image_2512_comfyui",
-    )
+    qwen21 = shot.visual_type is VisualType.QWEN_IMAGE_21_STILL
+    backend_name = "qwen_image_21_comfyui" if qwen21 else "qwen_image_2512_comfyui"
+    model_key = "qwen_image_21" if qwen21 else "qwen_image_2512"
+    workflow = QWEN_IMAGE_21_WORKFLOW_PATH if qwen21 else QWEN_IMAGE_2512_WORKFLOW_PATH
+    workflow_version = QWEN_IMAGE_21_WORKFLOW_VERSION if qwen21 else QWEN_IMAGE_2512_WORKFLOW_VERSION
+    _reject_unsupported_references(shot, references, _STILL_IMAGE_REFERENCE_ROLES, backend_name)
     width, height = qwen_image_canvas(shot.settings, project.resolution)
     prompt = shot.visual_prompt.strip()
     raw_text = shot.settings.get("on_screen_text", [])
@@ -370,15 +375,15 @@ def build_qwen_image_request(
         "shot_id": shot.id,
         "width": width,
         "height": height,
-        "steps": 50,
-        "cfg": 4.0,
+        "steps": 25 if qwen21 else 50,
+        "cfg": 1.0 if qwen21 else 4.0,
         "sampler": "euler",
         "scheduler": "simple",
-        "model_sampling_shift": 3.1,
+        "model_sampling_shift": 1.0 if qwen21 else 3.1,
         "on_screen_text": requested_text,
     }
     request = GenerationRequest(
-        job_id=job_id or f"{project.id}:shot-qwen-image-2512:{shot.id}:{shot.seed}",
+        job_id=job_id or f"{project.id}:shot-qwen-image-{'2.1' if qwen21 else '2512'}:{shot.id}:{shot.seed}",
         output_dir=output_dir,
         prompt=prompt,
         negative_prompt=negative,
@@ -387,15 +392,15 @@ def build_qwen_image_request(
         height=height,
         settings={
             "kind": "image",
-            "workflow": QWEN_IMAGE_2512_WORKFLOW_PATH,
-            "workflow_version": QWEN_IMAGE_2512_WORKFLOW_VERSION,
+            "workflow": workflow,
+            "workflow_version": workflow_version,
             "shot_id": shot.id,
             "scene_id": shot.scene_id,
         },
     )
     cache_payload: dict[str, Any] = {
-        "kind": "qwen_image_2512",
-        "workflow_version": QWEN_IMAGE_2512_WORKFLOW_VERSION,
+        "kind": model_key,
+        "workflow_version": workflow_version,
         **dict(backend_identity),
         "prompt": prompt,
         "negative_prompt": negative,
@@ -413,7 +418,7 @@ def build_qwen_image_request(
     provenance = {
         **_base_provenance(shot, project, backend_identity),
         **parameters,
-        "workflow_version": QWEN_IMAGE_2512_WORKFLOW_VERSION,
+        "workflow_version": workflow_version,
         "references": _reference_cache_entries(()),
     }
     return ShotGenerationPlan(request=request, cache_payload=cache_payload, provenance=provenance)
@@ -515,6 +520,7 @@ BUILDER_BACKEND_NAMES: dict[VisualType, str] = {
     VisualType.KREA2_STILL: "krea2_comfyui",
     VisualType.IMAGE_MOTION: "krea2_comfyui",
     VisualType.QWEN_IMAGE_STILL: "qwen_image_2512_comfyui",
+    VisualType.QWEN_IMAGE_21_STILL: "qwen_image_21_comfyui",
     VisualType.H3_AUDIOVISUAL: "comfyui",
     VisualType.H3_REFERENCE: "comfyui",
 }
@@ -539,6 +545,7 @@ def build_shot_request(
         VisualType.KREA2_STILL: build_krea2_request,
         VisualType.IMAGE_MOTION: build_krea2_request,
         VisualType.QWEN_IMAGE_STILL: build_qwen_image_request,
+        VisualType.QWEN_IMAGE_21_STILL: build_qwen_image_request,
         VisualType.H3_AUDIOVISUAL: build_h3_request,
         VisualType.H3_REFERENCE: build_h3_request,
     }.get(visual_type)

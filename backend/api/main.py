@@ -140,7 +140,7 @@ class VisualBatchRequest(BaseModel):
     def validate_image_model(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        valid = {"krea", "qwen_image", "ideogram4_local"}
+        valid = {"krea", "qwen_image", "qwen_image_21", "ideogram4_local"}
         if value not in valid:
             raise ValueError(f"image_model must be one of: {', '.join(sorted(valid))}")
         return value
@@ -204,7 +204,7 @@ class SceneEdit(BaseModel):
     def validate_preferred_image_model(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        valid = {"automatic", "krea", "qwen_image", "ideogram4_local"}
+        valid = {"automatic", "krea", "qwen_image", "qwen_image_21", "ideogram4_local"}
         if value not in valid:
             raise ValueError(
                 f"preferred_image_model must be one of: {', '.join(sorted(valid))}"
@@ -282,7 +282,7 @@ class PerformanceTagsGenerateRequest(BaseModel):
     #: Script-override text to tag instead of the scene narration. ``None``
     #: (the default) tags the narration that would actually be generated.
     text: str | None = None
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
     notes: str = Field(default="", max_length=2000)
     #: Re-tag over an existing script instead of returning it unchanged.
@@ -299,7 +299,7 @@ class PerformanceTagsSaveRequest(BaseModel):
     """Body for PUT /api/projects/{id}/tts/performance-tags."""
 
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     segments: list[PerformanceTagsSegmentEdit] = Field(min_length=1)
 
 
@@ -307,7 +307,7 @@ class PerformanceTagsRegenerateRequest(BaseModel):
     """Body for POST /api/projects/{id}/tts/performance-tags/regenerate."""
 
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro"
+    provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro"
     #: Key of the single segment to re-tag (e.g. ``scene:<id>`` or ``override``).
     key: str = Field(min_length=1, max_length=200)
     intensity: Literal["subtle", "balanced", "expressive"] = "balanced"
@@ -448,9 +448,10 @@ class GeminiKeyRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=512)
 
 
-_COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "wan_comfyui", "ace_step_comfyui"})
+_COMFYUI_BACKENDS = frozenset({"comfyui", "flux_comfyui", "krea2_comfyui", "qwen_image_2512_comfyui", "qwen_image_21_comfyui", "wan_comfyui", "ace_step_comfyui"})
 _TTS_BACKENDS = frozenset({
     "qwen_tts", "step_audio_editx", "chatterbox", "higgs_tts_3", "gemini_tts",
+    "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
 })
 
 
@@ -884,6 +885,7 @@ def create_app(
             "qwen_tts", "step_audio_editx", "chatterbox",
             "fish_s2_pro", "voxcpm2", "omnivoice", "index_tts_2_5",
             "breeze_tts_2", "higgs_tts_3", "gemini_tts",
+            "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         )
         models: dict[str, Any] = {}
         for name in names:
@@ -1004,17 +1006,21 @@ def create_app(
         backend = LocalLLMBackend(
             base_url=settings.llm.base_url,
             api_key_env=settings.llm.api_key_env,
-            model=configured_model,
             timeout_seconds=min(settings.llm.timeout_seconds, 3.0),
         )
-        health_result = backend.health(check_completion=False)
-        if health_result.get("status") != "healthy":
-            raise HTTPException(status_code=503, detail=health_result.get("error", {}))
+        try:
+            model_ids = [record["id"] for record in backend.discover_models()]
+        except BackendError as exc:
+            raise HTTPException(status_code=503, detail=exc.as_dict()) from None
+        selected_model = None if configured_model == "auto" else configured_model
+        resolved_model = selected_model if selected_model in model_ids else None
+        if selected_model is None and model_ids:
+            resolved_model = model_ids[0]
         return {
             "endpoint": settings.llm.base_url,
-            "models": [{"id": model_id} for model_id in health_result.get("models", [])],
-            "selected_model": None if configured_model == "auto" else configured_model,
-            "resolved_model": health_result.get("selected_model"),
+            "models": [{"id": model_id} for model_id in model_ids],
+            "selected_model": selected_model,
+            "resolved_model": resolved_model,
         }
 
     @application.put("/api/llm/models")
@@ -1352,14 +1358,22 @@ def create_app(
             retimed = service.retimed_editorial_plan(project_id)
             if retimed is not None:
                 plan = retimed
+            project = service._project(project_id)
+            root = service.store.project_path(project)
+            narration_url = (
+                f"/api/projects/{project_id}/editorial/preview/narration"
+                if service.editorial_narration_path(project) is not None else None
+            )
             html = compile_edit_plan_html(
                 plan,
-                asset_root=service.store.project_path(service._project(project_id)),
+                asset_root=root,
                 asset_url_resolver=lambda asset: (
                     f"/api/projects/{project_id}/assets/{asset.asset_id}/file"
                     if asset.asset_id else None
                 ),
                 captions=service.editorial_preview_captions(project_id),
+                interactive_preview=True,
+                narration_url=narration_url,
             )
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -1371,11 +1385,22 @@ def create_app(
                 "Content-Security-Policy": (
                     "default-src 'none'; img-src 'self' data: blob:; "
                     "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                    "font-src 'self' data:"
+                    "font-src 'self' data:; media-src 'self'"
                 ),
                 "Cache-Control": "no-store",
             },
         )
+
+    @application.get("/api/projects/{project_id}/editorial/preview/narration")
+    def preview_editorial_narration(project_id: str) -> FileResponse:
+        try:
+            project = service._project(project_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Project not found") from None
+        narration = service.editorial_narration_path(project)
+        if project.video_mode is not VideoMode.EDITORIAL or narration is None:
+            raise HTTPException(status_code=404, detail="Editorial narration is unavailable")
+        return FileResponse(narration, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     @application.get("/api/projects/{project_id}/tts/voices")
     def list_voice_profiles(project_id: str) -> dict[str, Any]:
@@ -1572,7 +1597,10 @@ def create_app(
                 )
             if request.voice_profile_id:
                 service.tts.get_voice_profile(project_id, request.voice_profile_id)
-            elif request.provider not in {"chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts"}:
+            elif request.provider not in {
+                "chatterbox", "qwen_tts", "higgs_tts_3", "gemini_tts",
+                "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
+            }:
                 raise ValueError(f"{request.provider} requires an authorized reference voice")
             elif request.enhance_with_step:
                 raise ValueError("Step enhancement requires an authorized reference voice")
@@ -1631,7 +1659,7 @@ def create_app(
     @application.get("/api/projects/{project_id}/tts/performance-tags")
     def get_performance_tags(
         project_id: str,
-        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+        provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro",
     ) -> dict[str, Any]:
         """Current provider-scoped delivery-tag script, staleness, and LLM state."""
         try:
@@ -1659,7 +1687,7 @@ def create_app(
                         "stale": service.tts.performance_script_is_stale(project_id, saved) if saved else False,
                         "tag_count": saved.tag_count if saved else 0,
                     }
-                    for name in ("fish_s2_pro", "higgs_tts_3")
+                    for name in ("fish_s2_pro", "higgs_tts_3", "fish_drama_3")
                     for saved in [service.tts.get_performance_script(project_id, name)]
                 },
                 "script": script.model_dump(mode="json") if script is not None else None,
@@ -1771,7 +1799,7 @@ def create_app(
     @application.delete("/api/projects/{project_id}/tts/performance-tags")
     def delete_performance_tags(
         project_id: str,
-        provider: Literal["fish_s2_pro", "higgs_tts_3"] = "fish_s2_pro",
+        provider: Literal["fish_s2_pro", "higgs_tts_3", "fish_drama_3"] = "fish_s2_pro",
     ) -> dict[str, Any]:
         try:
             service.tts.clear_performance_script(project_id, provider)

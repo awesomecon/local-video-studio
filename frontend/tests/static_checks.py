@@ -214,6 +214,7 @@ ALLOWED_STORAGE_KEYS = {
     "lvs-current-project",
     "lvs-alert-sound",
     "lvs-nav-collapsed",
+    "lvs-theme",
     "lvs-recovery-seen",
 }
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "www.w3.org"}  # last: SVG namespace

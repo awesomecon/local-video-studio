@@ -31,16 +31,18 @@ def _reject_shared_spec_ports(specs: Mapping[str, TTSWorkerSpec]) -> None:
     """Two managed providers must never target the same loopback port."""
     owners: dict[int, str] = {}
     for provider, spec in specs.items():
-        port = _endpoint_port(spec.endpoint)
-        if port is None:
-            continue
-        other = owners.get(port)
-        if other is not None:
-            raise ValueError(
-                f"Managed TTS workers {other} and {provider} both claim port {port}; "
-                "each provider requires its own loopback port."
-            )
-        owners[port] = provider
+        for port in (_endpoint_port(spec.endpoint), spec.runtime_port):
+            if port is None:
+                continue
+            if spec.runtime_port == port and port in RESERVED_EXTERNAL_PORTS:
+                raise ValueError(f"Managed TTS port {port} is in RESERVED_EXTERNAL_PORTS")
+            other = owners.get(port)
+            if other is not None:
+                raise ValueError(
+                    f"Managed TTS workers {other} and {provider} both claim port {port}; "
+                    "each provider requires its own loopback port."
+                )
+            owners[port] = provider
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,10 @@ class TTSWorkerSpec:
     model_path: Path
     tokenizer_path: Path | None
     startup_timeout_seconds: float
+    source_path: Path | None = None
+    runtime_path: Path | None = None
+    runtime_port: int | None = None
+    cache_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -91,7 +97,7 @@ class TTSWorkerSupervisor:
         specs: dict[str, TTSWorkerSpec] = {}
         for provider in (
             "qwen_tts", "step_audio_editx", "chatterbox", "omnivoice",
-            "breeze_tts_2", "higgs_tts_3",
+            "breeze_tts_2", "higgs_tts_3", "fish_drama_3", "ming_tts_tiny", "ming_tts_05b",
         ):
             item = getattr(config.backends, provider)
             if not item.enabled or not item.managed:
@@ -104,6 +110,10 @@ class TTSWorkerSupervisor:
                 model_path=item.model_path,
                 tokenizer_path=item.tokenizer_path,
                 startup_timeout_seconds=item.startup_timeout_seconds,
+                source_path=item.source_path,
+                runtime_path=item.runtime_path,
+                runtime_port=item.runtime_port,
+                cache_path=item.cache_path,
             )
         return cls(
             specs,
@@ -159,6 +169,21 @@ class TTSWorkerSupervisor:
                 "LVS_AI_CACHE_ROOT": str(self.cache_root),
                 "PYTHONUNBUFFERED": "1",
             })
+            if provider in {"fish_drama_3", "ming_tts_tiny", "ming_tts_05b"}:
+                cache_root = spec.cache_path or self.cache_root
+                environment.update({
+                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_TELEMETRY": "1", "DO_NOT_TRACK": "1",
+                    "LVS_AI_CACHE_ROOT": str(cache_root),
+                    "HF_HOME": str(cache_root / "huggingface"),
+                    "HUGGINGFACE_HUB_CACHE": str(cache_root / "huggingface/hub"),
+                    "TORCH_HOME": str(cache_root / "torch"),
+                    "XDG_CACHE_HOME": str(cache_root),
+                    "TRITON_CACHE_DIR": str(cache_root / "triton"),
+                    "TORCH_EXTENSIONS_DIR": str(cache_root / "torch_extensions"),
+                    "TMPDIR": str(cache_root / "tmp"),
+                })
+                (cache_root / "tmp").mkdir(parents=True, exist_ok=True)
             try:
                 process = self._popen_factory(
                     command,
@@ -255,6 +280,10 @@ class TTSWorkerSupervisor:
         ]
         if spec.tokenizer_path is not None:
             command.extend(("--tokenizer-path", str(spec.tokenizer_path)))
+        for flag, value in (("--source-path", spec.source_path), ("--runtime-path", spec.runtime_path),
+                            ("--runtime-port", spec.runtime_port)):
+            if value is not None:
+                command.extend((flag, str(value)))
         return command
 
     def _wait_until_healthy(
