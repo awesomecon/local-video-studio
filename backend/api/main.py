@@ -1354,14 +1354,22 @@ def create_app(
             retimed = service.retimed_editorial_plan(project_id)
             if retimed is not None:
                 plan = retimed
+            project = service._project(project_id)
+            root = service.store.project_path(project)
+            narration_url = (
+                f"/api/projects/{project_id}/editorial/preview/narration"
+                if service.editorial_narration_path(project) is not None else None
+            )
             html = compile_edit_plan_html(
                 plan,
-                asset_root=service.store.project_path(service._project(project_id)),
+                asset_root=root,
                 asset_url_resolver=lambda asset: (
                     f"/api/projects/{project_id}/assets/{asset.asset_id}/file"
                     if asset.asset_id else None
                 ),
                 captions=service.editorial_preview_captions(project_id),
+                interactive_preview=True,
+                narration_url=narration_url,
             )
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -1373,11 +1381,22 @@ def create_app(
                 "Content-Security-Policy": (
                     "default-src 'none'; img-src 'self' data: blob:; "
                     "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                    "font-src 'self' data:"
+                    "font-src 'self' data:; media-src 'self'"
                 ),
                 "Cache-Control": "no-store",
             },
         )
+
+    @application.get("/api/projects/{project_id}/editorial/preview/narration")
+    def preview_editorial_narration(project_id: str) -> FileResponse:
+        try:
+            project = service._project(project_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Project not found") from None
+        narration = service.editorial_narration_path(project)
+        if project.video_mode is not VideoMode.EDITORIAL or narration is None:
+            raise HTTPException(status_code=404, detail="Editorial narration is unavailable")
+        return FileResponse(narration, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     @application.get("/api/projects/{project_id}/tts/voices")
     def list_voice_profiles(project_id: str) -> dict[str, Any]:

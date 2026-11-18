@@ -18,3 +18,17 @@
 export function effectiveVideoMode(project) {
   return project?.video_mode === "editorial" ? "editorial" : "classic";
 }
+
+export const VIDEO_MODE_OPTIONS = [
+  { value: "classic", label: "Classic — Build shots in a storyboard" },
+  { value: "editorial", label: "Editorial — Build graphics around narration" },
+];
+
+export function editorialMediaIssues(editorial) {
+  return Object.entries(editorial?.media_issues || {}).flatMap(([compositionId, issues]) =>
+    Array.isArray(issues) ? issues.map((issue) => ({ compositionId, issue })) : []);
+}
+
+export function missingEditorialMediaLabel(count) {
+  return `Replace ${count} missing ${count === 1 ? "visual" : "visuals"}`;
+}

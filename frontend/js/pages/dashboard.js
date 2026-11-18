@@ -30,7 +30,26 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate, syncProjectChrome } from "../app.js";
-import { effectiveVideoMode } from "../video-mode.js";
+import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
+
+export function editorialNextStep(snap) {
+  const editorial = snap.editorial;
+  const stages = snap.stage_state?.stages || {};
+  const hasNarration = editorial?.has_narration ?? (stages.narration?.status === "completed");
+  const missing = editorialMediaIssues(editorial).length;
+  if (!snap.scenes?.length && editorial?.has_edit_plan !== true) {
+    return ["#/script", "Start with Script", "Script needed"];
+  }
+  if (!hasNarration) return ["#/voice", "Add narration", "Generate a voice take or import a recording"];
+  if (editorial?.has_edit_plan !== true) return ["#/editorial", "Build Edit Plan", "Narration ready"];
+  if (missing) return ["#/editorial", missingEditorialMediaLabel(missing), "Some compositions still use placeholders"];
+  if (editorial.plan_status === "stale" || editorial.stale === true) {
+    return ["#/editorial", "Review Edit Plan changes", "The script, brief, or timing has changed"];
+  }
+  if (stages.render_final?.status === "completed") return ["#/export", "Open delivery", "Final video rendered"];
+  if (stages.render_preview?.status === "completed") return ["#/export", "Review preview and export", "Video preview rendered"];
+  return ["#/editorial", "Review the cut", "Play the sequence with narration"];
+}
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -296,18 +315,16 @@ function renderSelectedOverview(onCover) {
     const stages = snap.stage_state?.stages || {};
     const approved = scenes.filter((scene) => ["approved", "locked"].includes(scene.status) && !scene.shot_summary?.stale).length;
     const editorial = effectiveVideoMode(p) === "editorial";
-    const plan = snap.editorial;
-    const hasPlan = plan?.has_edit_plan === true;
-    const next = !scenes.length ? ["#/script", "Start with Script"]
-      : editorial ? ["#/editorial", hasPlan ? "Open Edit Plan" : "Build Edit Plan"]
-      : approved < scenes.length ? ["#/storyboard", "Review storyboard"]
-      : stages.render_final?.status === "completed" ? ["#/export", "Open delivery"]
-      : ["#/timeline", "Review the sequence"];
+    const [nextRoute, nextLabel, editorialSummary] = editorial ? editorialNextStep(snap)
+      : !scenes.length ? ["#/script", "Start with Script"]
+        : approved < scenes.length ? ["#/storyboard", "Review storyboard"]
+          : stages.render_final?.status === "completed" ? ["#/export", "Open delivery"]
+            : ["#/timeline", "Review the sequence"];
     const localImage = (asset) => asset?.url?.startsWith(`/api/projects/${encodeURIComponent(p.id)}/assets/`) && ["image", "thumbnail"].includes(asset.type);
     const cover = assets.find((asset) => asset.current !== false && asset.settings?.role === "thumbnail" && localImage(asset))
       || scenes.map((scene) => latestAssetForScene(assets, scene.id, "visual")).find(localImage);
     onCover(p.id, cover || null);
-    const summary = editorial ? (hasPlan ? (plan?.stale ? "Edit Plan needs review" : "Edit Plan available") : "Edit Plan pending")
+    const summary = editorial ? editorialSummary
       : scenes.length ? `${approved} of ${scenes.length} scenes approved` : "No scenes planned";
     return el("div", {},
       el("article", { class: "welcome-feature" },
@@ -320,8 +337,8 @@ function renderSelectedOverview(onCover) {
           el("p", { class: "small muted" }, `${scenes.length} scenes · ${fmtDuration(p.target_duration)} · ${p.aspect_ratio}`),
           editorial || !scenes.length ? null : progress(approved / scenes.length),
           el("p", { class: "small" }, summary),
-          el("button", { class: "btn btn-primary welcome-continue", type: "button", onclick: () => openProject(p.id, next[0]) },
-            next[1], icon("chevron", 14)),
+          el("button", { class: "btn btn-primary welcome-continue", type: "button", onclick: () => openProject(p.id, nextRoute) },
+            nextLabel, icon("chevron", 14)),
         ),
       ),
       Object.keys(stages).length

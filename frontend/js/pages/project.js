@@ -6,7 +6,7 @@
  *  - Editable fields mirror the backend `ProjectEdit` contract (extra="forbid"):
  *    title, topic, video_mode, duration_mode, target_duration, aspect_ratio,
  *    fps, resolution, style, audience, narrator_preference, visual_quality,
- *    instructions. `video_mode` ("Video Style") omitted on old projects is
+ *    instructions. `video_mode` ("Workflow") omitted on old projects is
  *    classic; a mode change is a brief-level change and is only PATCHed when
  *    it differs from the saved value.
  *  - Read-only provenance: status, directory, selected script model, created /
@@ -118,7 +118,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate, syncProjectChrome } from "../app.js";
-import { effectiveVideoMode } from "../video-mode.js";
+import { effectiveVideoMode, VIDEO_MODE_OPTIONS } from "../video-mode.js";
 
 /** Editable brief fields and how they map to controls. */
 const TEXT_FIELDS = [
@@ -137,10 +137,6 @@ const NUMBER_FIELDS = [
 ];
 const ASPECT_OPTIONS = ["16:9", "9:16", "1:1"];
 const DURATION_MODE_OPTIONS = ["fixed", "llm"];
-const VIDEO_MODE_OPTIONS = [
-  { value: "classic", label: "Classic — Existing scene-based generator" },
-  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
-];
 const BRIEF_FIELDS = new Set([
   "title", "topic", "style", "audience", "visual_quality", "instructions",
   "duration_mode", "video_mode",
@@ -274,8 +270,8 @@ function buildForm(snap, projectId) {
   const fTitle = textField(inputs, "title", p.title, { required: true, max: 1000, hint: "Required, up to 1000 characters." });
   const fTopic = textField(inputs, "topic", p.topic, { required: true, max: 500, hint: "Required, up to 500 characters." });
   const fVideoMode = selectField(inputs, "video_mode", effectiveVideoMode(p), VIDEO_MODE_OPTIONS, {
-    label: "Video Style",
-    hint: "Classic: the existing scene-based generator. Editorial: motion-graphics compositions.",
+    label: "Workflow",
+    hint: "Choose where you’ll build and edit the picture.",
   });
   const fDuration = numberField(inputs, "target_duration", p.target_duration, { min: 0.0001, step: "any", hint: "Greater than 0." });
   const fDurationMode = selectField(inputs, "duration_mode", p.duration_mode || "fixed", DURATION_MODE_OPTIONS, {
@@ -284,7 +280,10 @@ function buildForm(snap, projectId) {
   const fAspect = selectField(inputs, "aspect_ratio", p.aspect_ratio, ASPECT_OPTIONS);
   const fFps = numberField(inputs, "fps", p.fps, { min: 1, max: 240, step: 1, hint: "1–240." });
   const fResolution = resolutionField(inputs, p.resolution, { hint: "Positive pixels." });
-  const fStyle = textField(inputs, "style", p.style, { required: true, max: 100, hint: "Required, up to 100 characters." });
+  const fStyle = textField(inputs, "style", p.style, {
+    label: "Creative direction", required: true, max: 100,
+    hint: "Guide the writing and imagery, for example a cinematic documentary.",
+  });
   const fAudience = textField(inputs, "audience", p.audience, { required: true, max: 100, hint: "Required, up to 100 characters." });
   const fNarrator = textField(inputs, "narrator_preference", p.narrator_preference || "", { nullable: true, max: 300, hint: "Optional, up to 300 characters." });
   const fQuality = textField(inputs, "visual_quality", p.visual_quality, { required: true, max: 100, hint: "Required, up to 100 characters." });

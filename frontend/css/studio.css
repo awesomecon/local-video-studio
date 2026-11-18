@@ -110,6 +110,30 @@
 }
 .brief-layout > *, .delivery-layout > *, .script-layout > * { min-width: 0; }
 .brief-layout aside .panel { margin-bottom: 0; }
+.brief-style-preview { margin: 0; }
+.brief-archive-sample {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 10px;
+  aspect-ratio: 16 / 9;
+  margin: 12px 0;
+  padding: 10px;
+  overflow: hidden;
+  border: 1px solid #35404a;
+  border-radius: var(--radius-sm);
+  background: #141719;
+  color: #e9dfc6;
+}
+.brief-archive-sample span:first-child { font-size: clamp(26px, 4vw, 48px); font-weight: 800; }
+.brief-archive-sample span:last-child {
+  padding: 8% 6%;
+  transform: rotate(3deg);
+  background: #e9dfc6;
+  color: #25211d;
+  font: bold clamp(12px, 1.5vw, 20px) Georgia, serif;
+}
 .studio-disclosure {
   padding: 12px 14px;
   border: 1px solid var(--line);

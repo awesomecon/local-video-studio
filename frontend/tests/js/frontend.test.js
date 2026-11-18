@@ -200,6 +200,7 @@ import {
   previewAspectRatio,
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
+import { editorialNextStep } from "../../js/pages/dashboard.js";
 import { performancePanel } from "../../js/pages/voice.js";
 import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
@@ -542,9 +543,31 @@ record("video-mode: reset restores the saved mode", () => {
 record("video-mode: New Project form defaults the selector to classic", () => {
   const node = renderNewProject({ name: "new-project", param: null });
   const sel = node.querySelector("#np-video-mode");
-  assert(sel, "the Video Style selector is present");
+  assert(sel, "the Workflow selector is present");
   eq(sel.value, "classic", "defaults to classic");
   eq([...sel.options].map((o) => o.value), ["classic", "editorial"], "option order");
+  assert(node.querySelector(".brief-style-preview").closest("[hidden]"), "Classic hides the Archive Dossier example");
+  sel.value = "editorial";
+  sel.dispatchEvent(new Event("change"));
+  assert(!node.querySelector(".brief-style-preview").closest("[hidden]"), "Editorial shows the Archive Dossier example");
+});
+
+record("dashboard: Editorial guidance follows narration, visuals, review and delivery", () => {
+  const snapshot = { scenes: [{}], editorial: { has_narration: false, has_edit_plan: false } };
+  eq(editorialNextStep({ ...snapshot, scenes: [] })[0], "#/script");
+  eq(editorialNextStep(snapshot)[0], "#/voice");
+  snapshot.editorial.has_narration = true;
+  eq(editorialNextStep(snapshot)[1], "Build Edit Plan");
+  snapshot.editorial.has_edit_plan = true;
+  snapshot.editorial.media_issues = { intro: ["photo missing"], closing: ["document missing"] };
+  eq(editorialNextStep(snapshot)[1], "Replace 2 missing visuals");
+  snapshot.editorial.media_issues = {};
+  snapshot.editorial.plan_status = "stale";
+  eq(editorialNextStep(snapshot)[1], "Review Edit Plan changes");
+  snapshot.editorial.plan_status = "current";
+  eq(editorialNextStep(snapshot)[1], "Review the cut");
+  snapshot.stage_state = { stages: { render_final: { status: "completed" } } };
+  eq(editorialNextStep(snapshot)[0], "#/export");
 });
 
 await recordAsync("video-mode: New Project POST carries the selected video_mode", async () => {

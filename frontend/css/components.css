@@ -1126,6 +1126,9 @@ a:focus-visible { box-shadow: var(--focus-ring); }
 }
 .ed-preview-well .ed-preview-frame {
   display: block;
+  width: 100%;
+  min-height: min(300px, 55vh);
+  max-height: 66vh;
   border: 0;
   border-radius: var(--radius-sm);
   background: #111;

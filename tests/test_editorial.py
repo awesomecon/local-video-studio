@@ -6,7 +6,9 @@ import re
 import subprocess
 import time
 import urllib.request
+from contextlib import closing, nullcontext
 from html import escape
+from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 from unittest.mock import Mock
@@ -14,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
+from backend.editorial import renderer as editorial_renderer
 from backend.editorial import (
     EditorialAsset, EditorialAssetType, EditorialCaptionStyle,
     EditorialImageGeneration, EvidenceClass,
@@ -36,6 +39,7 @@ from backend.captions import CaptionWord
 from backend.core import load_config
 from backend.pipeline import PipelineService
 from backend.rendering.binaries import require_ffmpeg
+from backend.rendering import process as media_process
 from backend.graphics.browser import discover_chromium
 from backend.rendering.probe import probe_media
 from backend.rendering.process import run_media_process
@@ -70,6 +74,41 @@ def test_prototype_is_valid_and_uses_only_approved_vocabulary() -> None:
     assert [event.time for event in plan.compositions[0].events] == sorted(
         event.time for event in plan.compositions[0].events
     )
+
+
+def test_editorial_renderer_retries_until_chromium_port_is_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "chrome-profile"
+    process = Mock()
+    process.poll.return_value = None
+
+    def launch(*args: object, **kwargs: object) -> nullcontext[Mock]:
+        (profile / "DevToolsActivePort").touch()
+        return nullcontext(process)
+
+    read_port = Mock(side_effect=[
+        PermissionError("Chromium is writing the file"), "922", "9222\n/devtools/browser/test",
+    ])
+    page_url = "ws://127.0.0.1:9222/devtools/page/test"
+    open_targets = Mock(return_value=BytesIO(json.dumps([
+        {"type": "page", "webSocketDebuggerUrl": page_url},
+    ]).encode()))
+    client = Mock()
+    client.command.return_value = {"result": {"value": {"ready": True}}, "data": "ZnJhbWU="}
+    connect = Mock(return_value=client)
+    monkeypatch.setattr(media_process, "owned_media_process", launch)
+    monkeypatch.setattr(Path, "read_text", read_port)
+    monkeypatch.setattr(urllib.request, "urlopen", open_targets)
+    monkeypatch.setattr(editorial_renderer, "_CDP", connect)
+
+    renderer = editorial_renderer.EditorialRenderer(Path("chromium"))
+    plan = build_project_mars_prototype()
+    with closing(renderer._capture_frames(plan, tmp_path / "plan.html", profile)) as frames:
+        assert next(frames) == b"frame"
+    assert read_port.call_count == 3
+    open_targets.assert_called_once_with("http://127.0.0.1:9222/json", timeout=2)
+    connect.assert_called_once_with(page_url)
 
 
 def test_edit_plan_rejects_unknown_motion_and_targets() -> None:

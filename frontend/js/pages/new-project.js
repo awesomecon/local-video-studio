@@ -11,11 +11,7 @@ import { state, persistCurrentProject, upsertProject } from "../state.js";
 import { createProject } from "../api.js";
 import { field, setFieldError, errorPanel, toast } from "../ui.js";
 import { navigate } from "../router.js";
-
-const VIDEO_MODE_OPTIONS = [
-  { value: "classic", label: "Classic — Existing scene-based generator" },
-  { value: "editorial", label: "Editorial — Motion-graphics compositions" },
-];
+import { VIDEO_MODE_OPTIONS } from "../video-mode.js";
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -58,9 +54,9 @@ export function renderNewProject(_route) {
   const fTitle = field({ label: "Title", input: titleInput, hint: "Required, up to 1000 characters. The slug is generated from this." });
   const fTopic = field({ label: "Topic", input: topicInput, hint: "Required." });
   const fVideoMode = field({
-    label: "Video Style",
+    label: "Workflow",
     input: videoModeSelect,
-    hint: "Classic uses the existing scene-based generator; Editorial builds motion-graphics compositions.",
+    hint: "Choose where you’ll build and edit the picture.",
   });
   const fDuration = field({ label: "Target duration (seconds)", input: durationInput, hint: "Greater than 0." });
   const fDurationMode = field({
@@ -71,7 +67,11 @@ export function renderNewProject(_route) {
   const fAspect = field({ label: "Aspect ratio", input: aspectSelect });
   const fFps = field({ label: "FPS", input: fpsInput, hint: "1–240." });
   const fResolution = field({ label: "Resolution (width × height)", input: resolutionRow, hint: "Positive pixels; 1920×1080 for 16:9, 1080×1920 for 9:16." });
-  const fStyle = field({ label: "Style", input: styleInput, hint: "e.g. documentary, cinematic." });
+  const fStyle = field({
+    label: "Creative direction",
+    input: styleInput,
+    hint: "Guide the writing and imagery, for example a cinematic documentary.",
+  });
   const fAudience = field({ label: "Audience", input: audienceInput, hint: "e.g. general, technical." });
   const fNarrator = field({ label: "Narrator preference", input: narratorInput, hint: "Optional free-form preference for the voice stage." });
   const fQuality = field({ label: "Visual quality", input: qualityInput, hint: "Backend default: balanced." });
@@ -94,6 +94,26 @@ export function renderNewProject(_route) {
   }
   durationModeSelect.addEventListener("change", refreshDurationHint);
   refreshDurationHint();
+
+  const archiveSample = el("section", { class: "panel", hidden: true },
+    el("h2", { class: "panel-title" }, "Visual style"),
+    el("figure", { class: "brief-style-preview" },
+      el("div", { class: "brief-archive-sample", "aria-hidden": "true" },
+        el("span", {}, "1949"), el("span", {}, "The Mars Project")),
+      el("figcaption", {},
+        el("strong", {}, "Archive Dossier"),
+        el("p", { class: "muted small" }, "Archival documents, bold dates, and dramatic reveals."),
+      ),
+    ),
+  );
+  const classicSummary = el("section", { class: "panel" },
+    el("h2", { class: "panel-title" }, "Classic workflow"),
+    el("p", { class: "muted small" }, "Script → Storyboard → Narration → Export"),
+  );
+  videoModeSelect.addEventListener("change", () => {
+    archiveSample.hidden = videoModeSelect.value !== "editorial";
+    classicSummary.hidden = !archiveSample.hidden;
+  });
 
   /* --- validation (mirrors ProjectCreate) ------------------------------ */
   function validate() {
@@ -198,12 +218,7 @@ export function renderNewProject(_route) {
         el("h2", { class: "panel-title" }, "Project brief"),
         form,
       ),
-      el("aside", {},
-        el("section", { class: "panel" },
-          el("h2", { class: "panel-title" }, "Video styles"),
-          el("p", { class: "muted small" }, "Classic builds a storyboard of scenes and shots. Editorial builds a sequence of motion-graphics compositions from your narration."),
-        ),
-      ),
+      el("aside", {}, classicSummary, archiveSample),
     ),
   );
 }

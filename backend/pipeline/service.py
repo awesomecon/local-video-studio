@@ -131,6 +131,7 @@ from backend.editorial.planner import EditorialPlanner
 from backend.editorial.timing import retime_compositions_to_caption_sentences
 from backend.editorial.renderer import (
     EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
+    editorial_media_issues,
 )
 from backend.captions.editorial import (
     build_editorial_caption_cues, place_caption_cues, slice_caption_cues,
@@ -472,6 +473,7 @@ class PipelineService:
         }
         if project.video_mode is VideoMode.EDITORIAL:
             plan_status = self._editorial_plan_status(project)
+            root = self.store.project_path(project)
             edit_plan: EditPlan | None = None
             if plan_status["has_edit_plan"]:
                 try:
@@ -483,6 +485,8 @@ class PipelineService:
                 "plan_status": plan_status["plan_status"],
                 "stale": plan_status["stale"],
                 "stale_reasons": plan_status["stale_reasons"],
+                "has_narration": self.editorial_narration_path(project) is not None,
+                "media_issues": editorial_media_issues(edit_plan, root) if edit_plan else {},
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
                 "timeline_plan_url": f"/api/projects/{project.id}/editorial/timeline-plan",
                 "generate_url": f"/api/projects/{project.id}/editorial/plan",
@@ -599,6 +603,14 @@ class PipelineService:
         if project.video_mode is not VideoMode.EDITORIAL:
             raise ValueError("project is not in Editorial Mode")
         return self.store.load_edit_plan(project.slug)
+
+    def editorial_narration_path(self, project: Project) -> Path | None:
+        """Resolve the active narration master for the Editorial player."""
+        try:
+            path = resolve_asset_path(self.store.project_path(project), "narration/master.wav")
+            return path if path.is_file() and path.stat().st_size > 0 else None
+        except (OSError, ValueError):
+            return None
 
     def update_edit_plan_settings(
         self,

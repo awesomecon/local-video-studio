@@ -29,6 +29,7 @@ from .models import (
     EditorialTemplate,
 )
 from .passages import locate_passage
+from .preview import PREVIEW_CSS, PREVIEW_SCRIPT, preview_controls
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
@@ -215,35 +216,54 @@ def _fit_attrs(
     )
 
 
-def validate_export_assets(plan: EditPlan, asset_root: Path | None) -> None:
-    """Reject unresolved authored media before a production render starts."""
-    failures: list[str] = []
+def _local_asset_path(asset_root: Path, asset: EditorialAsset) -> Path | None:
+    if not asset.source or asset.source.startswith(("http://", "https://")):
+        return None
+    try:
+        path = resolve_asset_path(asset_root.resolve(), asset.source)
+        return path if path.is_file() and os.access(path, os.R_OK) else None
+    except (OSError, ValueError):
+        return None
+
+
+def editorial_media_issues(
+    plan: EditPlan, asset_root: Path | None,
+) -> dict[str, list[str]]:
+    """Report unresolved media referenced by compositions without loading image bytes."""
+    failures: dict[str, list[str]] = {}
     for composition in plan.compositions:
         by_id = {asset.id: asset for asset in composition.assets}
+        checked: set[str] = set()
         for element in composition.elements:
-            if not element.asset_id:
+            if not element.asset_id or element.asset_id in checked:
                 continue
+            checked.add(element.asset_id)
             asset = by_id.get(element.asset_id)
             if asset is None:
                 # The domain model normally catches this; keep the export gate
                 # defensive because it is the last boundary before rendering.
-                failures.append(
-                    f"{composition.id}/{element.role}: unknown asset {element.asset_id}"
-                )
+                reason = f"unknown asset {element.asset_id}"
+            elif asset.source and asset.source.startswith(("http://", "https://")):
+                reason = "remote media is not exportable"
+            elif asset_root is None or _local_asset_path(asset_root, asset) is None:
+                reason = "local media is missing or unreadable"
+            else:
                 continue
-            if asset.source and asset.source.startswith(("http://", "https://")):
-                failures.append(
-                    f"{composition.id}/{element.role}: remote media is not exportable"
-                )
-                continue
-            if asset_root is None or EditorialRenderer._data_asset_url(asset_root, asset) is None:
-                failures.append(
-                    f"{composition.id}/{element.role}: local media is missing or unreadable"
-                )
+            failures.setdefault(composition.id, []).append(f"{element.role}: {reason}")
+    return failures
+
+
+def validate_export_assets(plan: EditPlan, asset_root: Path | None) -> None:
+    """Reject unresolved authored media before a production render starts."""
+    failures = editorial_media_issues(plan, asset_root)
     if failures:
+        details = [
+            f"{composition_id}/{issue}"
+            for composition_id, issues in failures.items() for issue in issues
+        ]
         raise ValueError(
             "Editorial export requires resolved local media; preview placeholders cannot be "
-            "exported: " + "; ".join(failures)
+            "exported: " + "; ".join(details)
         )
 
 
@@ -478,6 +498,8 @@ def compile_edit_plan_html(
     asset_root: Path | None = None,
     captions: Sequence[dict[str, Any]] = (),
     show_placeholders: bool = True,
+    interactive_preview: bool = False,
+    narration_url: str | None = None,
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
 
@@ -518,6 +540,10 @@ def compile_edit_plan_html(
     text_class = "editorial-text-enabled" if plan.editorial_text_enabled else "editorial-text-disabled"
     caption_class = f" caption-style-{plan.caption_style.value}" if captions else ""
     placeholder_class = "preview-placeholders" if show_placeholders else "production-render"
+    preview_class = " editorial-preview" if interactive_preview else ""
+    canvas = f'<main id="stage">{markup}<div id="caption-layer"></div></main>'
+    if interactive_preview:
+        canvas = f'<div id="preview-picture">{canvas}</div>{preview_controls(narration_url)}'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -678,7 +704,8 @@ background:#f0e5c9;color:#241f19;border-left:none;padding:6px 14px;
 font-size:58px;font-weight:700;text-shadow:none;
 }}
 .landscape .caption-style-editorialPhrase .cap.highlight{{font-size:46px;padding:4px 12px}}
-</style></head><body class="archive-dossier {placeholder_class} {text_class} {orientation}{caption_class}"><main id="stage">{markup}<div id="caption-layer"></div></main>
+{PREVIEW_CSS if interactive_preview else ""}
+</style></head><body class="archive-dossier {placeholder_class} {text_class} {orientation}{caption_class}{preview_class}">{canvas}
 <script>
 "use strict";
 const PLAN={payload};
@@ -854,7 +881,35 @@ function applyEvent(root,event,t){{
     case 'staggerIn': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{nodes.forEach((node,i)=>{{const q=ease(clamp(p*1.65-i/nodes.length*.65));node.style.opacity=String(q);node.style.transform=`translateY(${{(1-q)*34}}px)`}});target.style.opacity='1';}}else{{target.style.opacity=String(p);target.style.transform=`translateY(${{(1-p)*40}}px)`;}}break;}}
     case 'dimOthers': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;nodes.forEach((node,i)=>{{node.style.opacity=String(i===focus?1:1-.78*p)}});target.style.opacity='1';}}else{{target.style.filter=`brightness(${{1-.2*p}})`;}}break;}}
     case 'focusOne': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const focus=Number(event.value)||0;const node=nodes[focus];if(node&&p>.2)node.classList.add('focus');target.style.opacity='1';}}else{{target.style.opacity='1';if(p>.2)target.classList.add('focus-mark');}}break;}}
-    case 'promoteNode': {{const nodes=[...target.querySelectorAll('.ruler-node')];if(nodes.length){{const chief=Number(event.value)||0;const rootRect=root.getBoundingClientRect();nodes.forEach((node,i)=>{{const isChief=i===chief;const number=node.querySelector('span');const label=node.querySelector('.ruler-chief');node.style.opacity=String(isChief?1:1-.72*p);if(isChief){{const nodeRect=node.getBoundingClientRect();const dx=rootRect.left+rootRect.width/2-(nodeRect.left+nodeRect.width/2);const dy=rootRect.top+rootRect.height*.36-(nodeRect.top+nodeRect.height/2);node.style.transform=`translate(${{dx*p}}px,${{dy*p}}px) scale(${{1+.32*p}})`;node.style.zIndex='5';node.classList.toggle('chief',p>.35);if(number)number.style.opacity=String(1-clamp(p/.45));if(label)label.style.opacity=String(clamp((p-.35)/.65));}}else{{node.style.transform='';node.style.zIndex='';node.classList.remove('chief');if(number)number.style.opacity='1';if(label)label.style.opacity='0';}}}});target.style.opacity='1';}}else{{target.style.opacity='1';}}break;}}
+    case 'promoteNode': {{
+      const nodes=[...target.querySelectorAll('.ruler-node')];
+      const chief=Number(event.value)||0;
+      const rootRect=root.getBoundingClientRect();
+      // Keep translations on the render clock's canvas scale in a resized player.
+      const viewportScale=rootRect.width/(root.offsetWidth*{design_scale:.8f})||1;
+      nodes.forEach((node,i)=>{{
+        const isChief=i===chief;
+        const number=node.querySelector('span');
+        const label=node.querySelector('.ruler-chief');
+        node.style.opacity=String(isChief?1:1-.72*p);
+        if(isChief){{
+          const nodeRect=node.getBoundingClientRect();
+          const dx=(rootRect.left+rootRect.width/2-(nodeRect.left+nodeRect.width/2))/viewportScale;
+          const dy=(rootRect.top+rootRect.height*.36-(nodeRect.top+nodeRect.height/2))/viewportScale;
+          node.style.transform=`translate(${{dx*p}}px,${{dy*p}}px) scale(${{1+.32*p}})`;
+          node.style.zIndex='5';
+          node.classList.toggle('chief',p>.35);
+        }}else{{
+          node.style.transform='';
+          node.style.zIndex='';
+          node.classList.remove('chief');
+        }}
+        if(number)number.style.opacity=String(isChief?1-clamp(p/.45):1);
+        if(label)label.style.opacity=String(isChief?clamp((p-.35)/.65):0);
+      }});
+      target.style.opacity='1';
+      break;
+    }}
     case 'collapseToBlack': {{const layer=root.querySelector('.research-layer');if(layer){{layer.style.opacity=String(1-p);layer.style.transform=`scale(${{1-.08*p}})`;}}const blackout=root.querySelector('.blackout');if(blackout)blackout.style.opacity=String(p);break;}}
     case 'hardCut': target.style.opacity='1';break;
   }}
@@ -878,10 +933,12 @@ const sourceImagesReady=Promise.all([...document.images].map(img=>
 ));
 Promise.all([pinnedFontsReady,sourceImagesReady]).then(()=>document.fonts.ready).then(()=>{{
   fitEditorialText();window.renderAt(0);window.__editorialReady=true;
+  {"window.dispatchEvent(new Event('editorial-ready'));" if interactive_preview else ""}
 }}).catch(error=>{{
   window.__editorialError=String(error&&error.message||error);
   showEditorialError(window.__editorialError);
 }});
+{PREVIEW_SCRIPT if interactive_preview else ""}
 </script></body></html>"""
 
 
@@ -971,17 +1028,15 @@ class EditorialRenderer:
 
     @staticmethod
     def _data_asset_url(asset_root: Path, asset: EditorialAsset) -> str | None:
-        if not asset.source or asset.source.startswith(("http://", "https://")):
+        path = _local_asset_path(asset_root, asset)
+        if path is None:
             return None
-        root = asset_root.resolve()
         try:
-            path = resolve_asset_path(root, asset.source)
-        except ValueError:
-            return None
-        if not path.is_file():
+            content = path.read_bytes()
+        except OSError:
             return None
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        return f"data:{media_type};base64,{base64.b64encode(content).decode('ascii')}"
 
     def _capture_frames(
         self, plan: EditPlan, document: Path, profile: Path,
@@ -1020,8 +1075,15 @@ class EditorialRenderer:
                 port_file = profile / "DevToolsActivePort"
                 for _ in range(100):
                     raise_if_media_job_canceled()
-                    if port_file.is_file():
-                        break
+                    try:
+                        # On Windows the file can exist while Chromium still holds it open.
+                        port_line, newline, _ = port_file.read_text(encoding="utf-8").partition("\n")
+                        port = int(port_line)
+                    except (FileNotFoundError, PermissionError, ValueError):
+                        pass
+                    else:
+                        if newline and 0 < port <= 65535:
+                            break
                     if process.poll() is not None:
                         raise RuntimeError(
                             "Chromium exited before exposing Editorial renderer control; "
@@ -1029,9 +1091,11 @@ class EditorialRenderer:
                             f"browser stderr head: {_diagnostic_head()}"
                         )
                     time.sleep(0.1)
-                if not port_file.is_file():
-                    raise RuntimeError("Chromium did not expose Editorial renderer control")
-                port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+                else:
+                    raise RuntimeError(
+                        "Chromium did not expose Editorial renderer control; "
+                        f"browser stderr head: {_diagnostic_head()}"
+                    )
                 page_url = None
                 for _ in range(50):
                     raise_if_media_job_canceled()

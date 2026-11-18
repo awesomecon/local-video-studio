@@ -49,6 +49,7 @@ import {
 import { registerLiveUpdate } from "../app.js";
 import { navigate, parseRoute } from "../router.js";
 import { createRenderMonitor } from "../render-monitor.js";
+import { editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
 
@@ -335,11 +336,17 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
     );
 
   /* --- render controls --------------------------------------------------- */
+  const editorial = mode === "editorial" ? snap.editorial : null;
+  const missingMedia = editorialMediaIssues(editorial).length;
+  const fix = editorial?.has_narration === false ? ["#/voice", "Add narration"]
+    : editorial?.has_edit_plan === false ? ["#/editorial", "Build Edit Plan"]
+      : missingMedia ? ["#/editorial", missingEditorialMediaLabel(missingMedia)] : null;
+  const renderDisabled = Boolean(active || fix);
   const runBtn = el("button", {
-    class: "btn btn-primary", type: "button", disabled: Boolean(active),
+    class: "btn btn-primary", type: "button", disabled: renderDisabled,
   }, "Render final video");
   const forceBtn = el("button", {
-    class: "btn", type: "button", disabled: Boolean(active),
+    class: "btn", type: "button", disabled: renderDisabled,
   }, "Re-render final video");
   runBtn.onclick = () => doRender(false, project);
   forceBtn.onclick = () => doRender(true, project);
@@ -353,10 +360,11 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
   const renderActions = el("section", { class: "panel delivery-actions" },
     el("h2", { class: "panel-title" }, "Render controls"),
     el("div", { class: "panel-body stack" },
+      fix ? el("a", { class: "btn btn-primary", href: fix[0] }, fix[1]) : null,
       runBtn,
       forceBtn,
       el("button", {
-        class: "btn", type: "button", disabled: Boolean(active),
+        class: "btn", type: "button", disabled: renderDisabled,
         onclick: () => doRerunStage("render_preview", project),
       }, stages.render_preview?.status === "completed" ? "Re-render preview" : "Render preview"),
       statusRegion,
@@ -742,7 +750,7 @@ function stageRerunCell(stage, st, { active, onRerun }) {
 export function renderInputSummary(snap, stages) {
   const editorial = exportVideoMode(snap.project) === "editorial";
   const assets = snap.assets || [];
-  const narrationReady = Boolean(
+  const narrationReady = (editorial ? snap.editorial?.has_narration : undefined) ?? Boolean(
     stages.narration && stages.narration.status === "completed"
     || assets.some((asset) => asset.settings && asset.settings.role === "narration")
   );
@@ -750,6 +758,11 @@ export function renderInputSummary(snap, stages) {
   const musicReady = assets.some((asset) => asset.settings && asset.settings.role === "music");
   const rows = editorial ? editPlanSummaryRow(snap) : sceneVisualsSummaryRow(snap, assets);
   if (editorial) {
+    const issues = editorialMediaIssues(snap.editorial);
+    if (issues.length) {
+      rows.push(el("dt", {}, "Editorial visuals"),
+        el("dd", {}, `${issues.length} missing`));
+    }
     // Strict booleans only: malformed values are omitted, never guessed.
     const display = editorialDisplaySettings(snap);
     if (display.captions !== null) {
