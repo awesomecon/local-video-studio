@@ -118,6 +118,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate, syncProjectChrome } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode, VIDEO_MODE_OPTIONS } from "../video-mode.js";
 
 /** Editable brief fields and how they map to controls. */
@@ -197,7 +198,11 @@ function buildScreen(projectId) {
 
   load(body, provenance, editorialRegion, projectId);
 
-  registerLiveUpdate(() => refreshProvenance(provenance, editorialRegion, projectId));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === projectId && job.status === "completed")) {
+      void refreshProvenance(provenance, editorialRegion, projectId);
+    }
+  });
   return el("div", { class: "brief-layout" },
     el("div", {}, panel, editorialRegion),
     el("aside", {}, provenancePanel),
@@ -1407,6 +1412,9 @@ export function buildRevisionControl(data, ctx) {
     el("span", { class: "small" }, label),
     instruction,
     el("div", { class: "row" }, preview),
+    projectJobProgress(["editorial_revision"], {
+      projectId: ctx.projectId, matches: (job) => (job.parameters?.composition_id ?? null) === compositionId,
+    }),
     result,
   );
 }
@@ -1422,7 +1430,11 @@ function buildRegenControl(data, ctx) {
       () => regenerateEditorialComposition(state.config, ctx.projectId, data.id),
       "Composition regeneration failed");
   });
-  return el("div", { class: "row" }, btn);
+  return el("div", { class: "stack" },
+    el("div", { class: "row" }, btn),
+    projectJobProgress(["editorial_composition"], {
+      projectId: ctx.projectId, matches: (job) => job.parameters?.composition_id === data.id,
+    }));
 }
 
 /** Read-only timing resolved from the narration/caption clock. */
@@ -1600,7 +1612,10 @@ function buildAssetControls(data, ctx) {
           () => generateEditorialAsset(state.config, ctx.projectId, data.id, asset.id),
           "Editorial image generation failed");
       });
-      identity.append(generate);
+      identity.append(generate, projectJobProgress(["editorial_asset_generate"], {
+        projectId: ctx.projectId,
+        matches: (job) => job.parameters?.composition_id === data.id && job.parameters?.editorial_asset_id === asset.id,
+      }));
     }
     const replaceLine = el("div", { class: "row wrap", style: { gap: "8px" } });
     const fileInput = el("input", { type: "file", accept: "image/*", "data-ed-file": asset.id });
@@ -1876,7 +1891,7 @@ export function editorialPreviewSection(snap, onGenerated = null, ctrl = null) {
     const compositionBlock = buildCompositionBlock(editorial, ctrlState, projectId, errors);
     if (compositionBlock) body.append(compositionBlock);
   }
-  body.append(errors);
+  body.append(projectJobProgress(["editorial_plan"], { projectId: snap.project?.id }), errors);
   return el("section", { class: "panel" },
     el("div", { class: "panel-title" }, "Editorial Preview"),
     body,

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
 from backend.captions import AlignmentResult, CaptionWord
+from backend.schemas import JobProgress
 
 from .base import BackendDescriptor, Capability, GenerationRequest, GenerationResult, GeneratorBackend
 from .errors import BackendError, BackendErrorCode
@@ -116,12 +118,24 @@ class FasterWhisperBackend(GeneratorBackend):
                 vad_filter=True,
                 condition_on_previous_text=False,
             )
-            words = tuple(
-                _caption_word(word.start, word.end, word.word)
-                for segment in segments
-                for word in (segment.words or [])
-                if word.start is not None and word.end is not None and str(word.word).strip()
-            )
+            duration = getattr(info, "duration", 0) or 0
+            reporter = request.report_progress
+            measured = reporter is not None and math.isfinite(duration) and duration > 0
+            if measured:
+                reporter(JobProgress(phase="aligning_captions", completed=0, total=duration, unit="seconds"))
+            words = []
+            for segment in segments:
+                words.extend(
+                    _caption_word(word.start, word.end, word.word)
+                    for word in (segment.words or [])
+                    if word.start is not None and word.end is not None and str(word.word).strip()
+                )
+                end = getattr(segment, "end", None)
+                if measured and isinstance(end, (int, float)) and math.isfinite(end):
+                    reporter(JobProgress(
+                        phase="aligning_captions", completed=min(duration, max(0, end)),
+                        total=duration, unit="seconds",
+                    ))
         except Exception as exc:
             raise BackendError(
                 BackendErrorCode.INVALID_RESPONSE,
@@ -134,7 +148,7 @@ class FasterWhisperBackend(GeneratorBackend):
                 "Whisper returned no spoken-word timestamps for the narration.",
             )
         alignment = AlignmentResult(
-            words=words,
+            words=tuple(words),
             language=getattr(info, "language", None),
             language_probability=getattr(info, "language_probability", None),
         )

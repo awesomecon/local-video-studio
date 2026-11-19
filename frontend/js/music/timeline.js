@@ -48,6 +48,7 @@ export function createScoreTimeline(container, options) {
   let snapping = true;
   let selectedCueId = null;
   let audioUrl = null;
+  let nextAudioUrl;
 
   // ---------------------------------------------------------------- layout
   const ruler = el("div", { class: "sc-ruler", "aria-hidden": "true" });
@@ -448,7 +449,19 @@ export function createScoreTimeline(container, options) {
   function pause() {
     audio.pause();
     playing = false;
+    if (nextAudioUrl !== undefined) setAudioSource(nextAudioUrl);
     setPlayIcon();
+  }
+
+  function setAudioSource(url, { deferWhilePlaying = false } = {}) {
+    if (deferWhilePlaying && playing) {
+      nextAudioUrl = url;
+      return;
+    }
+    nextAudioUrl = undefined;
+    if (audioUrl === url) return;
+    audioUrl = url;
+    audio.src = url || "";
   }
 
   function tickSilent(ts) {
@@ -471,10 +484,7 @@ export function createScoreTimeline(container, options) {
     playheadTime = audio.currentTime;
     updatePlayhead();
   });
-  audio.addEventListener("ended", () => {
-    playing = false;
-    setPlayIcon();
-  });
+  audio.addEventListener("ended", pause);
 
   function updatePlayhead() {
     playhead.style.left = `${xAt(playheadTime)}px`;
@@ -554,10 +564,7 @@ export function createScoreTimeline(container, options) {
     seekTo,
     getTime: () => playheadTime,
     isPlaying: () => playing,
-    setAudioSource(url) {
-      audioUrl = url;
-      audio.src = url || "";
-    },
+    setAudioSource,
     setDuration(seconds) {
       duration = Math.max(0.001, seconds);
       paint();

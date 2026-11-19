@@ -108,106 +108,115 @@ export function defaultLane(visualType) {
 
 /**
  * Visual types offered for shots (mirrors backend.schemas.VisualType).
- * Single source shared by the Scene Editor's legacy form and the Add Shot
- * chooser: `wired` types have real local implementations; unwired ones are
+ * Shared by the scene form, shot form, and Add Shot chooser.
+ * `wired` types have real local implementations; unwired ones are
  * mock-only placeholders and must never be picked silently as a default.
  */
 export const VISUAL_TYPES = [
   {
     value: "text_overlay_still",
     wired: true,
+    group: "Text and graphics",
     label: "Generated background + exact text",
-    description: "Generates a text-free Krea/Ideogram background, then renders the supplied wording deterministically over it. The image model never draws the final text.",
+    description: "Generate a background and overlay your exact wording. Use it for quotes, labels, or calls to action.",
   },
   {
     value: "graphic_screen",
     wired: true,
+    group: "Text and graphics",
     label: "Graphic Screen",
-    description: "Uses the local LLM to design a static, validated HTML/CSS/inline-SVG screen with exact text, then renders it locally.",
+    description: "Design a static graphic with exact text and a custom layout. Use it for title slides or explainer graphics.",
   },
   {
     value: "krea2_still",
     wired: true,
+    group: "Still images",
     label: "Krea 2 Turbo still image",
-    description: "Generates a local still with Krea 2 Turbo through ComfyUI.",
+    description: "Generate a still from a visual prompt with Krea 2 Turbo. Use it for a photo-style scene or illustration.",
   },
   {
     value: "ideogram4_still",
     wired: true,
+    group: "Still images",
     label: "Ideogram 4 still image",
-    description: "Generates a local Ideogram 4 still using a saved Quick Magic Prompt or native Precise JSON, with exact in-image text protection.",
+    description: "Generate a still with lettering in the image. Use Quick for a prompt or Precise to place text and objects in specific regions.",
   },
   {
     value: "qwen_image_still",
     wired: true,
+    group: "Still images",
     label: "Qwen-Image-2512 text still",
-    description: "Generates a local still with Qwen-Image-2512 when readable text must be part of the photographed or illustrated scene.",
+    description: "Generate a still with text built into the scene, such as a storefront sign or a product label. Check the spelling in the result.",
   },
   {
     value: "qwen_image_21_still",
     wired: true,
+    group: "Still images",
     label: "Qwen-Image-2.1 still image",
-    description: "Generates a local still with Qwen-Image-2.1 through its dedicated ComfyUI service.",
+    description: "Generate a still with Qwen-Image-2.1. You can request lettering as part of the image.",
+  },
+  {
+    value: "image_motion",
+    wired: true,
+    group: "Motion and video",
+    label: "Image motion",
+    description: "Turn a still into a moving shot with a camera effect such as a slow push-in or a pan.",
+  },
+  {
+    value: "h3_audiovisual",
+    wired: true,
+    group: "Motion and video",
+    label: "MiniMax H3 AV shot (audio + video)",
+    description: "Generate a video clip with synchronized sound. Clip audio plays in preview only. Exports use Studio narration and music.",
+  },
+  {
+    value: "reused_media",
+    wired: true,
+    group: "Existing media",
+    label: "Reused media",
+    description: "Import an image or video from your computer. Give it a source title so you can trace it later.",
   },
   {
     value: "flux_still",
     wired: false,
     label: "FLUX still image — unwired",
-    description: "Planned for local FLUX still generation; only the mock placeholder path is currently available.",
-  },
-  {
-    value: "image_motion",
-    wired: true,
-    label: "Image motion",
-    description: "Generates a Krea 2 or Qwen-Image-2512 still locally, then applies deterministic FFmpeg camera motion in rendered video.",
+    description: "Placeholder for generating still images with FLUX.",
   },
   {
     value: "wan_video",
     wired: false,
     label: "Wan video — unwired",
-    description: "Planned for ordinary local generated video; the real Wan workflow is not currently connected.",
-  },
-  {
-    value: "h3_audiovisual",
-    wired: true,
-    label: "MiniMax H3 AV shot (audio + video)",
-    description: "Generates synchronized local video and native clip audio through ComfyUI. Native H3 audio is preview-only; final exports currently use Studio narration and music.",
+    description: "Placeholder for generating video clips with Wan.",
   },
   {
     value: "h3_reference",
     wired: false,
     label: "MiniMax H3 reference video — unwired",
-    description: "Reserved for a future Ref2VA integration; it is intentionally not installed or connected.",
+    description: "Placeholder for generating an H3 clip guided by reference media.",
   },
   {
     value: "title_card",
     wired: false,
     label: "Title card — unwired",
-    description: "Planned for generated title graphics; only the mock placeholder path is currently available.",
+    description: "Placeholder for a dedicated title card.",
   },
   {
     value: "diagram",
     wired: false,
     label: "Diagram — unwired",
-    description: "Planned for explanatory diagrams; only the mock placeholder path is currently available.",
-  },
-  {
-    value: "reused_media",
-    wired: true,
-    label: "Reused media",
-    description: "Copies a manually selected local image or video into the project. A source title is required; rights notes are optional. It never fetches remote media.",
+    description: "Placeholder for a diagram that explains a concept or process.",
   },
   {
     value: "transition_only",
     wired: false,
     label: "Transition only — unwired",
-    description: "Planned for a scene that contributes only a transition; special no-media handling is not currently connected.",
+    description: "Placeholder for a transition without its own image or video.",
   },
   {
     value: "custom",
     wired: false,
     label: "Custom — unwired",
-    description: "Reserved for a user-supplied local workflow; custom workflow selection is not currently connected.",
+    description: "Placeholder for a custom local generation workflow.",
   },
 ];
 

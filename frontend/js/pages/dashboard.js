@@ -25,11 +25,11 @@ import {
   badge,
   icon,
   jobStatusBadge,
-  progress,
   STAGE_LABELS,
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate, syncProjectChrome } from "../app.js";
+import { jobProgress } from "../job-progress.js";
 import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 import { currentRenderAsset } from "../render-monitor.js";
 
@@ -99,7 +99,7 @@ function renderQueue(queue) {
           jobStatusBadge(job.status),
         ),
         el("div", { class: "muted small" }, state.projects.find((p) => p.id === job.project_id)?.title || "Project job"),
-        job.status === "queued" ? null : progress(job.progress),
+        jobProgress((entry) => entry.id === job.id, { initial: job, label: false }),
       ),
     )) : el("p", { class: "muted small" }, "No production jobs are running or queued."),
     el("a", { class: "btn btn-ghost", href: "#/jobs" }, "Open job monitor", icon("chevron", 14)),

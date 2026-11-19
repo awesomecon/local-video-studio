@@ -30,7 +30,9 @@ def test_thumbnail_studio_route_contract_and_safe_rendering() -> None:
     assert 'method: "DELETE"' in api
     assert "innerHTML" not in page
     assert 'url.startsWith("/api/projects/")' in page
-    assert "registerLiveUpdate(refreshCandidates)" in page
+    assert "registerLiveUpdate((changes) => {" in page
+    assert "void refreshCandidates();" in page
+    assert "projectJobProgress" in page
     assert "deleteThumbnailCandidate" in page
     assert "Delete" in page
 

@@ -67,11 +67,9 @@ import {
   errorPanel,
   badge,
   sceneStatusBadge,
-  jobStatusBadge,
   confirm,
   toast,
   toastError,
-  progress,
   icon,
 } from "../ui.js";
 import {
@@ -83,7 +81,6 @@ import {
   VISUAL_TYPES,
   laneLabel,
   defaultLane,
-  isWiredVisualType,
   defaultNewShot,
   sceneHasExplicitShots,
   shotStatusBadge,
@@ -96,6 +93,7 @@ import {
 } from "../shots.js";
 import { navigate, parseRoute } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { jobProgress } from "../job-progress.js";
 
 /** Job statuses that are final (a scene has no running job at these). */
 const TERMINAL_JOB_STATUSES = ["completed", "failed", "canceled"];
@@ -218,7 +216,10 @@ async function load(region, sceneId, requestedShotId = null) {
   // generation metadata, and button states in place. The PATCH form fields
   // are never touched, so in-progress edits survive a tick mid-generation.
   let updating = false;
-  registerLiveUpdate(async () => {
+  registerLiveUpdate(async (changes) => {
+    if (!changes.some((job) => job.scene_id === sceneId || (
+      job.project_id === state.currentProjectId && job.stage === "plan" && job.status === "completed"
+    ))) return;
     if (updating) return;
     updating = true;
     try {
@@ -358,10 +359,39 @@ const QWEN_IMAGE_CANVASES = [
 ];
 
 /**
- * @param {import("../api.js").Scene} scene
- * @param {import("../api.js").GenerationJob|null} job
- * @returns {HTMLElement}
+ * @param {{id: string, value: string, disabled?: boolean, ariaLabel?: string}} options
  */
+function visualTypeField({ id, value, disabled = false, ariaLabel }) {
+  const select = el("select", { id, disabled, "aria-label": ariaLabel });
+  const groups = new Map();
+  for (const mode of VISUAL_TYPES) {
+    const label = mode.wired ? mode.group : "Mock only";
+    let group = groups.get(label);
+    if (!group) {
+      group = el("optgroup", { label });
+      groups.set(label, group);
+      select.append(group);
+    }
+    const attrs = { value: mode.value, dataset: mode.wired ? null : { unwired: "true" } };
+    group.append(el("option", attrs, mode.label));
+  }
+  if (!VISUAL_TYPES.some((mode) => mode.value === value)) {
+    select.append(el("option", { value }, value));
+  }
+  select.value = value;
+
+  function describeSelection() {
+    const mode = VISUAL_TYPES.find((item) => item.value === select.value);
+    if (!mode) return "This project uses an unknown visual type.";
+    return mode.wired ? mode.description : `${mode.description} Available in mock mode only.`;
+  }
+
+  const wrapper = field({ label: "Visual type", input: select, hint: describeSelection() });
+  const hint = wrapper.querySelector(".hint");
+  select.addEventListener("change", () => { hint.textContent = describeSelection(); });
+  return { select, wrapper };
+}
+
 /**
  * @param {import("../api.js").Scene} scene
  * @param {import("../api.js").GenerationJob|null} job
@@ -382,20 +412,10 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
   const visual = el("textarea", { id: "se-visual", rows: "5", disabled: visualLocked }, scene.visual_prompt || "");
   const negative = el("textarea", { id: "se-negative", rows: "3", disabled: visualLocked }, scene.negative_prompt || "");
   const backend = el("select", { id: "se-backend", disabled: visualLocked });
-  const visualType = el("select", { id: "se-visual-type", disabled: visualLocked });
-  // Wired types list first so what actually runs is at the top; unwired
-  // (mock-only) types follow, marked and dimmed where the browser allows.
-  for (const wired of [true, false]) {
-    for (const mode of VISUAL_TYPES.filter((m) => m.wired === wired)) {
-      const attrs = wired ? { value: mode.value } : { value: mode.value, dataset: { unwired: "true" } };
-      visualType.append(el("option", attrs, mode.label));
-    }
-  }
   const currentType = scene.visual_type || "flux_still";
-  if (!Array.from(visualType.options).some((o) => o.value === currentType)) {
-    visualType.append(el("option", { value: currentType }, currentType));
-  }
-  visualType.value = currentType;
+  const { select: visualType, wrapper: fVisualType } = visualTypeField({
+    id: "se-visual-type", value: currentType, disabled: visualLocked,
+  });
   const h3Canvas = el("select", { id: "se-h3-canvas", disabled: visualLocked });
   for (const [value, label] of H3_CANVASES) {
     h3Canvas.append(el("option", { value }, label));
@@ -513,7 +533,6 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
   const fVisual = field({ label: "Visual prompt", input: visual, hint: "What the visual model should draw for this scene." });
   const fNegative = field({ label: "Negative prompt", input: negative, hint: "Optional — recorded with the scene and used by backends with negative conditioning; the Krea 2 Turbo workflow (CFG 1.0, zeroed negative) ignores it, so keep unwanted content out of the visual prompt itself." });
   const fBackend = field({ label: "Visual backend", input: backend, hint: "From GET /api/models; 'automatic' lets the planner choose." });
-  const fVisualType = field({ label: "Visual type", input: visualType });
   const fH3Canvas = field({ label: "H3 canvas", input: h3Canvas, hint: "Resolution of the H3 AV shot; smaller fits longer durations on one GPU." });
   const fKreaCanvas = field({ label: "Krea canvas", input: kreaCanvas, hint: "Resolution of the Krea still; auto uses a safe project-aspect preset near one megapixel." });
   const fQwenImageCanvas = field({ label: "Qwen Image canvas", input: qwenImageCanvas, hint: "Official Qwen-Image-2512 aspect preset; auto matches the project." });
@@ -555,14 +574,6 @@ function buildForm(scene, job, assets, allScenes, policy = {}) {
   const fContinuityGroup = field({ label: "Continuity group", input: continuityGroup, hint: "Optional. Auto-assigned from the predecessor when blank." });
 
   function updateVisualTypeDetails() {
-    const mode = VISUAL_TYPES.find((item) => item.value === visualType.value);
-    let hint = fVisualType.querySelector(".hint");
-    if (!hint) {
-      hint = el("div", { class: "hint", id: "se-visual-type-hint" });
-      fVisualType.append(hint);
-      visualType.setAttribute("aria-describedby", hint.id);
-    }
-    hint.textContent = mode?.description || "This project contains an unknown visual type; regeneration support cannot be determined.";
     const imageMotion = visualType.value === "image_motion";
     const exactTextComposite = visualType.value === "text_overlay_still";
     const routableImage = ["text_overlay_still", "image_motion", "krea2_still", "ideogram4_still", "qwen_image_still", "qwen_image_21_still", "flux_still"].includes(visualType.value);
@@ -1129,15 +1140,9 @@ function buildMeta(scene, assets, job) {
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
 
   const parts = [];
-  if (job) {
-    parts.push(
-      el("div", { class: "row", style: { alignItems: "center" } },
-        jobStatusBadge(job.status),
-        el("span", { class: "muted small" }, `job running · ${Math.round((job.progress || 0) * 100)}%`),
-      ),
-      progress(job.progress || 0),
-    );
-  }
+  parts.push(jobProgress((entry) => entry.scene_id === scene.id && entry.stage === "scene_visual", {
+    initial: job?.stage === "scene_visual" ? job : null,
+  }));
   if (rendered) parts.push(
     el("div", { class: "stack" },
       el("strong", {}, "Last compiled scene"),
@@ -1276,6 +1281,7 @@ function shotsController(scene, opts = {}) {
       addBtn,
     ),
     el("div", { class: "panel-body stack" },
+      jobProgress((job) => job.scene_id === scene.id && job.stage === "scene_render"),
       el("p", { class: "muted small" },
         "Shots play in order inside the scene; a later shot overlaps the previous shot's tail by its incoming transition, so rendered length = Σdurations − Σincoming overlaps. Editing stays in this editor in V1."),
       addChooser,
@@ -1490,18 +1496,9 @@ function shotsController(scene, opts = {}) {
     }
     lane.value = shot.lane || "image";
 
-    const visualType = el("select", { id: "se-sh-type", disabled: !editable });
-    for (const wired of [true, false]) {
-      for (const mode of VISUAL_TYPES.filter((m) => m.wired === wired)) {
-        const attrs = wired ? { value: mode.value } : { value: mode.value, dataset: { unwired: "true" } };
-        visualType.append(el("option", attrs, mode.label));
-      }
-    }
-    const currentType = shot.visual_type || "flux_still";
-    if (!Array.from(visualType.options).some((o) => o.value === currentType)) {
-      visualType.append(el("option", { value: currentType }, currentType));
-    }
-    visualType.value = currentType;
+    const { select: visualType, wrapper: fVisualType } = visualTypeField({
+      id: "se-sh-type", value: shot.visual_type || "flux_still", disabled: !editable,
+    });
 
     const visualPrompt = el("textarea", { id: "se-sh-prompt", rows: "4", disabled: !editable }, shot.visual_prompt || "");
     const negativePrompt = el("textarea", { id: "se-sh-negative", rows: "2", disabled: !editable }, shot.negative_prompt || "");
@@ -1618,7 +1615,6 @@ function shotsController(scene, opts = {}) {
 
     const fTitle = field({ label: "Title", input: title });
     const fLane = field({ label: "Lane", input: lane, hint: "Editorial source policy: real archival, generated image, H3 motion, or HTML graphics." });
-    const fVisualType = field({ label: "Visual type", input: visualType, hint: "Production implementation; unwired types are mock-only placeholders." });
     const fPrompt = field({ label: "Visual prompt", input: visualPrompt, hint: "What the visual model should draw for this shot." });
     const fNegative = field({ label: "Negative prompt", input: negativePrompt });
     const fIdeogramMode = field({ label: "Ideogram prompt mode", input: ideogramPromptMode, hint: "Quick uses the official Magic Prompt with your local LLM. Precise accepts native/KJNodes JSON." });
@@ -1942,6 +1938,7 @@ function shotsController(scene, opts = {}) {
         shotStatusBadge(shot.status, shot.locked),
         shot.stale ? shotStaleBadge(shot, shots) : null),
       el("div", { class: "row" }, approveBtn, generateBtn, regenerateBtn, lockBtn, unlockBtn),
+      jobProgress((job) => job.shot_id === shot.id && job.stage === "shot_generate"),
     );
 
     if (shot.implicit) {
@@ -2436,17 +2433,9 @@ function shotsController(scene, opts = {}) {
     const base = defaultNewShot(shots);
     addChooser.replaceChildren();
 
-    const typeSel = el("select", { id: "se-add-type", "aria-label": "Visual type for the new shot" });
-    for (const wired of [true, false]) {
-      for (const mode of VISUAL_TYPES.filter((m) => m.wired === wired)) {
-        const attrs = wired ? { value: mode.value } : { value: mode.value, dataset: { unwired: "true" } };
-        typeSel.append(el("option", attrs, mode.label));
-      }
-    }
-    if (!Array.from(typeSel.options).some((o) => o.value === base.visual_type)) {
-      typeSel.append(el("option", { value: base.visual_type }, base.visual_type));
-    }
-    typeSel.value = base.visual_type;
+    const { select: typeSel, wrapper: fType } = visualTypeField({
+      id: "se-add-type", value: base.visual_type, ariaLabel: "Visual type for the new shot",
+    });
 
     const laneSel = el("select", { id: "se-add-lane", "aria-label": "Lane for the new shot" });
     for (const item of SHOT_LANES) laneSel.append(el("option", { value: item.value }, item.label));
@@ -2455,16 +2444,7 @@ function shotsController(scene, opts = {}) {
     // lane; the editorial lane stays overridable for deliberate cases.
     typeSel.addEventListener("change", () => {
       laneSel.value = defaultLane(typeSel.value);
-      syncWiredHint();
     });
-
-    const wiredHint = el("span", { class: "muted small" });
-    function syncWiredHint() {
-      wiredHint.textContent = isWiredVisualType(typeSel.value)
-        ? "Wired local implementation."
-        : "Unwired mock-only placeholder - generation will fail honestly until its phase lands.";
-    }
-    syncWiredHint();
 
     const durInput = el("input", {
       id: "se-add-duration", type: "number", min: "0.001", step: "any",
@@ -2472,10 +2452,8 @@ function shotsController(scene, opts = {}) {
       "aria-label": "Duration in seconds for the new shot",
     });
 
-    const fType = field({ label: "Visual type", input: typeSel });
     const fLane = field({ label: "Lane", input: laneSel, hint: "Editorial source policy; defaults to the type's canonical lane." });
     const fDur = field({ label: "Duration (s)", input: durInput });
-    fType.append(wiredHint);
 
     const errSlot = el("div");
     const createBtn = el("button", { class: "btn btn-primary btn-sm", type: "button" }, "Add shot");

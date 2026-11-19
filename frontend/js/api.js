@@ -24,6 +24,7 @@
  */
 
 import { apiUrl } from "./config.js";
+import { beginJobSubmission } from "./job-progress.js";
 
 /* ============================================================================
  * Contract types (JSDoc) — mirror the backend JSON exactly.
@@ -232,6 +233,7 @@ import { apiUrl } from "./config.js";
  * @property {string | null} backend
  * @property {"queued"|"preparing"|"loading_model"|"generating"|"postprocessing"|"completed"|"failed"|"canceled"} status
  * @property {number} progress
+ * @property {{phase: string, completed?: number|null, total?: number|null, unit?: string|null}|null} [progress_detail]
  * @property {number} priority
  * @property {Record<string, any>} parameters
  * @property {number} attempt_count
@@ -535,6 +537,17 @@ class ApiErrorInstance extends Error {
  * @returns {Promise<any>}
  */
 export async function request(config, path, opts = {}) {
+  const settle = opts.method === "POST" ? beginJobSubmission(path, opts.body) : null;
+  let result;
+  try {
+    result = await fetchJson(config, path, opts);
+    return result;
+  } finally {
+    settle?.(result);
+  }
+}
+
+async function fetchJson(config, path, opts) {
   const method = opts.method || "GET";
   const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : 10000;
   const controller = new AbortController();

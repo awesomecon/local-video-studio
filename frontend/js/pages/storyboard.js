@@ -73,14 +73,13 @@ import {
   errorPanel,
   badge,
   sceneStatusBadge,
-  jobStatusBadge,
   confirm,
   toast,
   toastError,
-  progress,
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { jobProgress, projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode } from "../video-mode.js";
 
 /** Scene visuals currently being generated from this browser session. */
@@ -203,6 +202,7 @@ function boardPanel() {
       refreshBtn,
     ),
     batchBar,
+    projectJobProgress(["visual_batch"]),
     body,
   );
 
@@ -381,7 +381,6 @@ function boardPanel() {
     const activeBatch = jobs.find((j) => j.stage === "visual_batch"
       && !BATCH_JOB_TERMINAL.includes(j.status)) || null;
     if (activeBatch) {
-      const stageText = activeBatch.parameters && activeBatch.parameters.current_stage;
       const cancelBtn = el("button", {
         class: "btn btn-ghost btn-sm", type: "button",
         title: "Cancel the whole batch and every scene job it created. Scenes already generated are kept.",
@@ -402,10 +401,6 @@ function boardPanel() {
         }
       });
       batchBar.replaceChildren(
-        jobStatusBadge(activeBatch.status),
-        el("span", { class: "muted small" },
-          `Generating visuals ${stageText ? `· ${stageText} ` : ""}· ${Math.round((activeBatch.progress || 0) * 100)}%`),
-        el("span", { style: { flex: "1 1 160px" } }, progress(activeBatch.progress || 0)),
         cancelBtn,
       );
       return;
@@ -504,6 +499,9 @@ function boardPanel() {
         }, scene.title),
         el("div", { class: "row board-card-meta" }, sceneStatusBadge(scene.status, scene.locked),
           asset?.seed != null ? el("span", { class: "small muted mono" }, `seed ${asset.seed}`) : null),
+        jobProgress((job) => job.scene_id === scene.id && job.stage === "scene_visual", {
+          compact: true, showTerminal: false,
+        }),
       ),
     );
     return card;
@@ -512,7 +510,12 @@ function boardPanel() {
   // Live path: job-feed frames refresh the grid in place (no skeleton).
   // "Generating…" state comes from pendingVisualSceneIds, which survives
   // rebuilds; everything else is honest backend data.
-  registerLiveUpdate(() => load(body, { skeleton: false }));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === state.currentProjectId
+      && ["plan", "visual_batch", "scene_visual", "shot_generate"].includes(job.stage))) {
+      void load(body, { skeleton: false });
+    }
+  });
   load(body);
   return panel;
 }
@@ -630,13 +633,10 @@ function bodyRegion(scene, job, asset, detailsOpen, refresh) {
   );
   const shotsRow = buildShotsRow(scene);
   if (shotsRow) body.append(shotsRow);
-  if (job) {
-    body.append(el("div", { class: "row", style: { alignItems: "center" } },
-      jobStatusBadge(job.status),
-      el("span", { class: "muted small" }, `scene job · ${Math.round((job.progress || 0) * 100)}%`),
-    ));
-    body.append(progress(job.progress || 0));
-  } else if (scene.status === "failed" || scene.status === "canceled") {
+  body.append(jobProgress((entry) => entry.scene_id === scene.id && entry.stage === "scene_visual", {
+    initial: job?.stage === "scene_visual" ? job : null,
+  }));
+  if (!job && (scene.status === "failed" || scene.status === "canceled")) {
     body.append(el("div", { class: "muted small" },
       `Scene ${scene.status} - generate a visual to recover.`,
     ));

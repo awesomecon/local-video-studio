@@ -192,8 +192,7 @@ class ComfyUITTSBackend(ComfyUIBackend):
         from .comfyui import substitute_workflow
 
         submitted = substitute_workflow(workflow, substitutions)
-        prompt_id = self.submit_workflow(submitted, job_id=request.job_id)
-        record = self._poll_until_done(prompt_id, request)
+        prompt_id, record = self._run_workflow(submitted, request, label=self.PROVIDER)
         outputs = self._retrieve_outputs(record, request.output_dir)
         if not outputs:
             raise BackendError(
@@ -201,35 +200,6 @@ class ComfyUITTSBackend(ComfyUIBackend):
                 f"The {self.PROVIDER} workflow completed without retrievable audio.",
             )
         return self._result(outputs, request, prompt_id)
-
-    def _poll_until_done(self, prompt_id: str, request: GenerationRequest) -> Mapping[str, Any]:
-        import time
-
-        deadline = time.monotonic() + float(
-            (request.settings or {}).get("generation_timeout", self.generation_timeout)
-        )
-        record: Mapping[str, Any] | None = None
-        while time.monotonic() < deadline:
-            self._check_canceled(request.job_id)
-            record = self.poll(prompt_id)
-            if record is not None:
-                break
-            time.sleep(self.poll_interval)
-        self._check_canceled(request.job_id)
-        if record is None:
-            raise BackendError(
-                BackendErrorCode.REQUEST_TIMEOUT,
-                f"Timed out waiting for the {self.PROVIDER} workflow.",
-                retryable=True,
-            )
-        status = record.get("status", {})
-        if isinstance(status, Mapping) and status.get("status_str") == "error":
-            raise BackendError(
-                BackendErrorCode.INVALID_RESPONSE,
-                f"The {self.PROVIDER} workflow failed.",
-                details=status,
-            )
-        return record
 
     def _retrieve_outputs(
         self, record: Mapping[str, Any], output_dir: Path

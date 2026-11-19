@@ -284,6 +284,23 @@ class GenerationAttempt(DomainModel):
         return self
 
 
+class JobProgress(DomainModel):
+    phase: str = Field(min_length=1)
+    completed: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    total: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    unit: str | None = None
+
+    @model_validator(mode="after")
+    def validate_count(self) -> JobProgress:
+        if self.completed is None and self.total is None and self.unit is None:
+            return self
+        if self.completed is None or self.total is None or not self.unit:
+            raise ValueError("measured progress requires a completed count, total, and unit")
+        if self.completed > self.total:
+            raise ValueError("completed count cannot exceed total")
+        return self
+
+
 class GenerationJob(DomainModel):
     id: str = Field(default_factory=new_id)
     project_id: str
@@ -293,6 +310,7 @@ class GenerationJob(DomainModel):
     backend: str | None = None
     status: JobStatus = JobStatus.QUEUED
     progress: float = Field(default=0, ge=0, le=1)
+    progress_detail: JobProgress | None = None
     priority: int = 0
     parameters: dict[str, Any] = Field(default_factory=dict)
     attempt_count: int = Field(default=0, ge=0)

@@ -61,6 +61,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 import {
   editorialPlanState,
@@ -297,6 +298,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
             : "Generate the Edit Plan to lay out what appears on screen as the narration plays.",
         actions,
       ),
+      projectJobProgress(["editorial_plan"], { projectId }),
       el("div", { class: "panel-body" },
         el("div", { class: "small", style: { fontWeight: "650" } }, "How it works"),
         el("ol", { class: "ed-workflow" },
@@ -867,6 +869,8 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     paintSettingsHost(editorial);
   }
 
-  registerLiveUpdate(() => { void tick(); });
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === projectId && job.status === "completed")) void tick();
+  });
   load({ skeleton });
 }

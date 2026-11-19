@@ -1,6 +1,8 @@
 from pathlib import Path
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 import wave
 
 import yaml
@@ -10,6 +12,7 @@ from PIL import Image
 from backend.api.main import create_app
 from backend.core import load_config
 from backend.core.config import DEFAULT_CONFIG_PATH
+from backend.core.progress import report_progress
 from backend.models import LocalLLMBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.schemas import GenerationJob, JobStatus
@@ -46,6 +49,44 @@ def test_project_plan_and_status_api(tmp_path: Path) -> None:
     assert model_list.status_code == 200
     assert model_list.json()["runtime"]["mock"]["state"] == "mock"
     assert client.get("/api/jobs").status_code == 200
+
+
+def test_synchronous_generation_is_visible_before_its_response(tmp_path, monkeypatch):
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    client = TestClient(app)
+    project = client.post("/api/projects", json={
+        "title": "Music progress", "topic": "Test score", "target_duration": 5,
+    }).json()["project"]
+    ready = Event()
+    release = Event()
+    result = {"source": "local_llm", "applied": False}
+
+    def suggest(project_id):
+        assert project_id == project["id"]
+        report_progress("waiting_for_llm")
+        ready.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(app.state.service, "suggest_music_direction", suggest)
+    with ThreadPoolExecutor() as executor:
+        future = executor.submit(client.post, f"/api/projects/{project['id']}/music/suggest-settings")
+        try:
+            assert ready.wait(5)
+            job = client.get("/api/jobs").json()["jobs"][0]
+            assert job["stage"] == "music_settings"
+            assert job["status"] == "generating"
+            assert job["progress_detail"]["phase"] == "waiting_for_llm"
+            assert job["cancelable"] is False
+        finally:
+            release.set()
+        response = future.result(timeout=5)
+    assert response.status_code == 200 and response.json() == result
+    finished = client.get("/api/jobs").json()["jobs"][0]
+    assert finished["id"] == job["id"] and finished["status"] == "completed"
 
 
 def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Path) -> None:

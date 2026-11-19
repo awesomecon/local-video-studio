@@ -9,12 +9,14 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Sequence
 
 import psutil
+
+from backend.core.progress import current_progress_reporter, report_progress
 
 _CancellationLineage = tuple[tuple[str, threading.Event], ...]
 _TERMINATE_SECONDS = 0.5
@@ -444,7 +446,9 @@ def _check_result(
         raise MediaProcessError(argv, returncode if returncode is not None else -1, stderr)
 
 
-def _wait_for_process(state: _ProcessState, timeout: float | None = None) -> None:
+def _wait_for_process(
+    state: _ProcessState, timeout: float | None = None, *, on_tick: Callable[[], None] | None = None,
+) -> None:
     # Poll under the lifecycle lock but never block while holding it. The worker
     # previously held this lock across proc.wait(timeout=0.1), so a concurrent
     # cancel in _request_stop lost the GIL-mediated re-acquire race for seconds.
@@ -457,6 +461,8 @@ def _wait_for_process(state: _ProcessState, timeout: float | None = None) -> Non
                 return
             if state.proc.poll() is not None:
                 return
+        if on_tick is not None:
+            on_tick()
         if deadline is not None and time.monotonic() >= deadline:
             _request_stop(state, "timeout")
             continue
@@ -529,6 +535,7 @@ def owned_media_process(
 def run_media_process(
     argv: Sequence[str], *, timeout: float | None = None,
     capture_stdout: bool = False, job_id: str | None = None,
+    encoding: tuple[str, float] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run trusted argv without a shell. Only explicit intent means canceled."""
     if not argv:
@@ -536,14 +543,44 @@ def run_media_process(
     command = [str(part) for part in argv]
     try:
         # Files avoid deadlock and inherited-pipe hangs after the child exits.
-        with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as output:
+        with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as output, contextlib.ExitStack() as stack:
+            on_tick = None
+            if encoding and encoding[1] > 0 and current_progress_reporter() is not None:
+                phase, duration = encoding
+                path = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="lvs-encode-"))) / "progress"
+                path.touch()
+                reader = stack.enter_context(path.open("rb"))
+                command[1:1] = ["-progress", str(path)]
+                report_progress(phase, completed=0, total=duration, unit="seconds")
+                next_read = float("-inf")
+
+                def read_progress() -> None:
+                    nonlocal next_read
+                    now = time.monotonic()
+                    if now < next_read:
+                        return
+                    next_read = now + 0.25
+                    for line in reader:
+                        if not line.endswith(b"\n"):
+                            reader.seek(-len(line), os.SEEK_CUR)
+                            break
+                        key, _, value = line.strip().partition(b"=")
+                        if key == b"out_time_us":
+                            try:
+                                completed = int(value) / 1_000_000
+                            except ValueError:
+                                continue
+                            report_progress(phase, completed=min(duration, max(0, completed)),
+                                            total=duration, unit="seconds")
+
+                on_tick = read_progress
             state = _spawn(
                 command, job_id, stdin=subprocess.DEVNULL, stderr=errors,
                 stdout=output if capture_stdout else subprocess.DEVNULL,
             )
             try:
                 try:
-                    _wait_for_process(state, timeout)
+                    _wait_for_process(state, timeout, on_tick=on_tick)
                 except BaseException:
                     _request_stop(state, "failed")
                     _stop_owned_process(state)
@@ -553,6 +590,9 @@ def run_media_process(
             errors.seek(0)
             stderr = errors.read().decode("utf-8", errors="replace")
             _check_result(argv, state, reason, stderr, timeout)
+            if on_tick is not None:
+                next_read = float("-inf")
+                on_tick()
             output.seek(0)
             stdout = (
                 output.read().decode("utf-8", errors="replace")

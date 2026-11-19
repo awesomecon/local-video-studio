@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from backend.core.progress import report_progress
+
 from .base import (
     BackendDescriptor,
     Capability,
@@ -319,6 +321,7 @@ class LocalLLMBackend(GeneratorBackend):
     ) -> str | Any:
         if thinking_budget_tokens is not None and thinking_budget_tokens < 0:
             raise ValueError("thinking_budget_tokens must be nonnegative")
+        report_progress("waiting_for_llm")
         chosen_model = model or self._selected_model()
         structured = structured or json_schema is not None
         payload: dict[str, Any] = {
@@ -400,6 +403,7 @@ class LocalLLMBackend(GeneratorBackend):
                 BackendErrorCode.INVALID_RESPONSE,
                 "The local LLM completion did not contain text content.",
             )
+        report_progress("checking_model_output")
         return parse_structured_json(content, validator=validator) if structured else content
 
     def load(self) -> None:

@@ -19,6 +19,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Iterator
 
+from backend.core.progress import report_progress
 from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process_stream
@@ -991,6 +992,7 @@ class EditorialRenderer:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
         validate_export_assets(plan, asset_root)
+        report_progress("preparing_compositions")
         output = output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         html = compile_edit_plan_html(
@@ -1020,6 +1022,7 @@ class EditorialRenderer:
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
             ], self._capture_frames(plan, document, work / "chrome-profile"),
                 timeout=max(120.0, plan.duration * 20))
+            report_progress("saving_outputs")
             publish = output.with_name(f".{output.name}.editorial.tmp")
             from backend.rendering.process import media_output_publication
             try:
@@ -1138,6 +1141,8 @@ class EditorialRenderer:
                 else:
                     raise RuntimeError("Editorial composition did not become ready")
                 frame_count = round(plan.duration * plan.fps)
+                if frame_count:
+                    report_progress("capturing_frames", completed=0, total=frame_count, unit="frames")
                 for frame in range(frame_count):
                     raise_if_media_job_canceled()
                     timestamp = frame / plan.fps
@@ -1150,6 +1155,8 @@ class EditorialRenderer:
                         "optimizeForSpeed": True,
                     })
                     yield base64.b64decode(screenshot["data"])
+                    report_progress("capturing_frames", completed=frame + 1, total=frame_count, unit="frames")
+                report_progress("finalizing_encoding")
             finally:
                 if client is not None:
                     client.close()

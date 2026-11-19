@@ -590,7 +590,8 @@ class StudioDatabase:
                     raise KeyError(f"job not found: {job_id}")
                 job = GenerationJob.model_validate_json(row["payload_json"])
                 updated = updater(job)
-                self._save_job(connection, updated)
+                if updated is not job:
+                    self._save_job(connection, updated)
                 connection.commit()
                 return updated
             except Exception:

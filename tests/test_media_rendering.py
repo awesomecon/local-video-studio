@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import backend.rendering.binaries as binaries_module
+from backend.core.progress import progress_scope
 from backend.rendering.binaries import FFmpegBinaries, discover_binaries
 from backend.rendering.commands import RenderOptions, build_finalize_command, build_video_command
 from backend.rendering.mock_media import (
@@ -602,3 +603,17 @@ def test_probe_fallback_stream_duration_is_preserved(
     info = probe_media(media, fake_binaries)
 
     assert info.duration_seconds == expected
+
+
+def test_ffmpeg_reports_intermediate_encoding_time(binaries):
+    details = []
+    with progress_scope("test-encode", details.append):
+        run_media_process([
+            str(binaries.ffmpeg), "-hide_banner", "-loglevel", "error",
+            "-re", "-f", "lavfi", "-i", "color=s=32x32:r=10:d=2",
+            "-f", "null", "-",
+        ], timeout=10, encoding=("encoding_video", 2))
+    values = sorted({detail.completed for detail in details})
+    assert values[0] == 0
+    assert len([value for value in values if 0 < value < 2]) >= 2
+    assert all(detail.total == 2 and detail.unit == "seconds" for detail in details)

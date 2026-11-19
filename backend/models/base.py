@@ -8,6 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
+from backend.core.progress import ProgressReporter, current_progress_reporter
+
 
 class Capability(StrEnum):
     TEXT_TO_IMAGE = "text_to_image"
@@ -48,6 +50,9 @@ class GenerationRequest:
     height: int | None = None
     references: tuple[Path, ...] = ()
     settings: Mapping[str, Any] = field(default_factory=dict)
+    report_progress: ProgressReporter | None = field(
+        default_factory=current_progress_reporter, repr=False, compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)

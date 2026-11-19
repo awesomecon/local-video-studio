@@ -9,7 +9,7 @@ from .h3_continuity import (
 )
 from .models import (
     AspectRatio, Asset, AssetType, DurationMode, GenerationAttempt, GenerationJob,
-    JobStatus, PROJECT_SCHEMA_VERSION, Project, ProjectCreate, ProjectPlan,
+    JobProgress, JobStatus, PROJECT_SCHEMA_VERSION, Project, ProjectCreate, ProjectPlan,
     ProjectStatus, Scene, SceneStatus, VideoMode, VisualType, utc_now,
 )
 from .shots import (
@@ -30,7 +30,7 @@ from .thumbnails import (
 
 __all__ = [
     "AspectRatio", "Asset", "AssetType", "DurationMode", "GenerationAttempt",
-    "GenerationJob", "JobStatus", "PROJECT_SCHEMA_VERSION", "Project", "ProjectCreate",
+    "GenerationJob", "JobProgress", "JobStatus", "PROJECT_SCHEMA_VERSION", "Project", "ProjectCreate",
     "ProjectPlan", "ProjectStatus", "Scene", "SceneStatus", "VideoMode", "VisualType", "utc_now",
     "ThumbnailCandidate", "ThumbnailCandidateId", "ThumbnailCandidateRequest",
     "ThumbnailConcept", "ThumbnailFontPreset", "ThumbnailImageModel",

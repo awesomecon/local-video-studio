@@ -37,13 +37,13 @@ import {
   errorPanel,
   badge,
   jobStatusBadge,
-  progress,
   confirm,
   toast,
   toastError,
   stageLabel,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { jobProgress } from "../job-progress.js";
 import { navigate, sceneEditorHash } from "../router.js";
 import { effectiveVideoMode } from "../video-mode.js";
 
@@ -56,20 +56,6 @@ const JOB_ROW_CAP = 200;
 
 /** Bumped on every render; lets the feed callback know the screen is gone. */
 let generation = 0;
-
-/** Known `parameters.current_stage` tokens written by parent jobs. */
-const CURRENT_STAGE_LABELS = {
-  queued: "Waiting for a worker",
-  validating_inputs: "Validating inputs",
-  editorial_visual: "Rendering Editorial canvas",
-  timeline: "Building timeline",
-  score_mix: "Scoring music",
-  render_preview: "Rendering preview",
-  quality_control: "Quality check",
-  render_final: "Rendering final video",
-  thumbnails: "Extracting thumbnail frames",
-  done: "Wrapping up",
-};
 
 /** Status filter chips: [key, label, predicate]. */
 const STATUS_FILTERS = [
@@ -121,15 +107,6 @@ function recoveryDestination(job, project) {
       ? ["#/editorial", "Open Editorial"] : ["#/storyboard", "Open Storyboard"];
   }
   return ["#/project", "Open project"];
-}
-
-/**
- * @param {string} raw - `parameters.current_stage`; batch tokens like
- *   "3/8 · S5 · h3_audiovisual" pass through untouched.
- * @returns {string}
- */
-function currentStageLabel(raw) {
-  return CURRENT_STAGE_LABELS[raw] || raw;
 }
 
 /**
@@ -211,8 +188,8 @@ export function renderJobs(_route) {
     const params = job.parameters || {};
     const project = ctx.projectsById.get(job.project_id);
     return [
-      job.status, job.progress, job.updated_at, job.error || "",
-      params.current_stage || "", params.parent_job_id || "",
+      ACTIVE.includes(job.status) ? "active" : job.status, job.error || "", job.started_at, job.completed_at,
+      params.parent_job_id || "",
       ctx.queuePos.get(job.id) || "", (project && project.title) || "",
       job.scene_title || "", statusFilter,
       job.executable === false ? "no-retry" : "",
@@ -358,13 +335,6 @@ export function renderJobs(_route) {
       if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
         bits.push(" · took ", el("span", { class: "mono" }, fmtDuration((endMs - startMs) / 1000)));
       }
-    } else if (job.status !== "queued" && !Number.isNaN(startMs)) {
-      bits.push(
-        " · running for ",
-        // data-elapsed nodes are refreshed by the 1s ticker between feed frames.
-        el("span", { class: "mono", "data-elapsed": "1", "data-start": String(startIso) },
-          fmtDuration((Date.now() - startMs) / 1000)),
-      );
     }
     return el("div", { class: "small muted" }, ...bits);
   }
@@ -399,23 +369,14 @@ export function renderJobs(_route) {
       timesRow(job),
     );
 
-    const current = typeof params.current_stage === "string" ? params.current_stage : "";
-    if (current && !isTerminal && job.status !== "queued") {
-      main.append(el("div", { class: "small" },
-        el("span", { class: "muted" }, "Current stage: "),
-        el("span", {}, currentStageLabel(current)),
-      ));
-    }
-
     if (job.status === "queued") {
       const pos = ctx.queuePos.get(job.id);
       main.append(el("div", { class: "small muted" },
         pos ? `Queue position #${pos}` : "Queued",
         job.priority ? ` · priority ${job.priority}` : "",
       ));
-    } else if (!isTerminal) {
-      main.append(progress(job.progress || 0));
     }
+    if (!isTerminal) main.append(jobProgress((entry) => entry.id === job.id, { initial: job, label: false }));
 
     if (job.attempt_count > 0) {
       meta.append(el("div", { class: "small muted" },
@@ -484,7 +445,7 @@ export function renderJobs(_route) {
 
     return [main,
       el("div", { class: "job-state" },
-        jobStatusBadge(job.status),
+        ACTIVE.includes(job.status) ? badge("accent", "Active") : jobStatusBadge(job.status),
         el("div", { class: "job-actions" }, ...actions),
       ), meta,
     ];
@@ -506,11 +467,12 @@ export function renderJobs(_route) {
     renderFeedBadge();
     body.replaceChildren(loadingState(4));
     try {
+      const before = state.jobs;
       const list = await listJobs(state.config);
       if (gen !== generation) return;
-      state.jobs = list.jobs;
+      if (state.jobs === before) state.jobs = list.jobs;
       renderFeedBadge();
-      renderList(list.jobs);
+      renderList(state.jobs);
     } catch (err) {
       if (gen !== generation) return;
       body.replaceChildren(errorPanel(err,
@@ -518,20 +480,6 @@ export function renderJobs(_route) {
       ));
     }
   }
-
-  // Between feed frames, refresh only the self-updating elapsed spans — the
-  // rows themselves stay untouched, so hover/focus/selection survive.
-  const ticker = setInterval(() => {
-    if (gen !== generation || !screen.isConnected) {
-      clearInterval(ticker);
-      return;
-    }
-    const now = Date.now();
-    screen.querySelectorAll("[data-elapsed]").forEach((node) => {
-      const startMs = parseTime(node.getAttribute("data-start"));
-      if (!Number.isNaN(startMs)) node.textContent = fmtDuration((now - startMs) / 1000);
-    });
-  }, 1000);
 
   refreshBtn.onclick = () => load();
   renderFeedBadge();

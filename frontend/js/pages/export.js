@@ -43,10 +43,10 @@ import {
   confirm,
   toast,
   toastError,
-  progress,
   stageChip,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { navigate, parseRoute } from "../router.js";
 import { createRenderMonitor, currentRenderAsset } from "../render-monitor.js";
 import { editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
@@ -258,7 +258,12 @@ function exportPanel() {
 
   // Live path: render progress and final output update while the job runs
   // (no form state on this screen, so a full region rebuild is safe).
-  registerLiveUpdate(() => load(body, { skeleton: false }));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === state.currentProjectId
+      && (!job.parameters?.parent_job_id || job.status === "completed"))) {
+      void load(body, { skeleton: false });
+    }
+  });
   load(body);
   return panel;
 }
@@ -392,6 +397,7 @@ function build(snap, stages, active, last, thumbnails, history, { stagesOpen, op
         el("div", { class: "stack" }, finalAsset ? fixLink : null, forceBtn, hasPreview ? previewBtn : null),
       ),
       statusRegion,
+      projectJobProgress(["render", "render_stage", "pipeline"], { initial: active, showTerminal: false }),
     ),
   );
 
@@ -493,16 +499,7 @@ function jobState(job) {
       toastError(err, "cancel render");
     }
   };
-  return el("div", { class: "stack" },
-    el("div", { class: "row" },
-      jobStatusBadge(job.status),
-      badge("accent", renderStageLabel(job.parameters && job.parameters.current_stage)),
-      el("span", { class: "muted small" }, `job ${job.id}`),
-      el("span", { class: "spacer" }),
-      cancelBtn,
-    ),
-    progress(job.progress || 0),
-  );
+  return el("div", { class: "row" }, el("span", { class: "spacer" }), cancelBtn);
 }
 
 /**

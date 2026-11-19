@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from PIL import Image, ImageOps
 
+from backend.core.progress import report_progress
 from backend.director.image_routing import (
     serialize_ideogram_prompt_json,
     validate_ideogram_prompt_json,
@@ -501,11 +502,12 @@ class ThumbnailStudioService:
         )
         try:
             self.pipeline.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
-            with self.pipeline._lock:
+            with self.pipeline.jobs.tracking(job.id), self.pipeline._lock:
                 current = self.pipeline.jobs.get(job.id)
                 if current is None or current.status is JobStatus.CANCELED:
                     raise RuntimeError("thumbnail job canceled before generation")
                 self.pipeline.jobs.transition(job.id, JobStatus.LOADING_MODEL, progress=0.1)
+                report_progress("preparing_artwork" if source_asset_id or source_candidate_id else "loading_model")
                 if source_asset_id:
                     result = self._source_artwork(
                         project, str(source_asset_id), temporary / "artwork.png", plan, seed,
@@ -544,6 +546,7 @@ class ThumbnailStudioService:
                     result = self._dispatch_krea(project, plan, temporary, job.id, seed)
                     os.replace(result.outputs[0], temporary / "artwork.png")
                 self.pipeline.jobs.transition(job.id, JobStatus.GENERATING, progress=0.55)
+                report_progress("compositing_thumbnail")
                 self._normalize_artwork(temporary / "artwork.png")
                 # Native-text modes return a finished thumbnail; artwork-only
                 # modes still receive the deterministic Pillow compositor.

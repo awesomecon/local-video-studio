@@ -13,10 +13,11 @@ import {
   cancelJob,
 } from "../api.js";
 import {
-  loadingState, emptyState, errorPanel, field, badge, jobStatusBadge,
+  loadingState, emptyState, errorPanel, field, badge,
   toast, toastError, confirm,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
 let refreshCurrentCandidates = () => {};
@@ -83,7 +84,12 @@ function studio() {
   refreshCurrentCandidates = refreshCandidates;
 
   // Only the candidate/job region changes; unsaved form inputs stay mounted.
-  registerLiveUpdate(refreshCandidates);
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === projectId
+      && (job.stage.startsWith("thumbnail:") || job.stage === "thumbnail_prompt"))) {
+      void refreshCandidates();
+    }
+  });
   initialLoad();
   return root;
 }
@@ -398,6 +404,7 @@ function buildCandidateArea(snapshot) {
       el("div", { class: "panel-title" }, "Generate & choose"),
       el("p", { class: "muted small" }, "Generate up to three options from your saved design, then select your favorite for export. Jobs run one at a time. A failed retry keeps the previous image."),
       el("div", { class: "thumbnail-candidate-grid" }, ...cards),
+      projectJobProgress(["thumbnail_request"]),
       buildMagicPromptArea(snapshot),
     ),
     el("details", { class: "panel" },
@@ -461,6 +468,7 @@ function buildMagicPromptArea(snapshot) {
       stateBadge,
       regenerate,
     ),
+    projectJobProgress(["thumbnail_prompt"]),
     el("p", { class: "muted small" },
       preciseMode
         ? "Generate validates your saved layout automatically. You can also validate it here without creating an image."
@@ -543,7 +551,7 @@ function candidateCard(id, candidate, job, lastJob) {
   if (job) {
     const cancel = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Cancel queued job");
     cancel.onclick = () => cancelJob(state.config, job.id).catch((err) => toastError(err, "cancel thumbnail job"));
-    body.append(el("div", { class: "row thumbnail-candidate-actions" }, jobStatusBadge(job.status), cancel));
+    body.append(el("div", { class: "row thumbnail-candidate-actions" }, cancel));
   } else {
     const actions = [];
     if (!candidate) {
@@ -583,6 +591,7 @@ function candidateCard(id, candidate, job, lastJob) {
     }
     body.append(el("div", { class: "row thumbnail-candidate-actions" }, ...actions));
   }
+  body.append(projectJobProgress([`thumbnail:${id}`], { initial: job, showTerminal: false }));
   return body;
 }
 

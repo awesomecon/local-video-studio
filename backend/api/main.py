@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +27,7 @@ from backend.editorial import (
 )
 from backend.models import LocalLLMBackend
 from backend.models.gemini_tts import GEMINI_TTS_MODELS, GeminiTTSBackend
-from backend.models.errors import BackendError, BackendErrorCode
+from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
 from backend.models.ideogram_prompt import validate_ideogram_prompt_json
 from backend.pipeline import PipelineService
 from backend.pipeline.service import LaneResolutionRejected, PipelineError
@@ -586,6 +587,29 @@ def create_app(
     application.state.settings = settings
     application.state.service = service
 
+    @contextmanager
+    def inline_job(
+        project_id: str, stage: str, **scope: Any,
+    ) -> Iterator[None]:
+        """Surface synchronous requests in the feed without changing their responses."""
+        service._project(project_id)
+        job = service.jobs.enqueue(GenerationJob(
+            project_id=project_id, stage=stage,
+            parameters={"managed_by": "request", **scope},
+        ))
+        try:
+            service.jobs.transition(job.id, JobStatus.PREPARING)
+            service.jobs.transition(job.id, JobStatus.GENERATING)
+            with service.jobs.tracking(job.id):
+                yield
+            service.jobs.complete(job.id)
+        except Exception as exc:
+            try:
+                service.jobs.fail(job.id, redact_secrets(exc))
+            except InvalidJobTransition:
+                pass
+            raise
+
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[],
@@ -804,7 +828,8 @@ def create_app(
         request: ScorePreviewRequest = ScorePreviewRequest(),
     ) -> dict[str, Any]:
         try:
-            return service.ensure_score_preview(project_id, force=request.force)
+            with inline_job(project_id, "score_preview"):
+                return service.ensure_score_preview(project_id, force=request.force)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except (ValueError, PipelineError) as exc:
@@ -836,11 +861,10 @@ def create_app(
         request: AutoScoreRequest = AutoScoreRequest(),
     ) -> dict[str, Any]:
         try:
-            return service.suggest_score_cues(
-                project_id,
-                music_direction=request.music_direction,
-                intensity=request.intensity,
-            )
+            with inline_job(project_id, "auto_score"):
+                return service.suggest_score_cues(
+                    project_id, music_direction=request.music_direction, intensity=request.intensity,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except PipelineError as exc:
@@ -852,7 +876,8 @@ def create_app(
     def suggest_music_settings(project_id: str) -> dict[str, Any]:
         """Ask only the configured local LLM for an unapplied settings draft."""
         try:
-            return service.suggest_music_direction(project_id)
+            with inline_job(project_id, "music_settings"):
+                return service.suggest_music_direction(project_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except PipelineError as exc:
@@ -1149,9 +1174,10 @@ def create_app(
         project_id: str, composition_id: str,
     ) -> dict[str, Any]:
         try:
-            return service.regenerate_edit_plan_composition(
-                project_id, composition_id,
-            ).model_dump(mode="json")
+            with inline_job(project_id, "editorial_composition", composition_id=composition_id):
+                return service.regenerate_edit_plan_composition(
+                    project_id, composition_id,
+                ).model_dump(mode="json")
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except PipelineError as exc:
@@ -1171,11 +1197,10 @@ def create_app(
         project_id: str, request: EditorialRevisionRequest,
     ) -> dict[str, Any]:
         try:
-            return service.create_edit_plan_revision(
-                project_id,
-                request.instruction,
-                composition_id=request.composition_id,
-            ).model_dump(mode="json")
+            with inline_job(project_id, "editorial_revision", composition_id=request.composition_id):
+                return service.create_edit_plan_revision(
+                    project_id, request.instruction, composition_id=request.composition_id,
+                ).model_dump(mode="json")
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except PipelineError as exc:
@@ -1725,13 +1750,11 @@ def create_app(
                         "tag_count": existing.tag_count,
                         "warnings": [],
                     }
-            script, warnings = service.tts.generate_performance_script(
-                project_id,
-                text=request.text,
-                intensity=request.intensity,
-                notes=request.notes,
-                provider=request.provider,
-            )
+            with inline_job(project_id, "performance_tags", provider=request.provider):
+                script, warnings = service.tts.generate_performance_script(
+                    project_id, text=request.text, intensity=request.intensity,
+                    notes=request.notes, provider=request.provider,
+                )
             return {
                 "script": script.model_dump(mode="json"),
                 "tag_count": script.tag_count,
@@ -1759,13 +1782,11 @@ def create_app(
     ) -> dict[str, Any]:
         """Re-tag a single segment with the local LLM; other segments are kept."""
         try:
-            script, warnings = service.tts.regenerate_performance_segment(
-                project_id,
-                request.key,
-                provider=request.provider,
-                intensity=request.intensity,
-                notes=request.notes,
-            )
+            with inline_job(project_id, "performance_tags", provider=request.provider, segment=request.key):
+                script, warnings = service.tts.regenerate_performance_segment(
+                    project_id, request.key, provider=request.provider,
+                    intensity=request.intensity, notes=request.notes,
+                )
             return {
                 "script": script.model_dump(mode="json"),
                 "tag_count": script.tag_count,
@@ -1888,9 +1909,8 @@ def create_app(
     def regenerate_thumbnail_magic_prompt(project_id: str) -> dict[str, Any]:
         """Build and persist the local-LLM caption without loading Ideogram."""
         try:
-            return service.thumbnails.prepare_ideogram_magic_prompt(
-                project_id, regenerate=True,
-            )
+            with inline_job(project_id, "thumbnail_prompt"):
+                return service.thumbnails.prepare_ideogram_magic_prompt(project_id, regenerate=True)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:
@@ -2558,7 +2578,7 @@ def create_app(
             job.status not in {
                 JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED,
             }
-            and job.parameters.get("managed_by") != "pipeline"
+            and job.parameters.get("managed_by") not in {"pipeline", "request"}
         )
         return payload
 
