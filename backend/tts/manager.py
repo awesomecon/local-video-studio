@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from backend.core.progress import ProgressReporter, current_progress_reporter, report_progress
 from backend.models import GenerationRequest, GenerationResult
 from backend.models.errors import BackendError, BackendErrorCode, redact_secrets
-from backend.schemas import Asset, AssetType, GenerationAttempt, GenerationJob, JobStatus, utc_now
+from backend.schemas import Asset, AssetType, GenerationAttempt, GenerationJob, JobProgress, JobStatus, utc_now
 from backend.schemas.paths import resolve_asset_path
 
 from .audio import WavJoinResult, apply_wav_gain, join_wav_files_detailed, wav_duration
@@ -36,6 +37,19 @@ from .performance_llm import PerformanceTagger
 
 
 logger = logging.getLogger(__name__)
+
+
+def _chunk_sampler_progress(index: int, total: int) -> ProgressReporter | None:
+    reporter = current_progress_reporter()
+    if reporter is None:
+        return None
+
+    def report(detail: JobProgress) -> None:
+        if detail.phase == "sampling":
+            reporter(detail.model_copy(update={"phase": f"Sampling chunk {index} of {total}"}))
+
+    return report
+
 
 _PROVIDER_DIR = {
     "qwen_tts": "qwen", "step_audio_editx": "step", "chatterbox": "chatterbox",
@@ -353,6 +367,7 @@ class TTSManager:
         outputs: list[Path] = []
         failures: list[str] = []
         last_result: GenerationResult | None = None
+        report_progress("loading_model")
         worker_started = self.pipeline.tts_workers.ensure_running_if_managed(request.provider)
         try:
             backend.load()
@@ -361,6 +376,8 @@ class TTSManager:
                 self.pipeline.tts_workers.stop(request.provider)
             raise
         try:
+            if chunks:
+                report_progress("synthesizing_narration", completed=0, total=len(chunks), unit="chunks")
             for index, (chunk, chunk_spec) in enumerate(zip(chunks, chunk_specs), start=1):
                 if request.provider in _ISOLATED_SPEECH:
                     self._check_speech_canceled(job_id)
@@ -396,6 +413,7 @@ class TTSManager:
                         seed=request.seed + index - 1,
                         references=(reference,) if reference is not None else (),
                         settings=settings,
+                        report_progress=_chunk_sampler_progress(index, len(chunks)),
                     ))
                     last_result = result
                     if request.provider in _ISOLATED_SPEECH:
@@ -416,6 +434,9 @@ class TTSManager:
                         project, None, output, AssetType.NARRATION, result, role="narration_chunk",
                     )
                     outputs.append(output)
+                    report_progress(
+                        "synthesizing_narration", completed=len(outputs), total=len(chunks), unit="chunks",
+                    )
                 except Exception as exc:
                     error = str(exc)[:1000]
                     failures.append(f"chunk {index}: {error}")
@@ -457,6 +478,7 @@ class TTSManager:
             outputs = self._enhance_with_step(
                 project, profile, chunks, outputs, request, job_id=job_id,
             )
+        report_progress("joining_audio")
         chunk_records = self._chunk_records(root, outputs, chunk_specs, request, job_id)
         take = root / "narration" / "takes" / request.provider / f"{job_component}.wav"
         join_result = self._publish_master_join(outputs, take, pause_ms=request.pause_ms)
@@ -783,13 +805,16 @@ class TTSManager:
             self.pipeline.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
             self.pipeline.jobs.transition(job.id, JobStatus.LOADING_MODEL, progress=0.1)
             self.pipeline.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
-            with self.pipeline._lock, self.pipeline._gpu_lock:
-                output = self._regenerate_chunk(
-                    job.project_id,
-                    str(job.parameters["source_asset_id"]),
-                    int(job.parameters["chunk_index"]),
-                    job.id,
-                )
+            with self.pipeline.jobs.tracking(job.id):
+                report_progress("waiting_for_gpu")
+                with self.pipeline._lock, self.pipeline._gpu_lock:
+                    report_progress("synthesizing_chunk")
+                    output = self._regenerate_chunk(
+                        job.project_id,
+                        str(job.parameters["source_asset_id"]),
+                        int(job.parameters["chunk_index"]),
+                        job.id,
+                    )
             current = self.pipeline.jobs.get(job.id)
             if current is not None and current.status is JobStatus.CANCELED:
                 return output
@@ -1593,6 +1618,8 @@ class TTSManager:
                 self.pipeline.tts_workers.stop("step_audio_editx")
             raise
         try:
+            if chunks:
+                report_progress("enhancing_narration", completed=0, total=len(chunks), unit="chunks")
             for index, (text, source) in enumerate(zip(chunks, qwen_outputs), start=1):
                 settings = {
                     "filename": f"{index:04d}.wav", "mode": "edit",
@@ -1606,6 +1633,7 @@ class TTSManager:
                         job_id=f"{job_id}:step:{index}", output_dir=step_dir, prompt=text,
                         seed=request.seed + index - 1,
                         references=(self.voice_profile_audio_path(profile),), settings=settings,
+                        report_progress=_chunk_sampler_progress(index, len(chunks)),
                     ))
                     output = result.outputs[0]
                     self._atomic_json(output.with_suffix(".json"), {
@@ -1621,6 +1649,9 @@ class TTSManager:
                         role="narration_step_edit",
                     )
                     edited.append(output)
+                    report_progress(
+                        "enhancing_narration", completed=len(edited), total=len(chunks), unit="chunks",
+                    )
                 except Exception as exc:
                     error = str(exc)[:1000]
                     failures.append(f"Step chunk {index}: {error}")

@@ -11,6 +11,8 @@ import {
   ttsModels, setNarrationTakeGain, unloadTtsProvider, uploadVoiceProfile,
 } from "../api.js";
 import { loadingState, errorPanel, badge, icon, toast, toastError, confirm, field as sharedField } from "../ui.js";
+import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode } from "../video-mode.js";
 import { geminiKeyPanel } from "../gemini-key.js";
 import { LANGUAGE_PAIRS, openVoiceRecorder } from "../voice-recorder.js";
@@ -525,8 +527,10 @@ function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) 
     field("Voice style", geminiStyle,
       "Optional delivery direction included with the narration prompt; blank uses the voice's default delivery."),
     geminiKey.control);
+  let narrationBusy = false;
+  let submittingNarration = false;
   const syncGenerateEnabled = () => {
-    generate.disabled = provider.value === "gemini_tts" && !geminiReady();
+    generate.disabled = narrationBusy || submittingNarration || (provider.value === "gemini_tts" && !geminiReady());
   };
   const voxGrid = el("div", { class: "pref-grid" },
     field("CFG scale", cfgValue,
@@ -734,6 +738,7 @@ function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) 
   saveVoice.onclick = async () => {
     const settings = voiceSettings();
     if (!settings) return;
+    submittingNarration = true;
     saveVoice.disabled = generate.disabled = true;
     try {
       await editProject(state.config, project.id, { settings: { voice: settings } });
@@ -777,9 +782,8 @@ function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) 
         ? "will use Google's Gemini API."
         : "will run locally.";
       toast("good", "Narration queued", `Job ${job.id.slice(0, 8)} ${destination}`);
-      refresh();
     } catch (err) { toastError(err, "generate narration"); }
-    finally { saveVoice.disabled = false; syncGenerateEnabled(); }
+    finally { submittingNarration = false; saveVoice.disabled = false; syncGenerateEnabled(); }
   };
 
   const generationSettings = el("details", { class: "studio-disclosure", open: !!voiceDraft },
@@ -807,16 +811,41 @@ function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) 
     el("summary", {}, "Model worker controls"), workerControlsPanel(models, refresh));
   referenceSettings.append(el("div", { class: "consent-warning" }, icon("alert", 18),
     el("span", {}, "Only clone a voice you own or have permission to use. Audio remains local.")));
+  const library = el("div", {},
+    takeLibraryPanel(project.id, narrations.takes || [], narrations.active_asset_id || null,
+      snapshot.stage_state?.stages?.narration, refresh, videoMode));
+  let libraryVersion = 0;
+  registerLiveUpdate(async (changes) => {
+    if (!library.isConnected || !changes.some((job) => job.project_id === project.id
+      && ["narration", "narration_chunk"].includes(job.stage) && job.status === "completed")) return;
+    const version = ++libraryVersion;
+    try {
+      const [latest, fresh] = await Promise.all([
+        listNarrationTakes(state.config, project.id), getProject(state.config, project.id),
+      ]);
+      function replaceLibrary() {
+        if (version !== libraryVersion || !library.isConnected) return;
+        const playing = Array.from(library.querySelectorAll("audio")).find((media) => !media.paused);
+        if (playing) {
+          playing.addEventListener("pause", replaceLibrary, { once: true });
+          return;
+        }
+        library.replaceChildren(takeLibraryPanel(project.id, latest.takes || [], latest.active_asset_id || null,
+          fresh.stage_state?.stages?.narration, refresh, videoMode));
+      }
+      replaceLibrary();
+    } catch { /* Refresh remains available after a failed read. */ }
+  });
   const workbench = el("div", { class: "stack voice-workbench" },
     section("Choose a narration source",
       el("p", { class: "muted small" },
         "Classic and Editorial both follow the actual duration when you use a recorded voiceover."),
       el("div", { class: "source-grid voice-source-grid" }, recordVoiceover, importVoiceover, openGeneration, recordedFile),
       recordingDetails),
-    takeLibraryPanel(
-      project.id, narrations.takes || [], narrations.active_asset_id || null,
-      snapshot.stage_state?.stages?.narration, refresh, videoMode,
-    ),
+    projectJobProgress(["narration", "narration_chunk"], {
+      compact: true, showTerminal: false, limit: 2,
+    }),
+    library,
     generationSettings, referenceSettings, workerSettings,
   );
   referenceSettings.append(
@@ -868,7 +897,10 @@ function build(snapshot, voices, models, narrations, tags, refresh, voiceDraft) 
       enhanceRow,
       stepGrid,
       performance,
-      el("div", { class: "row" }, saveVoice, generate)),
+      el("div", { class: "row" }, saveVoice, generate),
+      projectJobProgress(["narration"], {
+        onActive: (jobs) => { narrationBusy = jobs.length > 0; syncGenerateEnabled(); },
+      })),
   );
   return workbench;
 }
@@ -1224,6 +1256,9 @@ function providerPerformancePanel(project, current, tags, provider, script, refr
       node: el("div", { class: "field" },
         el("div", { class: "row" }, segLabel,
           el("span", { class: "spacer" }), regenSeg, clearTags),
+        projectJobProgress(["performance_tags"], {
+          projectId: project.id, matches: (job) => job.parameters?.segment === seg.key,
+        }),
         textarea,
         el("div", { class: "hint" }, `Clean source: ${seg.source}`)),
     };
@@ -1295,6 +1330,9 @@ function providerPerformancePanel(project, current, tags, provider, script, refr
       field("Focus notes", notes, "Optional direction for the tagger, e.g. pacing or mood.")),
     el("div", { class: "row" }, generateTags, el("span", { class: "spacer" }),
       ...(scriptData ? [removeTags] : [])),
+    projectJobProgress(["performance_tags"], {
+      projectId: project.id, matches: (job) => job.parameters?.segment == null,
+    }),
     ...(taggedEditors ? [taggedEditors] : []),
     useTagsRow);
   const syncProvider = (activeProvider) => {
@@ -1522,11 +1560,10 @@ function chunkList(projectId, take, refresh, videoMode) {
           : "These chunks can be repaired individually, but generate one new full narration take to enable exact scene timing.")
       : "",
     el("div", { class: "narration-chunk-list" },
-      ...chunks.map((chunk) => chunkRow(
-        projectId, take.id, chunk, timingMode, refresh))));
+      ...chunks.map((chunk) => chunkRow(projectId, take.id, chunk, timingMode))));
 }
 
-function chunkRow(projectId, takeId, chunk, timingMode, refresh) {
+function chunkRow(projectId, takeId, chunk, timingMode) {
   const scene = Number.isInteger(chunk.scene_index)
     ? `Scene ${chunk.scene_index + 1}${chunk.scene_title ? ` · ${chunk.scene_title}` : ""}`
     : timingMode === "override" ? "Script override" : "Legacy / unmapped";
@@ -1537,8 +1574,7 @@ function chunkRow(projectId, takeId, chunk, timingMode, refresh) {
       const job = await regenerateNarrationChunk(
         state.config, projectId, takeId, Number(chunk.index));
       toast("good", "Chunk regeneration queued",
-        `Job ${job.id.slice(0, 8)} will create and activate a new take. Use Refresh when it completes.`);
-      window.setTimeout(refresh, 1500);
+        `Job ${job.id.slice(0, 8)} will create and activate a new take.`);
     } catch (err) {
       toastError(err, "regenerate narration chunk");
       regenerate.disabled = false;
@@ -1553,7 +1589,12 @@ function chunkRow(projectId, takeId, chunk, timingMode, refresh) {
     el("p", { class: "small narration-chunk-text" }, chunk.text || "(no saved text)"),
     chunk.url ? el("audio", { controls: true, preload: "metadata", src: chunk.url,
       "aria-label": `Play narration chunk ${chunk.index}` }) : "",
-    el("div", { class: "row" }, regenerate));
+    el("div", { class: "row" }, regenerate),
+    projectJobProgress(["narration_chunk"], {
+      projectId,
+      matches: (job) => job.parameters?.source_asset_id === takeId && job.parameters?.chunk_index === Number(chunk.index),
+      onActive: (jobs) => { regenerate.disabled = jobs.length > 0; },
+    }));
 }
 
 export function providerLabel(provider) {

@@ -29,6 +29,7 @@ import { initAlertSound } from "./alert-sound.js";
 import { health, systemStatus, listProjects } from "./api.js";
 import { effectiveVideoMode } from "./video-mode.js";
 import { createJobFeed } from "./events.js";
+import { jobLifecycleChanges, jobProgress, refreshJobProgress } from "./job-progress.js";
 import { renderDashboard } from "./pages/dashboard.js";
 import { renderNewProject } from "./pages/new-project.js";
 import { renderProject } from "./pages/project.js";
@@ -90,14 +91,13 @@ let contentEl = null;
 let storyboardNavEl = null;
 /** @type {HTMLElement|null} the `.body` grid (nav + content). */
 let bodyEl = null;
-/** @type {(() => void)|null} live-update hook for the currently displayed screen. */
+/** @type {((changes: import("./api.js").GenerationJob[]) => void)|null} */
 let liveUpdate = null;
 
 /**
- * Register the current screen's live-update hook, called whenever the job
- * feed emits an update (SSE or polling). Pass null to clear (done on every
- * route change). Screens that need live data (Job Monitor) register one.
- * @param {(() => void)|null} fn
+ * Refresh screen data when a relevant job appears or settles. Activity
+ * indicators handle counters and intermediate phases independently.
+ * @param {((changes: import("./api.js").GenerationJob[]) => void)|null} fn
  */
 export function registerLiveUpdate(fn) {
   liveUpdate = fn;
@@ -379,10 +379,22 @@ function renderSystem(sys) {
 function renderJobCount() {
   const queued = countQueuedJobs(state.jobs);
   const active = countActiveJobs(state.jobs);
-  slot("jobs").replaceChildren(el("span", {
-    class: "badge " + (queued || active ? "badge-accent" : "badge-neutral"),
-    title: `Job feed: ${state.feedStatus || "starting..."}`,
-  }, `${queued} queued` + (active ? ` - ${active} active` : "")));
+  const target = slot("jobs");
+  let link = target.querySelector("a");
+  if (!link) {
+    link = el("a", { href: "#/jobs" });
+    target.replaceChildren(el("div", { class: "topbar-job-summary" }, link,
+      jobProgress((job) => !job.parameters?.parent_job_id, {
+        compact: true, summary: true, showTerminal: false,
+        onActive: (jobs) => { target.dataset.hasJobs = String(jobs.length > 0); },
+      })));
+  }
+  const connection = state.feedStatus === "reconnecting" ? " · Reconnecting"
+    : state.feedStatus === "offline" ? " · Updates offline" : "";
+  link.className = "badge " + (queued || active ? "badge-accent" : "badge-neutral");
+  link.title = `Open Jobs · Feed ${state.feedStatus || "starting"}`;
+  link.textContent = `${queued} queued · ${active} active${connection}`;
+  refreshJobProgress();
 }
 
 /* ============================================================================
@@ -524,7 +536,7 @@ async function bootProjects() {
   // A mounted screen whose rows resolve project titles (Job Monitor) re-renders
   // only on job-feed frames; without a change to the job set no further frame
   // arrives, so poke the live hook to pick up the freshly loaded projects.
-  if (liveUpdate) liveUpdate();
+  liveUpdate?.([]);
 }
 
 /* ============================================================================
@@ -571,7 +583,9 @@ function notifyJobTransitions(jobs) {
       && TERMINAL_JOB_STATUSES.has(now) && !TERMINAL_JOB_STATUSES.has(prev)) {
       // Child rows (e.g. one scene_visual per batch scene) are announced by
       // their parent job; per-row toasts would flood the toast region.
-      if (!(job.parameters && job.parameters.parent_job_id)) announceTerminalJob(job);
+      if (!job.parameters?.parent_job_id && job.parameters?.managed_by !== "request") {
+        announceTerminalJob(job);
+      }
     }
     lastJobStatus.set(job.id, now);
   }
@@ -583,8 +597,19 @@ function notifyJobTransitions(jobs) {
 function startJobFeed() {
   const feed = createJobFeed({
     config: state.config,
-    onJobs: (jobs) => { state.jobs = jobs; notifyJobTransitions(jobs); renderJobCount(); if (liveUpdate) liveUpdate(); },
-    onStatus: (st) => { state.feedStatus = st; renderJobCount(); if (liveUpdate) liveUpdate(); },
+    onJobs: (jobs) => {
+      const changes = jobLifecycleChanges(state.jobs, jobs);
+      const jobsView = parseRoute().name === "jobs";
+      state.jobs = jobs;
+      notifyJobTransitions(jobs);
+      renderJobCount();
+      if (changes.length || jobsView) liveUpdate?.(changes);
+    },
+    onStatus: (st) => {
+      state.feedStatus = st;
+      renderJobCount();
+      if (parseRoute().name === "jobs") liveUpdate?.([]);
+    },
   });
   state.feed = feed;
   renderJobCount();
@@ -665,6 +690,7 @@ function renderRoute() {
   registerLiveUpdate(null);
   const renderer = SCREENS[route.name];
   contentEl.replaceChildren(renderer(route));
+  refreshJobProgress();
   contentEl.scrollTop = 0;
   if (drawerOpen) {
     closeDrawer();

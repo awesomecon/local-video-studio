@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.core.progress import report_progress
 from backend.timeline.shots import RENDERER_TRANSITION_KINDS, SceneRenderPlan
 
 from .binaries import FFmpegBinaries, discover_binaries, require_ffmpeg
@@ -378,7 +379,9 @@ class SceneAssembler:
                 ),
                 timeout=max(120.0, plan.total_frames / plan.fps * 20 + 60),
                 job_id=job_id,
+                encoding=("encoding_scene", plan.duration_seconds),
             )
+            report_progress("quality_control")
             self._quality_check(staged, plan, expected_size)
             media_digest = sha256_file(staged)
             media_size = staged.stat().st_size

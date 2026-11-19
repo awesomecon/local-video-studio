@@ -7,6 +7,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
+from backend.core.progress import report_progress
 from backend.timeline.models import Timeline
 
 from .binaries import FFmpegBinaries, discover_binaries, require_ffmpeg
@@ -72,6 +73,7 @@ class FFmpegRenderer:
             run_media_process(
                 build_video_command(timeline, silent_video, selected, self.binaries),
                 timeout=max(120.0, timeline.duration_seconds * 10),
+                encoding=("encoding_video", timeline.duration_seconds),
             )
             subtitle_path = None
             if timeline.subtitles:
@@ -98,7 +100,9 @@ class FFmpegRenderer:
                         subtitle_path=subtitle_path,
                     ),
                     timeout=max(120.0, timeline.duration_seconds * 10),
+                    encoding=("mixing_export", timeline.duration_seconds),
                 )
+                report_progress("saving_outputs")
                 with media_output_publication():
                     os.replace(staged_output, output)
             finally:

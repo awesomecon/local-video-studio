@@ -33,10 +33,9 @@ def test_app_toasts_once_per_job_terminal_transition() -> None:
     assert "function notifyJobTransitions(jobs) {" in source
     # The notifier runs on every feed frame, before the top bar count and the
     # screen hook, so toasts fire regardless of which screen is showing.
-    assert (
-        "onJobs: (jobs) => { state.jobs = jobs; notifyJobTransitions(jobs);"
-        in source
-    )
+    feed = source.split("onJobs: (jobs) => {", 1)[1].split("onStatus:", 1)[0]
+    assert feed.index("state.jobs = jobs;") < feed.index("notifyJobTransitions(jobs);")
+    assert feed.index("notifyJobTransitions(jobs);") < feed.index("renderJobCount();")
     # Jobs already terminal on the first frame must not re-alert: the diff is
     # only taken when a previous status was recorded.
     assert "prev !== undefined && prev !== now" in source
@@ -51,7 +50,7 @@ def test_scene_editor_updates_live_without_touching_the_form() -> None:
     assert 'import { registerLiveUpdate } from "../app.js";' in source
     assert 'const TERMINAL_JOB_STATUSES = ["completed", "failed", "canceled"];' in source
     assert "function sceneSignature(sceneId, snap) {" in source
-    assert "registerLiveUpdate(async () => {" in source
+    assert "registerLiveUpdate(async (changes) => {" in source
     # Unchanged snapshots are skipped (no churn, no re-fetch of assets).
     assert "if (sig === lastSig) return;" in source
     # A lock change rebuilds the whole form; live refreshes otherwise only
@@ -67,22 +66,22 @@ def test_scene_editor_updates_live_without_touching_the_form() -> None:
 
 
 def test_screens_without_form_state_refresh_live() -> None:
-    # These screens hold no long-lived form state, so a full region rebuild
-    # per feed frame is safe (and the skeleton is skipped so content does not
-    # flash).
+    # Job lifecycle changes refresh the data without showing a skeleton.
     for rel in ("pages/storyboard.js", "pages/timeline.js", "pages/export.js"):
         source = _js(rel)
         assert 'import { registerLiveUpdate } from "../app.js";' in source
         assert "load(body, { skeleton: false })" in source
     # Captions has two regions (alignment model + captions); one shared
-    # skeleton-free load refreshes both on every feed frame.
+    # skeleton-free load refreshes both when relevant work finishes.
     captions = _js("pages/captions.js")
     assert 'import { registerLiveUpdate } from "../app.js";' in captions
-    assert "registerLiveUpdate(() => load({ skeleton: false }));" in captions
+    assert "registerLiveUpdate((changes) => {" in captions
+    assert "load({ skeleton: false })" in captions
     # Script refreshes only the narration region; the plan region is
     # populated exclusively by an explicit planning action.
     script = _js("pages/script.js")
-    assert "registerLiveUpdate(() => loadScript(scriptRegion, { skeleton: false }));" in script
+    assert "registerLiveUpdate((jobs) => {" in script
+    assert "loadScript(scriptRegion, { skeleton: false })" in script
     # Dashboard combines both regions (project list + selected overview) into
     # one hook.
     dashboard = _js("pages/dashboard.js")
@@ -98,7 +97,7 @@ def test_export_explains_and_tracks_render_only_workflow() -> None:
     assert '"Re-render final video"' in source
     assert "It does not contact the LLM, run TTS, or generate graphics." in source
     assert "renderInputSummary(snap, stages)" in source
-    assert "renderStageLabel(job.parameters && job.parameters.current_stage)" in source
+    assert 'projectJobProgress(["render", "render_stage", "pipeline"]' in source
     assert "Existing scripts, narration, scene graphics, music, and captions will not be regenerated." in source
 
 
@@ -146,14 +145,14 @@ def test_export_editorial_workflow_presentation() -> None:
 def test_form_screens_do_not_full_rerender() -> None:
     # Voice and Music have long-lived editable settings forms; a full live
     # re-render would wipe in-progress edits.
-    assert "registerLiveUpdate" not in _js("pages/voice.js")
-    # Music registers a hook, but it must only sync the generate/regenerate
-    # job region (syncJobState) — never reload the whole screen, which would
-    # reset the settings form mid-edit. When the job settles it refreshes
-    # only the studio/cues columns (refreshAfterGeneration).
+    voice = _js("pages/voice.js").split("registerLiveUpdate(async (changes) => {", 1)[1].split("\n  });", 1)[0]
+    assert "library.replaceChildren(takeLibraryPanel(" in voice
+    assert "body.replaceChildren(" not in voice
+    assert 'playing.addEventListener("pause", replaceLibrary' in voice
+    # Music refreshes the studio/cues and completed soundtrack only.
     music = _js("pages/music.js")
     assert "registerLiveUpdate" in music
-    assert "syncJobState()" in music
+    assert 'projectJobProgress(["music"], {' in music
     assert "registerLiveUpdate(() => load(" not in music
     assert "refreshAfterGeneration" in music
 
@@ -301,19 +300,23 @@ def test_job_monitor_rows_are_keyed_and_survive_feed_frames() -> None:
 
     A full-list rebuild replaces every Cancel/Retry button once per second,
     which swallows clicks between mousedown and mouseup and resets hover,
-    focus, and text selection. Rows are keyed by job id and rebuilt only when
-    their stamp changes; ordering re-appends (moves) the surviving nodes.
+    focus, and text selection. Current work is grouped, and the group layout
+    is replaced only when membership or order changes.
     """
     source = _js("pages/jobs.js")
     assert "const rows = new Map();" in source
     assert "function rowStamp(job, ctx) {" in source
     assert "entry.stamp !== stamp" in source
-    assert "body.replaceChildren();" in source
-    assert "body.append(entry.node);" in source
+    assert "const layoutChanged = body.dataset.groups !== groupsStamp" in source
+    assert "return entry.node;" in source
+    assert "if (layoutChanged) {" in source
+    assert "body.replaceChildren(...sections);" in source
     # Elapsed time keeps ticking between feed frames without rebuilding rows.
-    assert 'setInterval(' in source
-    assert 'screen.querySelectorAll("[data-elapsed]")' in source
-    assert "clearInterval(ticker);" in source
+    progress = _js("job-progress.js")
+    assert "jobProgress((entry) => entry.id === job.id" in source
+    assert "setInterval(" in progress
+    assert 'document.querySelectorAll("[data-job-clock]")' in progress
+    assert "clearInterval(clock);" in progress
 
 
 def test_job_monitor_surfaces_substage_queue_position_and_times() -> None:
@@ -321,7 +324,7 @@ def test_job_monitor_surfaces_substage_queue_position_and_times() -> None:
     source = _js("pages/jobs.js")
     shared_ui = _js("ui.js")
     # Parent-job sub-stage (render/pipeline/visual_batch current_stage).
-    assert '"Current stage: "' in source
+    assert "job.parameters?.current_stage" in _js("job-progress.js")
     # Queue order mirrors the backend drain order (priority DESC, oldest first).
     assert "Queue position #" in source
     assert "(b.priority - a.priority)" in source
@@ -347,15 +350,16 @@ def test_job_monitor_filters_by_status_group_and_project() -> None:
     # Status-group chips plus a project filter, session-scoped.
     assert '"active", "Active"' in source
     assert '"queued", "Queued"' in source
-    assert '"failed", "Failed"' in source
+    assert '"failed", "Failed history"' in source
     assert '"finished", "Finished"' in source
-    assert 'let statusFilter = "all";' in source
+    assert 'let statusFilter = "current";' in source
+    assert '["Needs attention", currentJobFailures(scoped)]' in source
     assert '"aria-label": "Filter by project"' in source
     assert "state.projects.map" in source
-    # The summary counts always describe the full (unfiltered) list.
+    # History summaries use the selected project scope.
     assert "function summaryText(all, shown) {" in source
     # Filters never mutate the shared job list (top bar counts stay exact).
-    assert "const filtered = all" in source
+    assert "const scoped = all.filter(" in source
 
 
 def test_app_suppresses_toasts_for_parented_child_jobs() -> None:
@@ -363,7 +367,7 @@ def test_app_suppresses_toasts_for_parented_child_jobs() -> None:
     shared_ui = _js("ui.js")
     # A visual batch produces one terminal toast (its own), not one per scene.
     assert (
-        "if (!(job.parameters && job.parameters.parent_job_id)) announceTerminalJob(job);"
+        'if (!job.parameters?.parent_job_id && job.parameters?.managed_by !== "request")'
         in source
     )
     assert "STAGE_LABELS" in source

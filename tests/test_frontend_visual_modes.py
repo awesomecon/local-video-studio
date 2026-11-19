@@ -5,7 +5,7 @@ from backend.schemas import VisualType
 
 FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 # The visual-mode catalog lives in js/shots.js: one source shared by the
-# scene editor's legacy form and the Add Shot chooser.
+# scene form, shot form, and Add Shot chooser.
 SHOTS_HELPERS = FRONTEND / "js" / "shots.js"
 SCENE_EDITOR = FRONTEND / "js" / "pages" / "scene-editor.js"
 THUMBNAILS_PAGE = FRONTEND / "js" / "pages" / "thumbnails.js"
@@ -24,7 +24,7 @@ def test_scene_editor_describes_every_visual_mode_and_its_readiness() -> None:
     assert source.count('value: "custom"') == 1
 
     assert 'label: "Image motion"' in catalog
-    assert "Generates a Krea 2 or Qwen-Image-2512 still locally" in catalog
+    assert "Turn a still into a moving shot" in catalog
     assert 'label: "Qwen-Image-2512 text still"' in catalog
     assert 'label: "Ideogram 4 still image"' in catalog
     assert 'id: "se-sh-ideogram-mode"' in source
@@ -53,12 +53,16 @@ def test_scene_editor_describes_every_visual_mode_and_its_readiness() -> None:
         assert f'value: "{camera_move}"' in source
     assert 'camera_instruction: cameraInstruction.value' in source
     assert 'label: "MiniMax H3 AV shot (audio + video)"' in catalog
-    assert "Native H3 audio is preview-only" in catalog
+    assert "Clip audio plays in preview only." in catalog
     assert 'return currentType === "h3_audiovisual" ? "high" : "standard"' in source
     assert source.index("let h3Policy = null;") < source.index("initializeH3Fields();")
     assert 'label: "MiniMax H3 reference video — unwired"' in catalog
     assert 'label: "Wan video — unwired"' in catalog
-    assert "for (const wired of [true, false])" in source
+    for group in ("Text and graphics", "Still images", "Motion and video", "Existing media"):
+        assert f'group: "{group}"' in catalog
+    assert 'mode.wired ? mode.group : "Mock only"' in source
+    assert 'el("optgroup", { label })' in source
+    assert "Available in mock mode only." in source
     assert "Wan video (audio + video)" not in source
     assert "const saved = await persistChanges();" in source
     assert source.index("const saved = await persistChanges();") < source.index(

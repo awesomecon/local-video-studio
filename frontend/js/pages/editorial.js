@@ -61,6 +61,7 @@ import {
 } from "../ui.js";
 import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 import {
   editorialPlanState,
@@ -222,6 +223,8 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
   let previewFrame = null;
   /** @type {HTMLElement | null} the preview well the frame mounts into. */
   let previewWell = null;
+  /** @type {HTMLElement | null} */
+  let stillHost = null;
   /** @type {HTMLElement | null} plan-status badge host (workspace only). */
   let statusHost = null;
   /** @type {HTMLElement | null} stale/untracked note host (workspace only). */
@@ -300,6 +303,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
             : "Generate the Edit Plan to lay out what appears on screen as the narration plays.",
         actions,
       ),
+      projectJobProgress(["editorial_plan"], { projectId }),
       el("div", { class: "panel-body" },
         readingUrl && !needsScript ? readingPlanForm(readingUrl) : null,
         el("div", { class: "small", style: { fontWeight: "650" } }, "How it works"),
@@ -403,33 +407,24 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
   function paintStatusAndNotes(editorial) {
     const planState = editorialPlanState(editorial);
     if (statusHost) {
-      // Spread an array for the conditional second child: native
-      // replaceChildren() coerces a bare `null` argument to the text "null"
-      // (unlike the local el()/fill() helpers, which skip nulls).
-      statusHost.replaceChildren(
-        planState.kind === "stale"
-          ? badge("warning", "Edit Plan is stale")
-          : planState.kind === "untracked"
-            ? badge("neutral", "Edit Plan available")
-            : badge("good", "Edit Plan available"),
-        ...(planState.kind === "current"
-          ? [el("span", { class: "muted small" }, "Current")]
-          : []),
-      );
+      const status = planState.kind === "untracked" ? [badge("neutral", "Edit Plan available")]
+        : planState.kind === "stale" ? [] : [badge("good", "Edit Plan available")];
+      statusHost.replaceChildren(...status);
     }
     if (noteHost) {
       const notes = [];
       if (planState.kind === "stale") {
+        const reasons = planState.reasons.map((reason) =>
+          reason.replace(/ since (?:the plan|it) was generated$/, "")).filter(Boolean);
         notes.push(el("div", { class: "banner banner-warning" },
-          badge("warning", "Stale", false),
-          el("div", {},
-            el("div", {}, planState.reasons.length
-              ? "The plan was generated before recent changes:"
-              : "Tracked inputs changed since this plan was generated:"),
-            ...planState.reasons.map((reason) => el("div", { class: "muted small" }, reason)),
-            el("div", { class: "muted small" },
-              "The preview uses the saved plan. Review the changes and use AI revision to update the cut."),
-          ),
+          badge("warning", "Edit Plan is stale"),
+          el("div", { class: "small" },
+            reasons.length ? `${reasons[0][0].toUpperCase()}${reasons[0].slice(1)}.` : "Inputs changed.",
+            " The preview uses the saved plan.",
+            reasons.length > 1 ? el("details", { class: "ed-stale-details" },
+              el("summary", {}, "Other changes"),
+              el("ul", {}, reasons.slice(1).map((reason) => el("li", {}, reason))),
+            ) : null),
         ));
       } else if (planState.kind === "untracked") {
         notes.push(el("p", { class: "muted small" },
@@ -502,6 +497,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
             ? ` tpl-${sum.template}` : ""),
         type: "button",
         "data-ed-comp-card": sum.id,
+        "aria-pressed": String(sum.id === selectedId),
         // Time-proportional width with a readable floor; CSS clamps it.
         style: { flexGrow: String(Math.max(0.6, sum.duration != null ? sum.duration : 1)) },
         title: `${sum.id}: ${templateLabel(sum.template)}`,
@@ -531,14 +527,36 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     selectedId = id;
     syncStripSelection();
     paintDetailHost();
+    paintCompositionStill();
     seekPreview();
+  }
+
+  function paintCompositionStill() {
+    if (!stillHost) return;
+    const url = safeEditorialPreviewUrl(snapRef?.editorial?.preview_url, projectId);
+    stillHost.hidden = previewOn || !url || !selectedId;
+    if (stillHost.hidden) return;
+    const src = `${url}?still=${encodeURIComponent(selectedId)}`;
+    if (stillHost.dataset.src === src) return;
+    stillHost.dataset.src = src;
+    const ratio = previewAspectRatio(planRef, snapRef?.project);
+    stillHost.replaceChildren(el("figure", { class: "ed-composition-still" },
+      el("iframe", {
+        class: "ed-still-frame", src, title: "Still from the selected composition",
+        loading: "lazy", tabIndex: -1,
+        style: { aspectRatio: ratio.css, maxWidth: `${370 * ratio.number}px` },
+      }),
+      el("figcaption", { class: "small muted" }, "Composition still"),
+    ));
   }
 
   /** Keep the strip's selected-card highlight in sync after a selection. */
   function syncStripSelection() {
     if (!workspaceRoot) return;
     for (const card of /** @type {NodeListOf<HTMLElement>} */ (workspaceRoot.querySelectorAll("[data-ed-comp-card]"))) {
-      card.classList.toggle("selected", card.getAttribute("data-ed-comp-card") === selectedId);
+      const selected = card.getAttribute("data-ed-comp-card") === selectedId;
+      card.classList.toggle("selected", selected);
+      card.setAttribute("aria-pressed", String(selected));
     }
   }
 
@@ -717,6 +735,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       showPreview.classList.toggle("btn-primary", !previewOn);
       showPreview.setAttribute("aria-expanded", String(previewOn));
       previewWell.hidden = !previewOn;
+      paintCompositionStill();
       if (previewOn) mountPreviewFrame();
       else {
         previewFrame = null;
@@ -738,7 +757,6 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
           el("span", { class: "spacer" }),
           (summaryHost = el("span", { class: "muted small" }, summaryBits)),
         ),
-        (noteHost = el("div", {})),
         buildStrip(summary.compositions),
       ),
     );
@@ -758,6 +776,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
               "Preview is unavailable for this project's snapshot metadata.")
             : null,
         ),
+        (stillHost = el("div", { class: "ed-still-host", hidden: previewOn })),
         (previewWell = el("div", { id: "editorial-preview", class: "ed-preview-well", hidden: !previewOn })),
         el("div", { class: "row mt" },
           el("a", { class: "btn btn-sm", href: "#/export" }, "Continue to Export"),
@@ -781,12 +800,14 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
       ),
     );
     workspaceRoot = el("div", { class: "ed-layout" }, sequenceCol, canvasCol, settingsCol);
-    body.replaceChildren(errors, workspaceRoot);
+    noteHost = el("div", { class: "ed-notes" });
+    body.replaceChildren(errors, noteHost, workspaceRoot);
     paintStatusAndNotes((snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
       ? snapRef.editorial : {});
     paintSettingsHost((snapRef && snapRef.editorial && typeof snapRef.editorial === "object")
       ? snapRef.editorial : {});
     paintDetailHost();
+    paintCompositionStill();
     if (previewOn) mountPreviewFrame();
   }
 
@@ -801,6 +822,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     settingsHost = null;
     detailHost = null;
     previewWell = null;
+    stillHost = null;
     previewFrame = null;
     workspaceRoot = null;
   }
@@ -901,6 +923,8 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
     paintSettingsHost(editorial);
   }
 
-  registerLiveUpdate(() => { void tick(); });
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === projectId && job.status === "completed")) void tick();
+  });
   load({ skeleton });
 }

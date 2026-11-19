@@ -1,6 +1,8 @@
 from pathlib import Path
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 import wave
 
 import yaml
@@ -10,6 +12,7 @@ from PIL import Image
 from backend.api.main import create_app
 from backend.core import load_config
 from backend.core.config import DEFAULT_CONFIG_PATH
+from backend.core.progress import report_progress
 from backend.models import LocalLLMBackend
 from backend.models.errors import BackendError, BackendErrorCode
 from backend.schemas import GenerationJob, JobStatus
@@ -46,6 +49,44 @@ def test_project_plan_and_status_api(tmp_path: Path) -> None:
     assert model_list.status_code == 200
     assert model_list.json()["runtime"]["mock"]["state"] == "mock"
     assert client.get("/api/jobs").status_code == 200
+
+
+def test_synchronous_generation_is_visible_before_its_response(tmp_path, monkeypatch):
+    app = create_app(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "tmp", mock_mode=True,
+    )
+    client = TestClient(app)
+    project = client.post("/api/projects", json={
+        "title": "Music progress", "topic": "Test score", "target_duration": 5,
+    }).json()["project"]
+    ready = Event()
+    release = Event()
+    result = {"source": "local_llm", "applied": False}
+
+    def suggest(project_id):
+        assert project_id == project["id"]
+        report_progress("waiting_for_llm")
+        ready.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(app.state.service, "suggest_music_direction", suggest)
+    with ThreadPoolExecutor() as executor:
+        future = executor.submit(client.post, f"/api/projects/{project['id']}/music/suggest-settings")
+        try:
+            assert ready.wait(5)
+            job = client.get("/api/jobs").json()["jobs"][0]
+            assert job["stage"] == "music_settings"
+            assert job["status"] == "generating"
+            assert job["progress_detail"]["phase"] == "waiting_for_llm"
+            assert job["cancelable"] is False
+        finally:
+            release.set()
+        response = future.result(timeout=5)
+    assert response.status_code == 200 and response.json() == result
+    finished = client.get("/api/jobs").json()["jobs"][0]
+    assert finished["id"] == job["id"] and finished["status"] == "completed"
 
 
 def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Path) -> None:
@@ -88,6 +129,14 @@ def test_editorial_plan_api_requires_script_then_persists_mock_plan(tmp_path: Pa
     assert downloaded.headers["content-disposition"] == (
         'attachment; filename="edit-plan.json"'
     )
+    preview_url = snapshot["editorial"]["preview_url"]
+    composition = generated.json()["compositions"][0]
+    still = client.get(preview_url, params={"still": composition["id"]})
+    assert still.status_code == 200
+    assert 'id="preview-controls"' not in still.text
+    assert 'id="preview-narration"' not in still.text
+    assert "fitEditorialPicture(document.documentElement)" in still.text
+    assert client.get(preview_url, params={"still": "unknown-composition"}).status_code == 404
     # The idempotent endpoint returns the existing plan rather than replacing it.
     assert client.post(f"/api/projects/{project_id}/editorial/plan").json() == generated.json()
 
@@ -860,6 +909,12 @@ def test_frontend_project_settings_and_asset_delivery(tmp_path: Path) -> None:
     assert delivered.status_code == 200
     assert delivered.content
     assert client.get(f"/api/projects/not-this-project/assets/{asset.id}/file").status_code == 404
+    assert "cover_urls" not in client.get("/api/projects").json()
+    covers = client.get("/api/projects", params={"include_covers": True}).json()["cover_urls"]
+    assert covers[project_id] == snapshot["assets"][-1]["url"]
+    (service.store.project_path(project) / asset.filepath).unlink()
+    covers = client.get("/api/projects", params={"include_covers": True}).json()["cover_urls"]
+    assert covers[project_id] is None
 
 
 def test_llm_model_selection_validates_discovery_and_persists_project(
@@ -2400,12 +2455,13 @@ def test_job_payload_annotations_follow_stage_management(tmp_path: Path) -> None
     app, client = _studio(tmp_path)
     service = app.state.service
     pid = _create_project(client, target_duration=3)["id"]
+    scene = service.ensure_plan(pid).scenes[0]
 
     bookkeeping = service.jobs.enqueue(GenerationJob(
         project_id=pid, stage="timeline", parameters={"managed_by": "pipeline"},
     ))
     standalone = service.jobs.enqueue(GenerationJob(
-        project_id=pid, stage="narration",
+        project_id=pid, scene_id=scene.id, stage="narration",
     ))
 
     listed = _batch_jobs(client)
@@ -2416,6 +2472,7 @@ def test_job_payload_annotations_follow_stage_management(tmp_path: Path) -> None
     # A queued standalone top-level row: both actions make sense.
     assert listed[standalone.id]["executable"] is True
     assert listed[standalone.id]["cancelable"] is True
+    assert listed[standalone.id]["scene_title"] == scene.title
 
     # The backend still accepts the bookkeeping cancel (the stage guard keeps
     # the row canceled without failing the pipeline); the row goes terminal.

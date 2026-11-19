@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
+import websocket
+
+from backend.schemas import JobProgress
 
 from .base import (
     BackendDescriptor,
@@ -234,11 +239,13 @@ class ComfyUIBackend(GeneratorBackend):
             ) from None
         return f"{body.get('subfolder', subfolder)}/{name}".strip("/")
 
-    def submit_workflow(self, workflow: Mapping[str, Any], *, job_id: str) -> str:
+    def submit_workflow(
+        self, workflow: Mapping[str, Any], *, job_id: str, client_id: str | None = None,
+    ) -> str:
         response = self._request(
             "POST",
             "/prompt",
-            json={"prompt": dict(workflow), "client_id": self.client_id},
+            json={"prompt": dict(workflow), "client_id": client_id or self.client_id},
         )
         try:
             prompt_id = str(response.json()["prompt_id"])
@@ -323,33 +330,7 @@ class ComfyUIBackend(GeneratorBackend):
         }
         substitutions.update(request.settings.get("substitutions", {}))
         submitted = substitute_workflow(workflow, substitutions)
-        prompt_id = self.submit_workflow(submitted, job_id=request.job_id)
-        deadline = time.monotonic() + float(
-            request.settings.get("generation_timeout", self.generation_timeout)
-        )
-        record: Mapping[str, Any] | None = None
-        while time.monotonic() < deadline:
-            self._check_canceled(request.job_id)
-            record = self.poll(prompt_id)
-            if record is not None:
-                break
-            time.sleep(self.poll_interval)
-        # A canceled prompt is deleted from the ComfyUI queue, so /history never
-        # returns a record for it; re-check before misreporting a timeout.
-        self._check_canceled(request.job_id)
-        if record is None:
-            raise BackendError(
-                BackendErrorCode.REQUEST_TIMEOUT,
-                "Timed out waiting for the ComfyUI workflow.",
-                retryable=True,
-            )
-        status = record.get("status", {})
-        if isinstance(status, Mapping) and status.get("status_str") == "error":
-            raise BackendError(
-                BackendErrorCode.INVALID_RESPONSE,
-                "The ComfyUI workflow failed.",
-                details=status,
-            )
+        prompt_id, record = self._run_workflow(submitted, request)
         outputs = self._retrieve_outputs(record, request.output_dir)
         if not outputs:
             raise BackendError(
@@ -371,6 +352,99 @@ class ComfyUIBackend(GeneratorBackend):
                 "workflow_version": request.settings.get("workflow_version", "unknown"),
             },
         )
+
+    def _run_workflow(
+        self, workflow: Mapping[str, Any], request: GenerationRequest, *, label: str = "ComfyUI",
+    ) -> tuple[str, Mapping[str, Any]]:
+        reporter = request.report_progress
+        client_id = str(uuid.uuid4()) if reporter else None
+        connection = None
+        if client_id:
+            endpoint = urlsplit(self.endpoint)
+            url = urlunsplit((
+                "wss" if endpoint.scheme == "https" else "ws", endpoint.netloc,
+                endpoint.path.rstrip("/") + "/ws", urlencode({"clientId": client_id}), "",
+            ))
+            with contextlib.suppress(OSError, websocket.WebSocketException):
+                connection = websocket.create_connection(
+                    url, timeout=min(self.timeout_seconds, 1.0), suppress_origin=True,
+                )
+        opened = connection
+        node = None
+        try:
+            prompt_id = self.submit_workflow(workflow, job_id=request.job_id, client_id=client_id)
+            if reporter:
+                reporter(JobProgress(phase="waiting_for_workflow"))
+            deadline = time.monotonic() + float(
+                request.settings.get("generation_timeout", self.generation_timeout)
+            )
+            record = None
+            while time.monotonic() < deadline:
+                self._check_canceled(request.job_id)
+                record = self.poll(prompt_id)
+                if record is not None:
+                    break
+                next_poll = min(deadline, time.monotonic() + self.poll_interval)
+                while (remaining := next_poll - time.monotonic()) > 0:
+                    self._check_canceled(request.job_id)
+                    if connection is None:
+                        time.sleep(remaining)
+                        break
+                    try:
+                        connection.settimeout(remaining)
+                        message = connection.recv()
+                    except websocket.WebSocketTimeoutException:
+                        break
+                    except (OSError, websocket.WebSocketException):
+                        connection = None
+                        if reporter:
+                            reporter(JobProgress(phase="running_workflow"))
+                        continue
+                    if not isinstance(message, str) or not reporter:
+                        continue
+                    try:
+                        event = json.loads(message)
+                    except ValueError:
+                        continue
+                    data = event.get("data") if isinstance(event, dict) else None
+                    if not isinstance(data, dict) or data.get("prompt_id") != prompt_id:
+                        continue
+                    if event.get("type") == "execution_start" or (
+                        event.get("type") == "executing" and node != data.get("node")
+                    ):
+                        node = data.get("node")
+                        reporter(JobProgress(phase="running_workflow"))
+                    elif event.get("type") == "progress":
+                        value, maximum = data.get("value"), data.get("max")
+                        if (
+                            type(value) is int and type(maximum) is int
+                            and maximum > 0 and 0 <= value <= maximum
+                        ):
+                            if data.get("node") and node != data["node"]:
+                                node = data["node"]
+                                reporter(JobProgress(phase="running_workflow"))
+                            reporter(JobProgress(
+                                phase="sampling", completed=value, total=maximum, unit="steps",
+                            ))
+            self._check_canceled(request.job_id)
+            if record is None:
+                raise BackendError(
+                    BackendErrorCode.REQUEST_TIMEOUT,
+                    f"Timed out waiting for the {label} workflow.",
+                    retryable=True,
+                )
+            status = record.get("status", {})
+            if isinstance(status, Mapping) and status.get("status_str") == "error":
+                raise BackendError(
+                    BackendErrorCode.INVALID_RESPONSE, f"The {label} workflow failed.", details=status,
+                )
+            if reporter:
+                reporter(JobProgress(phase="retrieving_outputs"))
+            return prompt_id, record
+        finally:
+            if opened is not None:
+                with contextlib.suppress(OSError, websocket.WebSocketException):
+                    opened.close(timeout=0)
 
     def cancel(self, job_id: str) -> bool:
         # Only a run that is in flight can be interrupted; flagging it first

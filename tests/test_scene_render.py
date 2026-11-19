@@ -382,9 +382,9 @@ def _encode_calls(monkeypatch) -> list:
     calls: list[list] = []
     real = scenes_module.run_media_process
 
-    def counting(argv, timeout=30.0, job_id=None):
+    def counting(argv, timeout=30.0, job_id=None, encoding=None):
         calls.append(list(argv))
-        return real(argv, timeout=timeout, job_id=job_id)
+        return real(argv, timeout=timeout, job_id=job_id, encoding=encoding)
 
     monkeypatch.setattr(scenes_module, "run_media_process", counting)
     return calls
@@ -487,7 +487,7 @@ def test_wrong_resolution_scene_publication_is_rejected_and_retained(
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(b"previous-good-render")
 
-    def wrong_resolution_run(argv, timeout=30.0, job_id=None):
+    def wrong_resolution_run(argv, timeout=30.0, job_id=None, encoding=None):
         create_placeholder_video(
             Path(argv[-1]),
             duration_seconds=2.0,

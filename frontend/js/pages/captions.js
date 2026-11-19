@@ -26,6 +26,7 @@ import { state, needsProject } from "../state.js";
 import { getProject, captionsModels, generateCaptions } from "../api.js";
 import { loadingState, errorPanel, badge, toast, toastError, stageChip } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { providerLabel } from "./voice.js";
 import { createRenderMonitor } from "../render-monitor.js";
 
@@ -129,12 +130,18 @@ function captionsScreenBody() {
       }, "Align from narration"),
       el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => load() }, "Refresh"),
     ),
+    projectJobProgress(["caption_alignment", "subtitles"]),
     captionsBody,
   );
 
   // Live path: the alignment readiness, subtitle assets, and stage state all
   // appear as the render runs.
-  registerLiveUpdate(() => load({ skeleton: false }));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === state.currentProjectId && job.status === "completed"
+      && ["caption_alignment", "subtitles", "narration", "narration_chunk", "render", "render_stage"].includes(job.stage))) {
+      void load({ skeleton: false });
+    }
+  });
   load();
   return el("div", { class: "stack captions-workspace" },
     el("div", { class: "captions-review" }, monitor.element, captionsPanel),

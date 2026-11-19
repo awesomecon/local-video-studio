@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from backend.captions import CaptionWord, build_caption_cues, restore_authored_punctuation
 from backend.core import AppConfig, LocalSecretStore
+from backend.core.progress import current_progress_job, report_progress
 from backend.core.resources import resource_path
 from backend.director import DirectorEngine
 from backend.director.image_routing import (
@@ -115,6 +116,7 @@ from backend.rendering import FFmpegRenderer, RenderOptions
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import (
     cancel_media_processes_for_job,
+    current_media_job_id,
     media_process_scope,
     run_media_process,
 )
@@ -143,6 +145,7 @@ from backend.schemas import (
     AssetType,
     GenerationAttempt,
     GenerationJob,
+    JobProgress,
     JobStatus,
     Project,
     ProjectCreate,
@@ -409,6 +412,49 @@ class PipelineService:
                 "directory": str(directory),
             }
 
+    def project_cover_url(self, project: Project) -> str | None:
+        """Choose an existing image without compiling or rendering the project."""
+        root = self.store.project_path(project)
+        assets = self.database.list_assets(
+            project.id, asset_types=(AssetType.IMAGE, AssetType.THUMBNAIL),
+        )
+        priority = {
+            "thumbnail_selected": 0,
+            "visual": 1,
+            "thumbnail": 2,
+            "editorial_generated": 3,
+            "editorial_replacement": 3,
+            "thumbnail_candidate": 4,
+        }
+        candidates = [asset for asset in reversed(assets) if str(asset.settings.get("role")) in priority]
+        candidates.sort(key=lambda asset: priority[str(asset.settings["role"])])
+        if not candidates:
+            return None
+        scenes = {scene.id: scene for scene in self.database.list_scenes(project.id)}
+        try:
+            selection = self.store.load_thumbnail_selection(project.slug)
+        except (OSError, ValueError):
+            selection = None
+        for asset in candidates:
+            role = asset.settings.get("role")
+            if role == "thumbnail_selected" and (
+                selection is None or selection.project_id != project.id
+                or selection.composite_hash != asset.settings.get("source_composite_hash")
+                or Path(selection.composite_path) != asset.filepath
+            ):
+                continue
+            try:
+                if role == "visual":
+                    scene = scenes.get(asset.scene_id or "")
+                    if scene is None or not self._is_current_visual_asset(scene, asset):
+                        continue
+                path = resolve_asset_path(root, asset.filepath)
+                if path.is_file() and path.stat().st_size > 0:
+                    return f"/api/projects/{project.id}/assets/{asset.id}/file"
+            except (OSError, TypeError, ValueError):
+                continue
+        return None
+
     def project_snapshot(self, project_id: str) -> dict[str, Any]:
         project, recovery = self._project_with_recovery(project_id)
         scenes = self.database.list_scenes(project_id)
@@ -421,6 +467,8 @@ class PipelineService:
 
         assets = []
         assets_by_scene: dict[str, list[Asset]] = {}
+        root = self.store.project_path(project)
+        render_files: dict[Path, bool] = {}
         for asset in self.database.list_assets(project_id):
             payload = asset.model_dump(mode="json")
             payload["url"] = f"/api/projects/{project.id}/assets/{asset.id}/file"
@@ -430,6 +478,14 @@ class PipelineService:
                 if asset_scene is not None and asset.settings.get("role") == "visual"
                 else True
             )
+            if asset.settings.get("role") in ("preview_render", "final_render"):
+                if asset.filepath not in render_files:
+                    try:
+                        path = resolve_asset_path(root, asset.filepath)
+                        render_files[asset.filepath] = path.is_file() and path.stat().st_size > 0
+                    except (OSError, ValueError):
+                        render_files[asset.filepath] = False
+                payload["available"] = render_files[asset.filepath]
             assets.append(payload)
             if asset.scene_id:
                 assets_by_scene.setdefault(asset.scene_id, []).append(asset)
@@ -479,9 +535,10 @@ class PipelineService:
             "stage_state": stages,
             "quality_report": self._preview_quality_report(project, stages.get("stages", {}), jobs),
         }
+        if project.video_mode is not VideoMode.EDITORIAL:
+            snapshot["has_render_narration"] = (root / "narration" / "master.wav").is_file()
         if project.video_mode is VideoMode.EDITORIAL:
             plan_status = self._editorial_plan_status(project)
-            root = self.store.project_path(project)
             edit_plan: EditPlan | None = None
             if plan_status["has_edit_plan"]:
                 try:
@@ -1000,19 +1057,22 @@ class PipelineService:
             try:
                 self.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
                 self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
-                if self.mock_mode:
-                    result = self._mock_generate(
-                        project, "image", project_dir=work_dir,
-                        prompt=spec.prompt, negative_prompt=spec.negative_prompt,
-                        seed=spec.seed,
-                        width=min(project.resolution[0], 640),
-                        height=min(project.resolution[1], 640),
-                    )
-                else:
-                    with self._gpu_lock:
-                        result = self._dispatch_image_model(
-                            project, synthetic, work_dir, image_model, use_cache=True,
+                with self.jobs.tracking(job.id):
+                    if self.mock_mode:
+                        result = self._mock_generate(
+                            project, "image", project_dir=work_dir,
+                            prompt=spec.prompt, negative_prompt=spec.negative_prompt,
+                            seed=spec.seed,
+                            width=min(project.resolution[0], 640),
+                            height=min(project.resolution[1], 640),
                         )
+                    else:
+                        report_progress("waiting_for_gpu")
+                        with self._gpu_lock:
+                            result = self._dispatch_image_model(
+                                project, synthetic, work_dir, image_model, use_cache=True,
+                            )
+                    report_progress("saving_outputs")
                 if not result.outputs or not result.outputs[0].is_file():
                     raise PipelineError("Editorial image generation returned no image")
                 from PIL import Image, UnidentifiedImageError
@@ -2526,14 +2586,16 @@ class PipelineService:
         job_id = job.id
         try:
             self.jobs.transition(job_id, JobStatus.PREPARING, progress=0.05)
-            self.jobs.transition(job_id, JobStatus.LOADING_MODEL, progress=0.1)
-            self.jobs.transition(job_id, JobStatus.GENERATING, progress=0.2)
             # TTS synthesis is GPU-heavy: _gpu_lock serializes it against
             # visuals/music GPU sections (order: _lock -> _gpu_lock).
-            with self._lock, self._gpu_lock:
-                output = self.tts.generate(
-                    job.project_id, request, job_id=job_id, activate=False,
-                )
+            with self.jobs.tracking(job_id):
+                report_progress("waiting_for_gpu")
+                with self._lock, self._gpu_lock:
+                    self.jobs.transition(job_id, JobStatus.LOADING_MODEL, progress=0.1)
+                    self.jobs.transition(job_id, JobStatus.GENERATING, progress=0.2)
+                    output = self.tts.generate(
+                        job.project_id, request, job_id=job_id, activate=False,
+                    )
             # A cancel that landed during synthesis keeps the completed take for
             # inspection but must not replace the project's active narration.
             current = self.jobs.get(job_id)
@@ -2619,6 +2681,7 @@ class PipelineService:
             plan, director_draft = self.director.plan_with_draft(
                 project, mock_mode=self.mock_mode, comparison_mode=comparison_mode,
             )
+            report_progress("saving_script")
             existing_by_index = {
                 scene.index: scene for scene in self.database.list_scenes(project.id)
             }
@@ -2940,7 +3003,8 @@ class PipelineService:
             self.jobs.transition(job.id, JobStatus.LOADING_MODEL, progress=0.10)
             self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.20)
             project = self._project(job.project_id)
-            cues = self._ensure_subtitles(project, force=True)
+            with self.jobs.tracking(job.id):
+                cues = self._ensure_subtitles(project, force=True)
             invalidated = {
                 "timeline", "render_preview", "quality_control", "render_final",
                 "thumbnails", "metadata",
@@ -2999,10 +3063,9 @@ class PipelineService:
         parent_job_id: str | None,
     ) -> Path:
         project = self._project(project_id)
-        if parent_job_id:
-            self._start_parent_job(parent_job_id)
+        run = self._start_parent_job(parent_job_id) if parent_job_id else None
         try:
-            self._update_parent_job(parent_job_id, progress=0.08, current_stage="validating_inputs")
+            self._update_parent_job(run, progress=0.08, current_stage="validating_inputs")
             self.validate_render_inputs(project_id)
             if force:
                 invalidated = {
@@ -3022,36 +3085,32 @@ class PipelineService:
 
             if project.video_mode is VideoMode.EDITORIAL:
                 self._update_parent_job(
-                    parent_job_id, progress=0.12, current_stage="editorial_visual",
+                    run, progress=0.12, current_stage="editorial_visual",
                 )
                 self._ensure_editorial_visual(project, force=force)
                 self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.14, current_stage="score_mix")
+            self._update_parent_job(run, progress=0.14, current_stage="score_mix")
             self._ensure_score_mix(project, force=force)
             self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.15, current_stage="timeline")
+            self._update_parent_job(run, progress=0.15, current_stage="timeline")
             self._ensure_timeline(project, force=force)
             self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.20, current_stage="render_preview")
-            self._update_parent_job(parent_job_id, progress=0.25, current_stage="render_preview")
+            self._update_parent_job(run, progress=0.25, current_stage="render_preview")
             self._ensure_preview(project, force=force)
             self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.45, current_stage="quality_control")
-            self._update_parent_job(parent_job_id, progress=0.50, current_stage="quality_control")
+            self._update_parent_job(run, progress=0.50, current_stage="quality_control")
             self._ensure_qc(project, force=force)
             self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.60, current_stage="render_final")
-            self._update_parent_job(parent_job_id, progress=0.65, current_stage="render_final")
+            self._update_parent_job(run, progress=0.65, current_stage="render_final")
             final = self._ensure_final(project, force=force)
             self._check_parent_job(parent_job_id)
 
-            self._update_parent_job(parent_job_id, progress=0.80, current_stage="thumbnails")
-            self._update_parent_job(parent_job_id, progress=0.85, current_stage="thumbnails")
+            self._update_parent_job(run, progress=0.85, current_stage="thumbnails")
             self._ensure_thumbnails(project, force=force)
             self._check_parent_job(parent_job_id)
 
@@ -3111,20 +3170,19 @@ class PipelineService:
         parent_job_id: str | None,
     ) -> Any:
         project = self._project(project_id)
-        if parent_job_id:
-            self._start_parent_job(parent_job_id)
+        run = self._start_parent_job(parent_job_id) if parent_job_id else None
         try:
-            self._update_parent_job(parent_job_id, progress=0.08, current_stage="validating_inputs")
+            self._update_parent_job(run, progress=0.08, current_stage="validating_inputs")
             self.validate_render_inputs(project_id)
             if force:
                 self._invalidate_stages(project, {stage})
             self._save_project(
                 project.model_copy(update={"status": ProjectStatus.RENDERING, "updated_at": utc_now()})
             )
-            self._update_parent_job(parent_job_id, progress=0.35, current_stage=stage)
+            self._update_parent_job(run, progress=0.35, current_stage=stage)
             self._run_single_stage(project, stage, force=force)
             self._check_parent_job(parent_job_id)
-            self._update_parent_job(parent_job_id, progress=0.95, current_stage=stage)
+            self._update_parent_job(run, progress=0.95, current_stage=stage)
             current = self._project(project_id)
             self._save_project(
                 current.model_copy(update={"status": ProjectStatus.COMPLETED, "updated_at": utc_now()})
@@ -3305,13 +3363,9 @@ class PipelineService:
             ]
             if existing and not force:
                 if job is None:
-                    # A standalone no-op still leaves a row: the user asked
-                    # for this scene's visual, and the monitor should show it
-                    # was satisfied without new generation.
+                    # Record that a standalone request reused the current visual.
                     job = self.jobs.enqueue(GenerationJob(
-                        project_id=project.id,
-                        scene_id=scene.id,
-                        stage="scene_visual",
+                        project_id=project.id, scene_id=scene.id, stage="scene_visual",
                         backend="mock" if self.mock_mode else "automatic",
                         parameters={"force": force},
                     ))
@@ -3336,9 +3390,7 @@ class PipelineService:
                         self.store.archive_variant(project.slug, asset.filepath)
             if job is None:
                 job = self.jobs.enqueue(GenerationJob(
-                    project_id=project.id,
-                    scene_id=scene.id,
-                    stage="scene_visual",
+                    project_id=project.id, scene_id=scene.id, stage="scene_visual",
                     backend="mock" if self.mock_mode else "automatic",
                     parameters={"force": force},
                 ))
@@ -3369,9 +3421,10 @@ class PipelineService:
         try:
             self.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
             self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
-            asset = self._generate_visual(
-                project, scene, use_cache=not bool(job.parameters.get("force")),
-            )
+            with self.jobs.tracking(job.id):
+                asset = self._generate_visual(
+                    project, scene, use_cache=not bool(job.parameters.get("force")),
+                )
             current = self.jobs.get(job.id)
             if current is not None and current.status is JobStatus.CANCELED:
                 raise PipelineError("job was canceled")
@@ -3614,9 +3667,12 @@ class PipelineService:
             )
             try:
                 self._update_parent_job(
-                    job_id,
+                    job,
                     progress=round((position / max(total, 1)) * 0.95 + 0.01, 4),
                     current_stage=f"{position + 1}/{total} · {label}",
+                    detail=JobProgress(
+                        phase="generating_batch", completed=position, total=total, unit="scenes_processed",
+                    ),
                 )
             except PipelineError:
                 cancel_remaining(position)
@@ -3650,7 +3706,7 @@ class PipelineService:
                 f"{len(failures)} of {total} queued visuals failed: {detail}. "
                 "Retry the batch to attempt only what is still missing."
             )
-        self._update_parent_job(job_id, progress=0.99, current_stage="done")
+        self._update_parent_job(job, progress=0.99, current_stage="done", detail=JobProgress(phase="saving_outputs"))
         self.jobs.complete(job_id)
 
     def cancel_job(self, job_id: str) -> GenerationJob:
@@ -3702,6 +3758,8 @@ class PipelineService:
         job = self.jobs.get(job_id)
         if job is None:
             raise KeyError(f"job not found: {job_id}")
+        if job.parameters.get("managed_by") == "request":
+            raise InvalidJobTransition("this job cannot be canceled while its request is running")
         canceled = self.jobs.cancel(job_id)
         self.tts.cancel_active(job_id)
         cancel_media_processes_for_job(job_id)
@@ -3725,7 +3783,7 @@ class PipelineService:
         terminal = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED}
         active = [
             job for job in self.jobs.list(project_id)
-            if job.status not in terminal
+            if job.status not in terminal and job.parameters.get("managed_by") != "request"
         ]
         active.sort(key=lambda job: 0 if job.stage == "visual_batch" else 1)
         canceled: list[GenerationJob] = []
@@ -4492,10 +4550,11 @@ class PipelineService:
                 try:
                     self.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
                     self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
-                    asset = self._dispatch_shot_visual(
-                        project, scene, shot,
-                        use_cache=not force, job_id=job.id,
-                    )
+                    with self.jobs.tracking(job.id):
+                        asset = self._dispatch_shot_visual(
+                            project, scene, shot,
+                            use_cache=not force, job_id=job.id,
+                        )
                     refreshed = self.jobs.get(job.id)
                     if refreshed is not None and refreshed.status is JobStatus.CANCELED:
                         raise PipelineError("job was canceled")
@@ -5213,7 +5272,12 @@ class PipelineService:
         root = self.store.project_path(project)
         intermediates: dict[str, Path] = {}
         shot_keys: dict[str, str] = {}
-        for compiled_shot, frames in zip(plan.shots, plan.frame_counts, strict=True):
+        shot_count = len(plan.shots)
+        if shot_count:
+            report_progress("normalizing_shots", completed=0, total=shot_count, unit="shots")
+        for index, (compiled_shot, frames) in enumerate(
+            zip(plan.shots, plan.frame_counts, strict=True), start=1,
+        ):
             shot = next(item for item in stored if item.id == compiled_shot.shot_id)
             source_asset = current_visual_asset(shot, self.database.list_assets(project.id))
             if source_asset is None:
@@ -5234,6 +5298,7 @@ class PipelineService:
             )
             intermediates[normalized.shot_id] = normalized.path
             shot_keys[normalized.shot_id] = normalized.cache_key
+            report_progress("normalizing_shots", completed=index, total=shot_count, unit="shots")
         destination = root / "scenes" / f"{scene.index + 1:03d}" / "rendered.mp4"
         manifest_target = destination.with_name("render-manifest.json")
         assembler = (
@@ -5316,16 +5381,16 @@ class PipelineService:
             try:
                 self._start_parent_job(job_id)
                 self._begin_job_attempt(job_id)
-                summary = self.render_scene(
-                    job.scene_id, force=bool(job.parameters.get("force")), job=job,
-                )
-                # Re-fetch before writing: the row moved through PREPARING/
-                # GENERATING above and a stale payload would reset its status.
-                current = self.jobs.get(job_id)
-                if current is not None:
-                    self.database.save_job(current.model_copy(update={
+                with self.jobs.tracking(job_id):
+                    summary = self.render_scene(
+                        job.scene_id, force=bool(job.parameters.get("force")), job=job,
+                    )
+                self.database.update_job_in_transaction(
+                    job_id,
+                    lambda current: current.model_copy(update={
                         "parameters": {**current.parameters, "result": summary},
-                    }))
+                    }) if current.status is JobStatus.GENERATING else current,
+                )
                 self.jobs.transition(job_id, JobStatus.POSTPROCESSING, progress=0.95)
                 self.jobs.complete(job_id)
             except Exception as exc:
@@ -5651,7 +5716,7 @@ class PipelineService:
             self._invalidate_stages(project, invalidated)
         return updated
 
-    def _start_parent_job(self, job_id: str) -> None:
+    def _start_parent_job(self, job_id: str) -> GenerationJob:
         job = self.jobs.get(job_id)
         if job is None:
             raise KeyError(f"job not found: {job_id}")
@@ -5659,31 +5724,42 @@ class PipelineService:
             raise PipelineError("job was canceled")
         if job.status is JobStatus.QUEUED:
             self.jobs.transition(job_id, JobStatus.PREPARING, progress=0.01)
-        self.jobs.transition(job_id, JobStatus.GENERATING, progress=0.05)
+        return self.jobs.transition(job_id, JobStatus.GENERATING, progress=0.05)
 
     def _update_parent_job(
         self,
-        job_id: str | None,
+        run: GenerationJob | None,
         *,
         progress: float,
         current_stage: str,
+        detail: JobProgress | None = None,
     ) -> None:
-        if not job_id:
+        if run is None:
             return
-        self._check_parent_job(job_id)
-        job = self.jobs.get(job_id)
-        if job is None:
-            raise KeyError(f"job not found: {job_id}")
-        parameters = {**job.parameters, "current_stage": current_stage}
-        self.database.save_job(
-            job.model_copy(
-                update={
-                    "progress": progress,
-                    "parameters": parameters,
-                    "updated_at": utc_now(),
-                }
-            )
-        )
+
+        def apply(job: GenerationJob) -> GenerationJob:
+            if job.started_at != run.started_at:
+                return job
+            if job.status is JobStatus.CANCELED:
+                raise PipelineError("job was canceled")
+            if job.status is not JobStatus.GENERATING:
+                return job
+            now = utc_now()
+            if (
+                detail is not None and detail.completed is not None and job.progress_detail is not None
+                and detail.phase == job.progress_detail.phase and detail.unit == job.progress_detail.unit
+                and detail.total == job.progress_detail.total and detail.completed != detail.total
+                and (now - job.updated_at).total_seconds() < 1
+            ):
+                return job
+            return job.model_copy(update={
+                "progress": progress,
+                "progress_detail": detail or JobProgress(phase=current_stage),
+                "parameters": {**job.parameters, "current_stage": current_stage},
+                "updated_at": now,
+            })
+
+        self.database.update_job_in_transaction(run.id, apply)
 
     def _ensure_narration(self, project: Project, *, force: bool) -> Path:
         output = self.store.project_path(project) / "narration" / "master.wav"
@@ -5886,6 +5962,7 @@ class PipelineService:
             if result.outputs[0] != destination:
                 os.replace(result.outputs[0], destination)
         elif not self.mock_mode and route_model is not None:
+            report_progress("waiting_for_gpu")
             with self._gpu_lock:
                 result = self._dispatch_image_model(
                     project, scene, directory, route_model, use_cache=use_cache,
@@ -5895,6 +5972,7 @@ class PipelineService:
         elif not self.mock_mode and scene.visual_type is VisualType.H3_AUDIOVISUAL:
             # GPU-heavy ComfyUI section: serialized by _gpu_lock (see lock-order
             # comment in __init__); callers may already hold _lock (generate_scene).
+            report_progress("waiting_for_gpu")
             with self._gpu_lock:
                 result = self._dispatch_h3(project, scene, directory, use_cache=use_cache)
             pending = directory / ".video.mp4.pending"
@@ -5910,6 +5988,7 @@ class PipelineService:
                 raise PipelineError(f"H3 output failed QC before publication: {exc}") from exc
             self._publish_pending_file(project, pending, destination)
         elif not self.mock_mode and scene.visual_type is VisualType.QWEN_IMAGE_STILL:
+            report_progress("waiting_for_gpu")
             with self._gpu_lock:
                 result = self._dispatch_qwen_image_2512(
                     project, scene, directory, use_cache=use_cache,
@@ -5917,6 +5996,7 @@ class PipelineService:
             if result.outputs[0] != destination:
                 os.replace(result.outputs[0], destination)
         elif not self.mock_mode and scene.visual_type is VisualType.IMAGE_MOTION:
+            report_progress("waiting_for_gpu")
             with self._gpu_lock:
                 if self._image_motion_source(scene) == "qwen_image_2512":
                     result = self._dispatch_qwen_image_2512(
@@ -5929,6 +6009,7 @@ class PipelineService:
             if result.outputs[0] != destination:
                 os.replace(result.outputs[0], destination)
         elif not self.mock_mode and scene.visual_type is VisualType.KREA2_STILL:
+            report_progress("waiting_for_gpu")
             with self._gpu_lock:
                 result = self._dispatch_krea2(project, scene, directory, use_cache=use_cache)
             if result.outputs[0] != destination:
@@ -8148,6 +8229,7 @@ class PipelineService:
 
         # GPU-heavy ACE-Step section (readiness, ComfyUI generate, audio
         # normalization) is serialized against other GPU work via _gpu_lock.
+        report_progress("waiting_for_gpu")
         with self._gpu_lock:
             return self._execute_stage(
                 project, "music", operation, backend="ace_step_comfyui", job=stage_job
@@ -8473,11 +8555,12 @@ class PipelineService:
             self.jobs.transition(job.id, JobStatus.LOADING_MODEL, progress=0.1)
             self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.3)
             try:
-                self._ensure_music(
-                    self._project(project_id),
-                    force=force,
-                    regenerate_movement=movement_index,
-                )
+                with self.jobs.tracking(job.id):
+                    self._ensure_music(
+                        self._project(project_id),
+                        force=force,
+                        regenerate_movement=movement_index,
+                    )
                 # A cancel that landed during generation wins: keep the row
                 # canceled (the produced track is kept) instead of raising an
                 # invalid CANCELED -> COMPLETED transition.
@@ -9482,9 +9565,12 @@ class PipelineService:
         )
         # Whisper alignment is GPU work: _gpu_lock serializes it against
         # visuals/music GPU sections (order: _lock -> _gpu_lock).
+        report_progress("waiting_for_gpu")
         with self._lock, self._gpu_lock:
+            report_progress("loading_model")
             backend.load()
             try:
+                report_progress("aligning_captions")
                 result = backend.generate(request)
             finally:
                 backend.unload()
@@ -10556,16 +10642,21 @@ class PipelineService:
         # generation_attempts.job_id column references jobs(id)).
         if job is None:
             job = GenerationJob(project_id=project.id, stage=stage, backend=backend)
-        if not job.parameters:
+        parent_job_id = current_progress_job() or current_media_job_id()
+        if not job.parameters or parent_job_id:
             # Stage rows are bookkeeping driven by their caller: execution has
             # no per-stage cancel checks, so the marker lets the API report
             # them as non-cancelable instead of offering a no-op button.
-            job = job.model_copy(update={"parameters": {"managed_by": "pipeline"}})
+            parameters = {**job.parameters, "managed_by": "pipeline"}
+            if parent_job_id != job.id and parent_job_id:
+                parameters.setdefault("parent_job_id", parent_job_id)
+            job = job.model_copy(update={"parameters": parameters})
         job = self.jobs.enqueue(job)
         self.jobs.transition(job.id, JobStatus.PREPARING, progress=0.05)
         self.jobs.transition(job.id, JobStatus.GENERATING, progress=0.2)
         try:
-            result, outputs = operation()
+            with self.jobs.tracking(job.id):
+                result, outputs = operation()
             # A cancel from the Job Monitor can land on this row mid-operation.
             # Keep the produced outputs and the stage record, and leave the row
             # canceled instead of raising an invalid CANCELED -> COMPLETED

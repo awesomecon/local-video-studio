@@ -28,7 +28,7 @@
  * backend derives from the installed ACE-Step workflows.
  */
 
-import { el, fmtDate, fmtDuration, shortId } from "../dom.js";
+import { el, fmtDate, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
 import {
   editProject, musicModels, generateMusic,
@@ -36,9 +36,10 @@ import {
   suggestMusicSettings,
 } from "../api.js";
 import {
-  loadingState, errorPanel, badge, jobStatusBadge, toast, toastError, field, stageChip, icon,
+  loadingState, errorPanel, badge, toast, toastError, field, stageChip, icon,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { parseRoute } from "../router.js";
 import { createScoreTimeline } from "../music/timeline.js";
 import { destroyWaveformContext } from "../music/waveform.js";
@@ -47,7 +48,6 @@ import {
   EFFECT_ACTIONS, snapTime,
 } from "../music/cues.js";
 
-const TERMINAL = ["completed", "failed", "canceled"];
 /** Bumped on every render; the live-feed callback and the transport check
  *  it before touching widgets, so leaving the screen cleans up. */
 let generation = 0;
@@ -122,25 +122,31 @@ async function load(gen, region) {
 }
 
 /**
- * After the generation job settles: re-fetch the snapshot and rebuild only
- * the studio and cues columns (fresh soundtrack/scored/preview assets, fresh
- * transport). The generation column — including any in-progress settings
- * edits — is left untouched.
+ * Refresh the available audio after generation while keeping the mounted
+ * draft, settings, and transport.
  * @param {number} gen
  * @param {object} region
  */
 async function refreshAfterGeneration(gen, region) {
   try {
     const snap = await musicStudio(state.config, state.currentProjectId);
-    if (gen !== generation) return;
-    if (region._timeline) {
-      region._timeline.destroy();
-      region._timeline = null;
+    if (gen !== generation || !region.genPanel.isConnected) return;
+    const current = region._snapshot;
+    const timeline = region._timeline;
+    if (current && timeline) {
+      Object.assign(current, {
+        soundtrack: snap.soundtrack, scored: snap.scored, preview: snap.preview, stages: snap.stages,
+      });
+      region._scoreStage.replaceChildren(...(snap.stages ? [stageChip("score_mix", snap.stages.score_mix)] : []));
+      const source = snap.preview || snap.scored || snap.soundtrack;
+      timeline.setAudioSource(source?.url ? versionedAudioUrl(source.url, source.hash) : null,
+        { deferWhilePlaying: true });
+      timeline.refresh();
+    } else {
+      buildStudio(gen, region, snap);
+      buildCues(region, snap);
     }
-    region.studioPanel.replaceChildren();
-    region.cuePanel.replaceChildren();
-    buildStudio(gen, region, snap);
-    buildCues(region, snap);
+    return snap;
   } catch { /* the next explicit reload recovers */ }
 }
 
@@ -288,69 +294,45 @@ function generationPanel(snap, models, reload) {
 
   const generate = el("button", { class: "btn btn-primary", type: "button" },
     snap.soundtrack ? "Regenerate music" : "Generate music");
-  const jobStatus = el("div", { class: "stack" });
-  let pendingJob = null;
-  let hadActive = false;
-
-  function musicJobs() {
-    return (state.jobs || [])
-      .filter((j) => j.stage === "music" && j.project_id === state.currentProjectId)
-      .concat(pendingJob ? [pendingJob] : []);
-  }
-
-  function syncJobState() {
-    if (!active || active.gen !== generation) return;
-    const jobs = musicJobs();
-    const activeJob = jobs.find((j) => !TERMINAL.includes(j.status)) || null;
-    const failed = jobs.find((j) => j.status === "failed") || null;
-    const parts = [];
-    if (activeJob) {
-      parts.push(el("div", { class: "row" },
-        jobStatusBadge(activeJob.status),
-        el("span", { class: "small muted mono" }, `job ${shortId(activeJob.id)}`),
-      ));
-    } else if (aceEnabled && !isReady) {
-      parts.push(el("div", { class: "muted small" }, "ACE-Step ComfyUI is not ready."));
-    } else if (aceEnabled && turboMissing.length) {
-      parts.push(el("div", { class: "muted small" }, "Install missing Turbo files to enable generation."));
-    }
-    if (!activeJob && failed && failed.error) {
-      parts.push(el("div", { class: "warning-list" },
-        el("div", { class: "witem crit" }, el("span", { class: "small mono" }, failed.error)),
-      ));
-    }
-    jobStatus.replaceChildren(...parts);
-    const settled = hadActive && !activeJob;
-    hadActive = Boolean(activeJob);
-    generate.disabled = (aceEnabled && (!isReady || turboMissing.length > 0)) || Boolean(activeJob);
-    generate.textContent = activeJob
-      ? "Generating…"
-      : (snap.soundtrack ? "Regenerate music" : "Generate music");
-    if (settled) reload();
-  }
+  const soundtrackHost = el("div", {}, soundtrackPanel(snap));
+  let hasSoundtrack = Boolean(snap.soundtrack);
+  const updateGenerate = (jobs) => {
+    generate.disabled = (aceEnabled && (!isReady || turboMissing.length > 0)) || jobs.length > 0;
+    const text = jobs.length ? "Generating…" : hasSoundtrack ? "Regenerate music" : "Generate music";
+    if (generate.textContent !== text) generate.textContent = text;
+  };
+  const jobStatus = projectJobProgress(["music"], {
+    matches: (job) => !job.parameters?.parent_job_id, onActive: updateGenerate,
+  });
 
   generate.onclick = async () => {
-    generate.disabled = true;
     try {
-      pendingJob = await generateMusic(state.config, state.currentProjectId, {
-        force: Boolean(snap.soundtrack),
+      const job = await generateMusic(state.config, state.currentProjectId, {
+        force: hasSoundtrack,
       });
       toast("good",
-        snap.soundtrack ? "Music regeneration queued" : "Music generation queued",
-        `Job ${pendingJob.id.substring(0, 8)}… is running.`,
+        hasSoundtrack ? "Music regeneration queued" : "Music generation queued",
+        `Job ${job.id.substring(0, 8)}`,
       );
     } catch (err) {
-      toastError(err, snap.soundtrack ? "regenerate music" : "start music generation");
-    } finally {
-      syncJobState();
+      toastError(err, hasSoundtrack ? "regenerate music" : "start music generation");
     }
   };
 
-  syncJobState();
   if (parseRoute().name === "music") {
-    registerLiveUpdate(() => {
-      if (generation !== active?.gen) return;
-      syncJobState();
+    registerLiveUpdate(async (changes) => {
+      if (!soundtrackHost.isConnected || !changes.some((job) => job.project_id === state.currentProjectId
+        && job.stage === "music" && job.status === "completed" && !job.parameters?.parent_job_id)) return;
+      const fresh = await reload();
+      if (!fresh || !soundtrackHost.isConnected) return;
+      hasSoundtrack = Boolean(fresh.soundtrack);
+      const replace = () => {
+        if (soundtrackHost.isConnected) soundtrackHost.replaceChildren(soundtrackPanel(fresh));
+      };
+      const playing = Array.from(soundtrackHost.querySelectorAll("audio")).find((media) => !media.paused);
+      if (playing) playing.addEventListener("pause", replace, { once: true });
+      else replace();
+      updateGenerate([]);
     });
   }
 
@@ -372,6 +354,7 @@ function generationPanel(snap, models, reload) {
             llmFill,
           ),
           llmStatus,
+          projectJobProgress(["music_settings"]),
         ),
         el("div", { class: "field" },
           el("label", {}, "Music direction"),
@@ -402,7 +385,7 @@ function generationPanel(snap, models, reload) {
         aceNotes(readiness, turboMissing),
       ),
     ),
-    soundtrackPanel(snap),
+    soundtrackHost,
   );
 }
 
@@ -545,11 +528,13 @@ function buildStudio(gen, region, snap) {
   // ---- working state shared with the cues column -------------------------
   const cuesState = createCuesState(snap, duration);
 
+  const scoreStage = el("span", {}, snap.stages ? stageChip("score_mix", snap.stages.score_mix) : null);
+  region._scoreStage = scoreStage;
   const timelinePanel = el("div", { class: "panel" },
     el("div", { class: "row" },
       el("span", { class: "panel-title" }, "Score timeline"),
       el("span", { class: "spacer" }),
-      snap.stages ? stageChip("score_mix", snap.stages.score_mix) : null,
+      scoreStage,
     ),
   );
   const timelineHost = el("div", {});
@@ -559,7 +544,7 @@ function buildStudio(gen, region, snap) {
     icon("play", 14), "Preview score mix");
   const previewNote = el("div", { class: "muted small" },
     "Mixes the scored music with the narration as a fast audio check — no video render, no re-scoring.");
-  const previewRow = el("div", { class: "stack" }, previewBtn, previewNote);
+  const previewRow = el("div", { class: "stack" }, previewBtn, projectJobProgress(["score_preview"]), previewNote);
 
   const autoTrigger = el("button", { class: "btn", type: "button" },
     icon("music", 14), "Propose cues");
@@ -569,6 +554,7 @@ function buildStudio(gen, region, snap) {
       el("span", { class: "spacer" }),
       autoTrigger,
     ),
+    projectJobProgress(["auto_score"]),
     el("div", { class: "panel-body stack" },
       el("div", { class: "muted small" },
         "The local LLM reads your narration, scene boundaries, and caption emphasis (nothing leaves the machine) and proposes cues. Suggestions never touch the saved plan until you accept them; locked cues are always preserved."),
@@ -610,6 +596,7 @@ function buildStudio(gen, region, snap) {
     },
   });
   if (active) active.timeline = timeline;
+  region._snapshot = snap;
   region._cuesState = cuesState;
   region._timeline = timeline;
 
@@ -907,7 +894,7 @@ function createCuesState(snap, duration) {
     const plan = serializePlan(
       cs.working.duration_seconds,
       cs.working.cues,
-      cs.working.source_music_hash,
+      snap.soundtrack?.hash || cs.working.source_music_hash,
       cs.working.music_gain_db,
     );
     const result = await saveScorePlan(state.config, state.currentProjectId, {
@@ -921,6 +908,7 @@ function createCuesState(snap, duration) {
       source_music_hash: plan.source_music_hash,
       cues: plan.cues.map((c) => ({ ...c })),
     };
+    cs.working.source_music_hash = plan.source_music_hash;
     cs.markDirty(false);
     snap.score_plan = result.plan;
     snap.score_plan_revision = result.revision;

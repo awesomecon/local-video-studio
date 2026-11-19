@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
+from time import monotonic
 from typing import Any, ContextManager
 
-from backend.schemas import GenerationJob, JobStatus, utc_now
+from backend.core.progress import progress_scope
+from backend.schemas import GenerationJob, JobProgress, JobStatus, utc_now
 
 from .database import StudioDatabase
 
@@ -87,6 +91,8 @@ class PersistentJobQueue:
             update: dict[str, Any] = {"status": status, "updated_at": timestamp}
             if status in _STARTED_STATES and job.started_at is None:
                 update["started_at"] = timestamp
+            if status in _STARTED_STATES:
+                update["progress_detail"] = JobProgress(phase=status.value)
             if progress is not None:
                 update["progress"] = progress
             if status is JobStatus.COMPLETED:
@@ -107,6 +113,42 @@ class PersistentJobQueue:
 
     def complete(self, job_id: str, now: datetime | None = None) -> GenerationJob:
         return self.transition(job_id, JobStatus.COMPLETED, now=now)
+
+    @contextmanager
+    def tracking(self, job_id: str) -> Iterator[None]:
+        """Bind reports to one run, even if a callback outlives a cancellation."""
+        started_at = self._required(job_id).started_at
+        last_detail: JobProgress | None = None
+        last_write = float("-inf")
+        active = True
+
+        def report(detail: JobProgress) -> None:
+            nonlocal last_detail, last_write
+            if not active or detail == last_detail:
+                return
+            now = monotonic()
+            if last_detail and (detail.phase, detail.total, detail.unit) == (
+                last_detail.phase, last_detail.total, last_detail.unit,
+            ):
+                if detail.completed is not None and last_detail.completed is not None:
+                    if detail.completed < last_detail.completed:
+                        return
+                    if now - last_write < 1 and detail.completed != detail.total:
+                        return
+
+            def apply(job: GenerationJob) -> GenerationJob:
+                if job.status not in _STARTED_STATES or job.started_at != started_at:
+                    return job
+                return job.model_copy(update={"progress_detail": detail, "updated_at": utc_now()})
+
+            self.database.update_job_in_transaction(job_id, apply)
+            last_detail, last_write = detail, now
+
+        try:
+            with progress_scope(job_id, report):
+                yield
+        finally:
+            active = False
 
     def fail(self, job_id: str, error: str, now: datetime | None = None) -> GenerationJob:
         return self.transition(job_id, JobStatus.FAILED, error=error, now=now)
@@ -136,17 +178,19 @@ class PersistentJobQueue:
             return self._retry(job_id, now)
 
     def _retry(self, job_id: str, now: datetime | None = None) -> GenerationJob:
-        job = self._required(job_id)
-        if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
-            raise InvalidJobTransition("only failed or canceled jobs can be retried")
-        if job.attempt_count >= job.max_attempts:
-            raise InvalidJobTransition("job has exhausted its configured attempts")
         timestamp = now or utc_now()
-        retried = GenerationJob.model_validate({
-            **job.model_dump(), "status": JobStatus.QUEUED, "progress": 0,
-            "error": None, "started_at": None, "completed_at": None, "updated_at": timestamp,
-        })
-        return self.database.save_job(retried)
+
+        def apply(job: GenerationJob) -> GenerationJob:
+            if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
+                raise InvalidJobTransition("only failed or canceled jobs can be retried")
+            if job.attempt_count >= job.max_attempts:
+                raise InvalidJobTransition("job has exhausted its configured attempts")
+            return job.model_copy(update={
+                "status": JobStatus.QUEUED, "progress": 0, "progress_detail": None,
+                "error": None, "started_at": None, "completed_at": None, "updated_at": timestamp,
+            })
+
+        return self.database.update_job_in_transaction(job_id, apply)
 
     def recover_interrupted(self, now: datetime | None = None) -> list[GenerationJob]:
         """Fail all active jobs at startup; execution never survives a process restart.

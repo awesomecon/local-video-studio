@@ -73,14 +73,13 @@ import {
   errorPanel,
   badge,
   sceneStatusBadge,
-  jobStatusBadge,
   confirm,
   toast,
   toastError,
-  progress,
 } from "../ui.js";
-import { navigate, parseRoute } from "../router.js";
+import { navigate } from "../router.js";
 import { registerLiveUpdate } from "../app.js";
+import { jobProgress, projectJobProgress } from "../job-progress.js";
 import { effectiveVideoMode } from "../video-mode.js";
 
 /** Scene visuals currently being generated from this browser session. */
@@ -192,6 +191,7 @@ function boardPanel() {
   let jobs = [];
   let selectedSceneId = null;
   const narrowBoard = matchMedia("(max-width: 740px)");
+  const projectId = state.currentProjectId;
 
   const panel = el("div", { class: "panel" },
     el("div", { class: "row" },
@@ -202,6 +202,7 @@ function boardPanel() {
       refreshBtn,
     ),
     batchBar,
+    projectJobProgress(["visual_batch"]),
     body,
   );
 
@@ -268,7 +269,7 @@ function boardPanel() {
     const token = ++inflight;
     if (skeleton) region.replaceChildren(loadingState(4));
     try {
-      const snap = await getProject(state.config, state.currentProjectId);
+      const snap = await getProject(state.config, projectId);
       if (token !== inflight) return;
       // Editorial projects are cut as compositions, not scenes: never render
       // the Classic scene controls for them, and hide them if an earlier
@@ -306,6 +307,12 @@ function boardPanel() {
     }
   }
 
+  function refreshBoard() {
+    if (body.isConnected && state.currentProjectId === projectId) {
+      void load(body, { skeleton: false });
+    }
+  }
+
   function buildStoryboard() {
     const previousDetails = body.querySelector(".board-details");
     const selected = scenes.find((scene) => scene.id === selectedSceneId)
@@ -313,13 +320,16 @@ function boardPanel() {
       || scenes[0];
     selectedSceneId = selected.id;
     const inspector = el("aside", { class: "board-inspector panel", "aria-label": "Selected scene" });
-    const grid = el("div", { class: "scene-grid" }, scenes.map((scene) => sceneCard(scene, (item) => {
-      select(item, inspector.querySelector(".board-details")?.open);
+    const grid = el("div", { class: "scene-grid" }, scenes.map((scene) => sceneCard(scene, pick)));
+
+    function pick(scene) {
+      select(scene, inspector.querySelector(".board-details")?.open);
       if (narrowBoard.matches) {
         inspector.scrollIntoView({ block: "start" });
         inspector.querySelector("h2").focus({ preventScroll: true });
       }
-    })));
+    }
+
     function select(scene, detailsOpen = !narrowBoard.matches) {
       selectedSceneId = scene.id;
       for (const button of grid.querySelectorAll("[data-board-select]")) {
@@ -327,9 +337,23 @@ function boardPanel() {
         button.setAttribute("aria-pressed", String(active));
         button.closest(".scene-card").classList.toggle("is-selected", active);
       }
+      const index = scenes.indexOf(scene);
+      const candidates = [...scenes.slice(index + 1), ...scenes.slice(0, index)];
+      const next = candidates.find((item) => !item.locked && !activeJobFor(item.id)
+        && (item.status === "generated" || item.shot_summary?.stale));
       inspector.replaceChildren(
-        el("h2", { class: "panel-title", tabindex: -1 }, "Selected scene"),
-        bodyRegion(scene, activeJobFor(scene.id), latestAssetForScene(assets, scene.id, "visual"), detailsOpen),
+        el("div", { class: "row board-inspector-heading" },
+          el("h2", { class: "panel-title", tabIndex: -1 }, "Selected scene"),
+          next ? el("button", {
+            class: "btn btn-sm", type: "button", onclick: () => {
+              pick(next);
+              if (!narrowBoard.matches) inspector.querySelector("h2").focus({ preventScroll: true });
+            },
+            title: `Review ${next.title}`,
+          }, "Next to review") : null,
+        ),
+        bodyRegion(scene, activeJobFor(scene.id), latestAssetForScene(assets, scene.id, "visual"),
+          detailsOpen, refreshBoard),
       );
     }
     select(selected, previousDetails?.open);
@@ -357,7 +381,6 @@ function boardPanel() {
     const activeBatch = jobs.find((j) => j.stage === "visual_batch"
       && !BATCH_JOB_TERMINAL.includes(j.status)) || null;
     if (activeBatch) {
-      const stageText = activeBatch.parameters && activeBatch.parameters.current_stage;
       const cancelBtn = el("button", {
         class: "btn btn-ghost btn-sm", type: "button",
         title: "Cancel the whole batch and every scene job it created. Scenes already generated are kept.",
@@ -378,10 +401,6 @@ function boardPanel() {
         }
       });
       batchBar.replaceChildren(
-        jobStatusBadge(activeBatch.status),
-        el("span", { class: "muted small" },
-          `Generating visuals ${stageText ? `· ${stageText} ` : ""}· ${Math.round((activeBatch.progress || 0) * 100)}%`),
-        el("span", { style: { flex: "1 1 160px" } }, progress(activeBatch.progress || 0)),
         cancelBtn,
       );
       return;
@@ -455,7 +474,7 @@ function boardPanel() {
       toast("good",
         visualType ? `Queued all ${typeLabel(visualType)}` : imageModel ? `Queued all ${IMAGE_MODEL_LABELS[imageModel]}` : "Queued all missing visuals",
         `${queued.length} scene(s) · run in order`);
-      renderStoryboardRefresh();
+      refreshBoard();
     } catch (err) {
       toastError(err, "queue visual batch");
     }
@@ -480,6 +499,9 @@ function boardPanel() {
         }, scene.title),
         el("div", { class: "row board-card-meta" }, sceneStatusBadge(scene.status, scene.locked),
           asset?.seed != null ? el("span", { class: "small muted mono" }, `seed ${asset.seed}`) : null),
+        jobProgress((job) => job.scene_id === scene.id && job.stage === "scene_visual", {
+          compact: true, showTerminal: false,
+        }),
       ),
     );
     return card;
@@ -488,7 +510,12 @@ function boardPanel() {
   // Live path: job-feed frames refresh the grid in place (no skeleton).
   // "Generating…" state comes from pendingVisualSceneIds, which survives
   // rebuilds; everything else is honest backend data.
-  registerLiveUpdate(() => load(body, { skeleton: false }));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === state.currentProjectId
+      && ["plan", "visual_batch", "scene_visual", "shot_generate"].includes(job.stage))) {
+      void load(body, { skeleton: false });
+    }
+  });
   load(body);
   return panel;
 }
@@ -528,15 +555,15 @@ function editorialPointerState() {
  * @param {import("../api.js").Asset|null} asset
  * @returns {HTMLElement}
  */
-function mediaRegion(scene, asset) {
+function mediaRegion(scene, asset, inspector = false) {
   const media = el("div", { class: "media" });
   if (asset) {
     const url = mediaUrl(asset);
     if (url) {
       media.append(
         asset.type === "video"
-          ? el("video", { src: url, controls: true, muted: true })
-          : el("img", { src: url, alt: `Scene visual: ${scene.title}` }),
+          ? el("video", { src: url, controls: true, muted: true, playsinline: "", preload: inspector ? "none" : "metadata" })
+          : el("img", { src: url, alt: `Scene visual: ${scene.title}`, loading: inspector ? "lazy" : "eager" }),
       );
     } else {
       media.append(el("div", { class: "media-placeholder" },
@@ -588,7 +615,7 @@ function mediaUrl(asset) {
  * @param {boolean} detailsOpen
  * @returns {HTMLElement}
  */
-function bodyRegion(scene, job, asset, detailsOpen) {
+function bodyRegion(scene, job, asset, detailsOpen, refresh) {
   const body = el("div", { class: "body" });
   const num = (scene.index ?? 0) + 1;
   body.append(
@@ -606,20 +633,18 @@ function bodyRegion(scene, job, asset, detailsOpen) {
   );
   const shotsRow = buildShotsRow(scene);
   if (shotsRow) body.append(shotsRow);
-  if (job) {
-    body.append(el("div", { class: "row", style: { alignItems: "center" } },
-      jobStatusBadge(job.status),
-      el("span", { class: "muted small" }, `scene job · ${Math.round((job.progress || 0) * 100)}%`),
-    ));
-    body.append(progress(job.progress || 0));
-  } else if (scene.status === "failed" || scene.status === "canceled") {
+  body.append(jobProgress((entry) => entry.scene_id === scene.id && entry.stage === "scene_visual", {
+    initial: job?.stage === "scene_visual" ? job : null,
+  }));
+  if (!job && (scene.status === "failed" || scene.status === "canceled")) {
     body.append(el("div", { class: "muted small" },
       `Scene ${scene.status} - generate a visual to recover.`,
     ));
   }
+  body.append(el("div", { class: "board-inspector-media" }, mediaRegion(scene, asset, true)));
   body.append(el("section", { class: "board-section" },
     el("h3", {}, "Review"),
-    el("div", { class: "sc-actions" }, ...actionButtons(scene, job, asset)),
+    el("div", { class: "sc-actions" }, ...actionButtons(scene, job, asset, refresh)),
   ));
   if (scene.visual_prompt || scene.narration) body.append(
     el("details", { class: "board-section board-details", open: detailsOpen },
@@ -693,8 +718,8 @@ function buildShotsRow(scene) {
  * @param {import("../api.js").Asset|null} asset
  * @returns {HTMLElement[]}
  */
-function actionButtons(scene, job, asset) {
-  if (job) return [act("Cancel job", () => cancelJobAction(scene, job))];
+function actionButtons(scene, job, asset, refresh) {
+  if (job) return [act("Cancel job", () => cancelJobAction(scene, job, refresh))];
 
   const btns = [act("Edit", () => navigate(`#/scene/${scene.id}`),
     { title: "Open the scene editor." })];
@@ -720,25 +745,25 @@ function actionButtons(scene, job, asset) {
     return btns;
   }
   if (scene.locked) {
-    btns.push(act("Unlock", () => approve(scene, false),
+    btns.push(act("Unlock", () => approve(scene, false, refresh),
       { title: "Re-approves the scene and makes it editable again." }));
   } else if (asset) {
-    btns.push(act("Regenerate", () => regenerate(scene),
+    btns.push(act("Regenerate", () => regenerate(scene, refresh),
       {
         title: "Archive the current visual and generate a new one.",
         pendingLabel: "Regenerating…",
       }));
   } else {
-    btns.push(act("Generate", () => generate(scene),
+    btns.push(act("Generate", () => generate(scene, refresh),
       { title: "Generate this scene's visual.", pendingLabel: "Generating…" }));
   }
   if (scene.status === "generated") {
-    const approveBtn = act("Approve", () => approve(scene, false));
+    const approveBtn = act("Approve", () => approve(scene, false, refresh));
     approveBtn.classList.add("btn-primary");
     btns.unshift(approveBtn);
   }
   if (scene.status === "generated" || scene.status === "approved") {
-    btns.push(act("Lock", () => approve(scene, true),
+    btns.push(act("Lock", () => approve(scene, true, refresh),
       { title: "Lock prevents editing or regeneration until unlocked." }));
   }
   return btns;
@@ -777,7 +802,7 @@ function act(label, fn, opts = {}) {
  * @param {import("../api.js").Scene} scene
  * @param {import("../api.js").GenerationJob} job
  */
-async function cancelJobAction(scene, job) {
+async function cancelJobAction(scene, job, refresh) {
   const ok = await confirm({
     title: "Cancel this job?",
     message: `Cancel the ${job.status} job for scene S${(scene.index ?? 0) + 1}? The scene stays editable.`,
@@ -787,7 +812,7 @@ async function cancelJobAction(scene, job) {
   try {
     await cancelJob(state.config, job.id);
     toast("info", "Job canceled", `Scene S${(scene.index ?? 0) + 1}`);
-    renderStoryboardRefresh();
+    refresh();
   } catch (err) {
     toastError(err, "cancel job");
   }
@@ -796,7 +821,7 @@ async function cancelJobAction(scene, job) {
 /**
  * @param {import("../api.js").Scene} scene
  */
-async function generate(scene) {
+async function generate(scene, refresh) {
   if (pendingVisualSceneIds.has(scene.id)) return;
   pendingVisualSceneIds.add(scene.id);
   try {
@@ -806,14 +831,14 @@ async function generate(scene) {
     toastError(err, `generate scene S${(scene.index ?? 0) + 1}`);
   } finally {
     pendingVisualSceneIds.delete(scene.id);
-    renderStoryboardRefresh();
+    refresh();
   }
 }
 
 /**
  * @param {import("../api.js").Scene} scene
  */
-async function regenerate(scene) {
+async function regenerate(scene, refresh) {
   const ok = await confirm({
     title: `Regenerate scene S${(scene.index ?? 0) + 1}?`,
     message: "The current visual asset will be archived and a new one generated. This cannot be undone.",
@@ -829,7 +854,7 @@ async function regenerate(scene) {
     toastError(err, `regenerate scene S${(scene.index ?? 0) + 1}`);
   } finally {
     pendingVisualSceneIds.delete(scene.id);
-    renderStoryboardRefresh();
+    refresh();
   }
 }
 
@@ -837,23 +862,12 @@ async function regenerate(scene) {
  * @param {import("../api.js").Scene} scene
  * @param {boolean} lock
  */
-async function approve(scene, lock) {
+async function approve(scene, lock, refresh) {
   try {
     await approveScene(state.config, scene.id, { lock });
     toast("good", lock ? "Scene locked" : "Scene approved", `Scene S${(scene.index ?? 0) + 1}`);
-    renderStoryboardRefresh();
+    refresh();
   } catch (err) {
     toastError(err, `approve scene S${(scene.index ?? 0) + 1}`);
   }
-}
-
-/**
- * Re-render the whole storyboard from fresh backend data (honest reload).
- */
-function renderStoryboardRefresh() {
-  // The awaited mutation above may outlive this screen (up to 600s); never
-  // clobber whatever route the user navigated to in the meantime.
-  if (parseRoute().name !== "storyboard") return;
-  const content = document.querySelector(".content");
-  if (content) content.replaceChildren(renderStoryboard({ name: "storyboard", param: null }));
 }

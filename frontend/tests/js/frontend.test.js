@@ -201,6 +201,7 @@ import {
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { editorialNextStep } from "../../js/pages/dashboard.js";
+import { currentJobFailures } from "../../js/pages/jobs.js";
 import { performancePanel, renderVoice } from "../../js/pages/voice.js";
 import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
@@ -243,6 +244,10 @@ import {
 } from "../../js/pages/timeline.js";
 import { narrationTimingBadge, ttsWorkerStatus } from "../../js/pages/voice.js";
 import { effectiveVideoMode as sharedEffectiveVideoMode } from "../../js/video-mode.js";
+import {
+  beginJobSubmission, jobLifecycleChanges, projectJobProgress, refreshJobProgress,
+} from "../../js/job-progress.js";
+import { createJobFeed } from "../../js/events.js";
 
 const results = [];
 
@@ -568,6 +573,20 @@ record("dashboard: Editorial guidance follows narration, visuals, review and del
   eq(editorialNextStep(snapshot)[1], "Review the cut");
   snapshot.stage_state = { stages: { render_final: { status: "completed" } } };
   eq(editorialNextStep(snapshot)[0], "#/export");
+});
+
+record("jobs: newer attempts clear only failures for the same target", () => {
+  const job = (id, shot, day, status) => ({
+    id, shot_id: shot, scene_id: "scene", project_id: "project", stage: "shot_generate",
+    created_at: `2026-01-0${day}T00:00:00Z`, status,
+  });
+  const jobs = [
+    job("older-failure", "shot-1", 1, "failed"),
+    job("still-failed", "shot-2", 2, "failed"),
+    job("successful-replacement", "shot-1", 3, "completed"),
+    job("canceled", "shot-2", 4, "canceled"),
+  ];
+  eq(currentJobFailures(jobs).map((item) => item.id), ["still-failed"]);
 });
 
 await recordAsync("video-mode: New Project POST carries the selected video_mode", async () => {
@@ -1089,6 +1108,29 @@ function closeModals() {
   document.querySelectorAll("dialog.modal").forEach((d) => d.remove());
 }
 
+await recordAsync("export: primary download requires the available current final output", async () => {
+  const project = CLASSIC_EXPORT_PROJECT;
+  const final = {
+    id: "final-current", type: "video", filepath: "renders/final.mp4",
+    settings: { role: "final_render" }, url: `/api/projects/${project.id}/assets/final-current/file`,
+    available: true,
+  };
+  const stages = { render_final: { status: "completed", outputs: [final.filepath] } };
+  const ready = exportSnapshot(project, undefined, { scenes: CLASSIC_SCENES, stages, assets: [final] });
+  const { screen } = await renderExportScreen(project.id, { ...ready, has_render_narration: false });
+  eq(screen.querySelector(".delivery-actions .btn-primary").textContent, "Download final MP4");
+  eq(screen.querySelectorAll(".delivery-actions .btn-primary").length, 1,
+    "a missing input for a future render never competes with downloading the current deliverable");
+  eq(screen.querySelector(".render-monitor video").getAttribute("src"), final.url);
+  for (const unavailable of [{ ...final, available: false }, { ...final, filepath: "renders/previous.mp4" }]) {
+    const { screen: missing } = await renderExportScreen(project.id, exportSnapshot(project, undefined, {
+      scenes: CLASSIC_SCENES, stages, assets: [unavailable],
+    }));
+    assert(!missing.querySelector(".delivery-actions a.btn-primary"), "missing or previous files have no primary download");
+    eq(missing.querySelector(".render-monitor .btn-primary").textContent, "Render preview");
+  }
+});
+
 record("export: mode text helpers keep the classic presentation verbatim", () => {
   for (const project of [CLASSIC_EXPORT_PROJECT, LEGACY_EXPORT_PROJECT, { video_mode: "weird" }, {}]) {
     eq(exportVideoMode(project), "classic");
@@ -1312,8 +1354,8 @@ await recordAsync("export: active editorial render shows the canvas stage label"
   const { screen } = await renderExportScreen(EDITORIAL_EXPORT_PROJECT.id, snap);
   const actions = screen.querySelector(".delivery-actions");
   assert(actions.textContent.includes("Rendering Editorial canvas"), "readable label for the active sub-stage");
-  assert(actions.textContent.includes("Preparing"), "job status badge present");
-  assert(actions.textContent.includes("job job-xe1"), "job id shown");
+  assert(actions.textContent.includes("Cancel render"), "render can be canceled");
+  assert(!actions.querySelector("progress").hasAttribute("value"), "legacy fixed fraction is indeterminate");
   eq(chipRowBadges(preflightPanel(screen))[0], "Editorial canvas: Running", "running chip status");
 });
 
@@ -2810,6 +2852,8 @@ await recordAsync("editorial-workspace: plan renders strip, detail, and a previe
   assert(screen.textContent.includes("1 locked"), "locked asset count surfaced on the card");
   // The detail panel opens on the first composition by default.
   assert(screen.textContent.includes("c1"), "first composition selected by default");
+  eq(screen.querySelector(".ed-still-frame").getAttribute("src"),
+    "/api/projects/proj-ws/editorial/preview?still=c1", "the selected composition has a still");
   assert(screen.querySelector('[data-ed-text="e1"]'), "deterministic text control exposed");
   assert(screen.querySelector('[data-ed-regen="c1"]'), "per-composition Regenerate available");
   // Selecting another card repaints the detail without any request.
@@ -2819,14 +2863,17 @@ await recordAsync("editorial-workspace: plan renders strip, detail, and a previe
   assert(screen.querySelector('[data-ed-regen="c2"]'), "detail follows the selection");
   const selectedCard = strip.querySelector(".ed-card.selected");
   assert(selectedCard && selectedCard.getAttribute("data-ed-comp-card") === "c2", "strip highlight follows the selection");
+  eq(screen.querySelector(".ed-still-frame").getAttribute("src"),
+    "/api/projects/proj-ws/editorial/preview?still=c2", "the still follows the selection");
   // The embedded preview stays off until the explicit toggle.
   const toggle = screen.querySelector("[data-ed-preview-toggle]");
   assert(toggle, "the preview toggle is present");
-  assert(!screen.querySelector("iframe"), "no iframe before the explicit toggle");
+  assert(!screen.querySelector(".ed-preview-frame"), "no player before the explicit toggle");
   toggle.click();
   await flush(2);
   const frame = screen.querySelector("iframe.ed-preview-frame");
   assert(frame, "the iframe mounts on toggle");
+  assert(screen.querySelector(".ed-still-host").hidden, "the player replaces the still in the layout");
   assert(String(frame.getAttribute("src")).startsWith("/api/projects/proj-ws/editorial/preview?ts="),
     "the frame loads the validated preview URL with a cache stamp");
   assert(!calls.some((c) => c.method !== "GET"), "no mutations are ever issued passively");
@@ -4352,6 +4399,134 @@ record("missing core requirement is visible and diagnostic text is escaped", () 
   assert(panel.textContent.includes("<img src=x>"));
   assert(!panel.querySelector("img"));
   eq(capabilityPanel(null), null);
+});
+
+record("generation progress updates in place and ignores unrelated jobs", () => {
+  const previous = state.jobs;
+  const host = document.createElement("div");
+  const edit = document.createElement("textarea");
+  const audio = document.createElement("audio");
+  const child = {
+    id: "child", project_id: "progress-project", stage: "scene_visual", status: "generating",
+    parameters: { parent_job_id: "batch" }, started_at: new Date(Date.now() - 3000).toISOString(),
+  };
+  const batch = {
+    id: "batch", project_id: child.project_id, stage: "visual_batch", status: "generating",
+    progress: 0.2, started_at: child.started_at,
+  };
+  try {
+    state.jobs = [batch];
+    const progress = projectJobProgress(["visual_batch"], { projectId: batch.project_id });
+    host.append(edit, audio, progress);
+    document.body.append(host);
+    edit.focus();
+    edit.value = "unsaved edits";
+    assert(!progress.querySelector("progress").hasAttribute("value"));
+    assert(!progress.textContent.includes("20%"));
+    assert(progress.querySelector("[data-job-clock]"));
+    state.jobs = [batch, { ...child, progress_detail: { phase: "sampling", completed: 4, total: 12, unit: "steps" } }];
+    refreshJobProgress();
+    assert(progress.textContent.includes("4 of 12 steps"));
+    assert(document.activeElement === edit && edit.value === "unsaved edits");
+    assert(host.querySelector("audio") === audio);
+    const moved = { ...state.jobs[1], progress_detail: { ...state.jobs[1].progress_detail, completed: 8 } };
+    eq(jobLifecycleChanges(state.jobs, [batch, moved]), []);
+    state.jobs = [batch, moved];
+    refreshJobProgress();
+    assert(progress.textContent.includes("8 of 12 steps"));
+    const reloaded = projectJobProgress(["visual_batch"], { projectId: batch.project_id });
+    assert(reloaded.textContent.includes("8 of 12 steps"));
+    const unrelated = projectJobProgress(["visual_batch"], { projectId: "other" });
+    assert(unrelated.hidden);
+  } finally {
+    state.jobs = previous;
+    host.remove();
+  }
+});
+
+record("submission is visible before the HTTP response and follows the accepted job", () => {
+  const previous = state.jobs;
+  const projectId = "submission-project";
+  const progress = projectJobProgress(["caption_alignment"], { projectId });
+  document.body.append(progress);
+  const settle = beginJobSubmission(`/api/projects/${projectId}/captions/generate`, {});
+  try {
+    assert(progress.textContent.includes("Starting request"));
+    const job = {
+      id: "caption-job", stage: "caption_alignment", project_id: projectId, status: "queued",
+      created_at: new Date().toISOString(),
+    };
+    settle(job);
+    assert(progress.textContent.includes("Queued"));
+    state.jobs = [{ ...job, status: "completed" }];
+    refreshJobProgress();
+    assert(progress.textContent.includes("Completed"));
+    assert(!progress.querySelector("progress"));
+  } finally {
+    settle();
+    state.jobs = previous;
+    progress.remove();
+  }
+});
+
+await recordAsync("job feed keeps polling while it reconnects, then resumes live updates", async () => {
+  const original = { fetch: window.fetch, EventSource: window.EventSource,
+    setTimeout: window.setTimeout, clearTimeout: window.clearTimeout };
+  const connections = [];
+  const timers = new Map();
+  const statuses = [];
+  const frames = [];
+  let sequence = 0;
+  let polled = 0;
+  let feed;
+  window.setTimeout = (fn, delay) => {
+    timers.set(++sequence, { fn, delay });
+    return sequence;
+  };
+  window.clearTimeout = (key) => timers.delete(key);
+  window.EventSource = class {
+    constructor() { connections.push(this); }
+    addEventListener(type, callback) { this[type] = callback; }
+    close() {}
+  };
+  window.fetch = async () => {
+    polled++;
+    return { ok: true, text: async () => '{"jobs":[]}' };
+  };
+  function fire(delay) {
+    const [key, timer] = [...timers.entries()].find(([, value]) => value.delay === delay) || [];
+    assert(timer, `timer ${delay} exists`);
+    timers.delete(key);
+    timer.fn();
+  }
+  async function flush() {
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+  }
+  try {
+    feed = createJobFeed({
+      config: { apiBase: "http://127.0.0.1:8009" },
+      onStatus: (value) => statuses.push(value),
+      onJobs: (jobs) => frames.push(jobs),
+    });
+    for (const delay of [1000, 2000, 4000]) {
+      connections.at(-1).onerror();
+      fire(delay);
+    }
+    connections.at(-1).onerror();
+    await flush();
+    eq(polled, 1);
+    fire(20000);
+    fire(2000);
+    await flush();
+    eq(polled, 2);
+    connections.at(-1).jobs({ data: '[{"id":"resumed"}]' });
+    eq(statuses, ["reconnecting", "polling", "live"]);
+    eq(frames.at(-1), [{ id: "resumed" }]);
+    assert(![...timers.values()].some(({ delay }) => delay === 2000 || delay === 20000));
+  } finally {
+    feed?.stop();
+    Object.assign(window, original);
+  }
 });
 
 const passed = results.filter((r) => r[1]).length;

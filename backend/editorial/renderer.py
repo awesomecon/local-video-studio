@@ -19,6 +19,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Iterator
 
+from backend.core.progress import report_progress
 from backend.graphics.browser import discover_chromium
 from backend.rendering.binaries import require_ffmpeg
 from backend.rendering.process import run_media_process_stream
@@ -29,7 +30,7 @@ from .models import (
     EditorialTemplate,
 )
 from .passages import locate_passage
-from .preview import PREVIEW_CSS, PREVIEW_SCRIPT, preview_controls
+from .preview import FIT_PICTURE_SCRIPT, PREVIEW_CSS, PREVIEW_SCRIPT, preview_controls
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
@@ -547,6 +548,7 @@ def compile_edit_plan_html(
     show_placeholders: bool = True,
     interactive_preview: bool = False,
     narration_url: str | None = None,
+    still_time: float | None = None,
     predecessor: EditorialComposition | None = None,
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
@@ -555,7 +557,8 @@ def compile_edit_plan_html(
     supplies escaped text, resolved asset URLs, and element ids. ``captions``
     carries pre-computed caption beats (global or clip-local clock, matching the
     plan's composition clock) with renderer-assigned design-space positions;
-    when empty the composition carries no caption layer.
+    when empty the composition carries no caption layer. A still uses the
+    same compositor at one timestamp with a viewport-sized canvas.
     """
     unimplemented = sorted({
         item.template.value
@@ -786,6 +789,7 @@ const PREDECESSOR={predecessor_payload};
 const ROOTS=[...document.querySelectorAll('.composition')];
 const CAPTIONS={captions_payload};
 const FONT_MANIFEST={font_manifest_payload};
+{FIT_PICTURE_SCRIPT if interactive_preview or still_time is not None else ""}
 const clamp=v=>Math.max(0,Math.min(1,v));
 const ease=v=>{{v=clamp(v);return v*v*(3-2*v)}};
 function fitSetting(el,name){{
@@ -1028,13 +1032,14 @@ const sourceImagesReady=Promise.all([...document.images].map(img=>
   img.decode().catch(()=>undefined)
 ));
 Promise.all([pinnedFontsReady,sourceImagesReady]).then(()=>document.fonts.ready).then(()=>{{
-  fitEditorialText();window.renderAt(0);window.__editorialReady=true;
+  fitEditorialText();window.renderAt({_script_json(still_time if still_time is not None else 0)});window.__editorialReady=true;
   {"window.dispatchEvent(new Event('editorial-ready'));" if interactive_preview else ""}
 }}).catch(error=>{{
   window.__editorialError=String(error&&error.message||error);
   showEditorialError(window.__editorialError);
 }});
 {PREVIEW_SCRIPT if interactive_preview else ""}
+{"new ResizeObserver(() => fitEditorialPicture(document.documentElement)).observe(document.documentElement);" if still_time is not None else ""}
 </script></body></html>"""
 
 
@@ -1084,6 +1089,7 @@ class EditorialRenderer:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
         validate_export_assets(plan, asset_root)
+        report_progress("preparing_compositions")
         output = output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         html = compile_edit_plan_html(
@@ -1114,6 +1120,7 @@ class EditorialRenderer:
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
             ], self._capture_frames(plan, document, work / "chrome-profile"),
                 timeout=max(120.0, plan.duration * 20))
+            report_progress("saving_outputs")
             publish = output.with_name(f".{output.name}.editorial.tmp")
             from backend.rendering.process import media_output_publication
             try:
@@ -1232,6 +1239,8 @@ class EditorialRenderer:
                 else:
                     raise RuntimeError("Editorial composition did not become ready")
                 frame_count = round(plan.duration * plan.fps)
+                if frame_count:
+                    report_progress("capturing_frames", completed=0, total=frame_count, unit="frames")
                 for frame in range(frame_count):
                     raise_if_media_job_canceled()
                     timestamp = frame / plan.fps
@@ -1244,6 +1253,8 @@ class EditorialRenderer:
                         "optimizeForSpeed": True,
                     })
                     yield base64.b64decode(screenshot["data"])
+                    report_progress("capturing_frames", completed=frame + 1, total=frame_count, unit="frames")
+                report_progress("finalizing_encoding")
             finally:
                 if client is not None:
                     client.close()

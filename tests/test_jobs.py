@@ -1,15 +1,17 @@
 import threading
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
+from backend.core.progress import current_progress_reporter, report_progress
 from backend.rendering.process import (
     _register_process,
     _unregister_process,
     cancel_media_processes_for_job,
 )
-from backend.schemas import GenerationJob, JobStatus, Project
+from backend.schemas import GenerationJob, JobProgress, JobStatus, Project, utc_now
 from backend.storage import InvalidJobTransition, PersistentJobQueue, StudioDatabase
 
 
@@ -42,6 +44,50 @@ def test_full_job_lifecycle(tmp_path: Path) -> None:
     completed = jobs.complete(job.id)
     assert completed.status is JobStatus.COMPLETED
     assert completed.progress == 1
+
+
+def test_progress_is_persisted_throttled_and_bound_to_one_run(tmp_path, monkeypatch):
+    jobs, project = queue(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr("backend.storage.jobs.monotonic", lambda: clock[0])
+    job = jobs.enqueue(GenerationJob(project_id=project.id, stage="render"))
+    start = utc_now()
+    jobs.transition(job.id, JobStatus.PREPARING, now=start)
+    jobs.transition(job.id, JobStatus.GENERATING)
+    with jobs.tracking(job.id):
+        old_reporter = current_progress_reporter()
+        report_progress("encoding_video", completed=1, total=10, unit="seconds")
+        first = jobs.get(job.id)
+        assert first.progress_detail.completed == 1
+        clock[0] = 0.5
+        report_progress("encoding_video", completed=2, total=10, unit="seconds")
+        assert jobs.get(job.id).updated_at == first.updated_at
+        clock[0] = 1.1
+        report_progress("encoding_video", completed=3, total=10, unit="seconds")
+        report_progress("encoding_video", completed=2, total=10, unit="seconds")
+        assert jobs.get(job.id).progress_detail.completed == 3
+        report_progress("mixing_export")
+        assert jobs.get(job.id).progress_detail.phase == "mixing_export"
+        jobs.cancel(job.id)
+        old_reporter(JobProgress(phase="saving_outputs"))
+        assert jobs.get(job.id).progress_detail.phase == "mixing_export"
+        assert jobs.retry(job.id).progress_detail is None
+        jobs.transition(job.id, JobStatus.PREPARING, now=start + timedelta(seconds=5))
+        jobs.transition(job.id, JobStatus.GENERATING)
+        old_reporter(JobProgress(phase="encoding_video", completed=7, total=10, unit="seconds"))
+        assert jobs.get(job.id).progress_detail == JobProgress(phase="generating")
+    with jobs.tracking(job.id):
+        report_progress("encoding_video", completed=1, total=10, unit="seconds")
+        jobs.transition(job.id, JobStatus.POSTPROCESSING)
+        assert jobs.complete(job.id).progress == 1
+
+
+def test_legacy_job_payload_has_no_measured_progress(tmp_path):
+    jobs, project = queue(tmp_path)
+    job = GenerationJob(project_id=project.id, stage="render")
+    data = job.model_dump()
+    del data["progress_detail"]
+    assert GenerationJob.model_validate(data).progress_detail is None
 
 
 def test_transition_records_start_time_on_first_active_state(tmp_path: Path) -> None:

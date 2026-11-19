@@ -72,6 +72,14 @@ def test_first_render_has_no_history(tmp_path: Path) -> None:
     assert not (root / "renders" / "history").is_dir() or not any(
         (root / "renders" / "history").iterdir()
     )
+    snapshot = client.get(f"/api/projects/{project_id}").json()
+    assert snapshot["has_render_narration"] is True
+    final_asset = next(asset for asset in snapshot["assets"] if asset["settings"]["role"] == "final_render")
+    assert final_asset["available"] is True
+    (root / "renders" / "final.mp4").unlink()
+    snapshot = client.get(f"/api/projects/{project_id}").json()
+    final_asset = next(asset for asset in snapshot["assets"] if asset["settings"]["role"] == "final_render")
+    assert final_asset["available"] is False
 
 
 def test_re_render_preserves_previous_final_in_history(tmp_path: Path) -> None:

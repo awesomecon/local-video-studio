@@ -160,21 +160,23 @@ export function createJobFeed({ config, onJobs, onStatus }) {
       startPolling();
       return;
     }
-    phase = "sse";
+    if (!revival) phase = "sse";
     const url = `${config.apiBase}/api/events`;
-    es = new EventSource(url);
-    es.addEventListener("jobs", (ev) => {
+    const connection = new EventSource(url);
+    es = connection;
+    connection.addEventListener("jobs", (ev) => {
+      if (stopped || es !== connection) return;
+      let jobs;
+      try { jobs = JSON.parse(ev.data); } catch { return; }
+      if (!Array.isArray(jobs)) return;
       sseFailures = 0;
       if (phase === "polling") stopRevivalFallback();
       phase = "sse";
       setStatus("live");
-      try {
-        emitJobs(JSON.parse(ev.data));
-      } catch {
-        /* ignore a malformed frame */
-      }
+      emitJobs(jobs);
     });
-    es.onerror = () => {
+    connection.onerror = () => {
+      if (stopped || es !== connection) return;
       closeEs();
       sseFailures += 1;
       if (revival || sseFailures >= MAX_SSE_ATTEMPTS) {

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.schemas import (
-    Asset, GenerationAttempt, GenerationJob, JobStatus, Project, Scene, Shot,
+    Asset, AssetType, GenerationAttempt, GenerationJob, JobStatus, Project, Scene, Shot,
 )
 from backend.schemas.paths import portable_relative_path
 
@@ -433,7 +433,8 @@ class StudioDatabase:
         return Asset.model_validate_json(row["payload_json"]) if row else None
 
     def list_assets(self, project_id: str, scene_id: str | None = None,
-                    shot_id: str | None = None) -> list[Asset]:
+                    shot_id: str | None = None, *,
+                    asset_types: tuple[AssetType, ...] = ()) -> list[Asset]:
         clauses = ["project_id=?"]
         parameters: list[Any] = [project_id]
         if scene_id is not None:
@@ -442,12 +443,23 @@ class StudioDatabase:
         if shot_id is not None:
             clauses.append("shot_id=?")
             parameters.append(shot_id)
+        if asset_types:
+            clauses.append(f"asset_type IN ({', '.join('?' for _ in asset_types)})")
+            parameters.extend(item.value for item in asset_types)
         rows = self._all(
             "SELECT payload_json FROM assets "
             f"WHERE {' AND '.join(clauses)} ORDER BY created_at",
             tuple(parameters),
         )
         return [Asset.model_validate_json(row["payload_json"]) for row in rows]
+
+    def job_scene_titles(self) -> dict[str, str]:
+        """Read the display titles in bulk for the queue and its live feed."""
+        rows = self._all(
+            "SELECT id, json_extract(payload_json, '$.title') AS title FROM scenes "
+            "WHERE id IN (SELECT DISTINCT scene_id FROM jobs WHERE scene_id IS NOT NULL)"
+        )
+        return {row["id"]: row["title"] for row in rows if isinstance(row["title"], str)}
 
     def delete_assets_for_path(self, project_id: str, filepath_prefix: str) -> int:
         """Remove asset index rows under a project-relative directory prefix."""
@@ -578,7 +590,8 @@ class StudioDatabase:
                     raise KeyError(f"job not found: {job_id}")
                 job = GenerationJob.model_validate_json(row["payload_json"])
                 updated = updater(job)
-                self._save_job(connection, updated)
+                if updated is not job:
+                    self._save_job(connection, updated)
                 connection.commit()
                 return updated
             except Exception:

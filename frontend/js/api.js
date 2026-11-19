@@ -24,6 +24,7 @@
  */
 
 import { apiUrl } from "./config.js";
+import { beginJobSubmission } from "./job-progress.js";
 
 /* ============================================================================
  * Contract types (JSDoc) — mirror the backend JSON exactly.
@@ -128,6 +129,7 @@ import { apiUrl } from "./config.js";
  * `GET /api/projects`
  * @typedef {Object} ProjectList
  * @property {Project[]} projects
+ * @property {Record<string, string|null>} [cover_urls] — local project images when requested
  * @property {Array<{type: string, slug?: string, project_id?: string, detail: string}>} [recovery]
  *   — present when the backend reconciled on-disk directories with its database
  *     (recovered / orphaned / conflict / unreadable entries).
@@ -205,6 +207,7 @@ import { apiUrl } from "./config.js";
  * @property {string} type
  * @property {string} filepath
  * @property {string} [url] — project-scoped local media URL when available
+ * @property {boolean} [available] — filesystem availability for preview and final renders
  * @property {string} backend
  * @property {string} model
  * @property {string} model_version
@@ -224,10 +227,13 @@ import { apiUrl } from "./config.js";
  * @property {string} id
  * @property {string} project_id
  * @property {string | null} scene_id
+ * @property {string} [scene_title]
+ * @property {string | null} [shot_id]
  * @property {string} stage
  * @property {string | null} backend
  * @property {"queued"|"preparing"|"loading_model"|"generating"|"postprocessing"|"completed"|"failed"|"canceled"} status
  * @property {number} progress
+ * @property {{phase: string, completed?: number|null, total?: number|null, unit?: string|null}|null} [progress_detail]
  * @property {number} priority
  * @property {Record<string, any>} parameters
  * @property {number} attempt_count
@@ -256,6 +262,7 @@ import { apiUrl } from "./config.js";
  * @property {Asset[]} assets
  * @property {GenerationJob[]} jobs
  * @property {string} directory
+ * @property {boolean} [has_render_narration] — whether Classic narration is present on disk
  * @property {{version?: number, stages?: Record<string, {status?:string, job_id?:string|null, completed_at?:string, outputs?:string[]}>}} stage_state
  * @property {{passed: boolean, inspected_files: number, issues: {severity: string, code: string, message: string}[]}|null} [quality_report]
  * @property {Array<{type: string, slug?: string, project_id?: string, detail: string}>=} recovery
@@ -530,6 +537,17 @@ class ApiErrorInstance extends Error {
  * @returns {Promise<any>}
  */
 export async function request(config, path, opts = {}) {
+  const settle = opts.method === "POST" ? beginJobSubmission(path, opts.body) : null;
+  let result;
+  try {
+    result = await fetchJson(config, path, opts);
+    return result;
+  } finally {
+    settle?.(result);
+  }
+}
+
+async function fetchJson(config, path, opts) {
   const method = opts.method || "GET";
   const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : 10000;
   const controller = new AbortController();
@@ -914,11 +932,19 @@ export function editProject(config, id, body, opts = {}) {
 /**
  * GET /api/projects
  * @param {import("./config.js").LvsConfig} config
- * @param {{signal?: AbortSignal}} [opts]
+ * @param {{signal?: AbortSignal, includeCovers?: boolean}} [opts]
  * @returns {Promise<ProjectList>}
  */
-export function listProjects(config, opts = {}) {
-  return request(config, "/api/projects", { timeoutMs: 10000, ...opts });
+export function listProjects(config, { includeCovers = false, ...opts } = {}) {
+  const path = includeCovers ? "/api/projects?include_covers=true" : "/api/projects";
+  return request(config, path, { timeoutMs: 10000, ...opts });
+}
+
+/** An asset URL served by the mounted project's localhost API. */
+export function projectAssetUrl(projectId, url) {
+  const prefix = `/api/projects/${encodeURIComponent(projectId)}/assets/`;
+  return typeof url === "string" && url.startsWith(prefix) && /^[\w-]+\/file$/.test(url.slice(prefix.length))
+    ? url : null;
 }
 
 /**

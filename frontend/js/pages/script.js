@@ -17,6 +17,7 @@ import { state, needsProject } from "../state.js";
 import { getProject, planProject } from "../api.js";
 import { badge, loadingState, emptyState, errorPanel, toast, confirm } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 
 /**
  * @param {{name: string, param: string | null}} _route
@@ -185,13 +186,17 @@ function scriptPanel() {
       el("h2", { class: "panel-title" }, "Planning"),
       modelGate,
       el("div", { class: "row" }, planBtn, forceBtn, refreshBtn),
+      projectJobProgress(["plan"]),
       planRegion,
     ),
   );
   // Live path: narration updates as plan/narration jobs complete. The plan
   // region is populated only by an explicit planning action, so it is not
   // touched by the live refresh.
-  registerLiveUpdate(() => loadScript(scriptRegion, { skeleton: false }));
+  registerLiveUpdate((jobs) => {
+    if (jobs.some((job) => job.project_id === state.currentProjectId && job.stage === "plan"
+      && job.status === "completed")) void loadScript(scriptRegion, { skeleton: false });
+  });
   loadScript(scriptRegion);
   return panel;
 }

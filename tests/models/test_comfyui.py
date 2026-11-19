@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+from unittest.mock import Mock
 
 import httpx
 import pytest
+import websocket
 
 from backend.models import ComfyUIBackend, GenerationRequest, Ideogram4LocalBackend
 from backend.models.comfyui import substitute_workflow
@@ -16,6 +18,32 @@ def test_recursive_workflow_substitution_preserves_native_types():
     assert substitute_workflow(workflow, {"seed": 123, "prompt": "hello"}) == {
         "1": {"inputs": {"seed": 123, "text": "x hello"}}
     }
+
+
+def test_sampler_progress_uses_matching_prompt_and_survives_websocket_loss(tmp_path, monkeypatch):
+    backend = ComfyUIBackend(poll_interval=0.05)
+    backend.submit_workflow = Mock(return_value="live-prompt")
+    expected = {"status": {"status_str": "success"}}
+    backend.poll = Mock(side_effect=[None, expected])
+    connection = Mock()
+    connection.recv.side_effect = [
+        b"preview bytes",
+        "malformed json",
+        json.dumps({"type": "progress", "data": {"prompt_id": "other", "value": 9, "max": 10}}),
+        json.dumps({"type": "progress", "data": {"prompt_id": "live-prompt", "node": "1", "value": 2, "max": 10}}),
+        json.dumps({"type": "progress", "data": {"prompt_id": "live-prompt", "node": "1", "value": 5, "max": 10}}),
+        websocket.WebSocketConnectionClosedException(),
+    ]
+    open_socket = Mock(return_value=connection)
+    monkeypatch.setattr(websocket, "create_connection", open_socket)
+    details = []
+    request = GenerationRequest("job", tmp_path, "mock prompt", report_progress=details.append)
+    assert backend._run_workflow({}, request) == ("live-prompt", expected)
+    client_id = backend.submit_workflow.call_args.kwargs["client_id"]
+    assert open_socket.call_args.args[0].endswith(f"/ws?clientId={client_id}")
+    assert [detail.completed for detail in details if detail.phase == "sampling"] == [2, 5]
+    assert details[-1].phase == "retrieving_outputs"
+    connection.close.assert_called_once()
 
 
 def test_unload_releases_comfyui_models_and_allocator_memory():

@@ -43,12 +43,12 @@ import {
   confirm,
   toast,
   toastError,
-  progress,
   stageChip,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { projectJobProgress } from "../job-progress.js";
 import { navigate, parseRoute } from "../router.js";
-import { createRenderMonitor } from "../render-monitor.js";
+import { createRenderMonitor, currentRenderAsset } from "../render-monitor.js";
 import { editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
@@ -178,7 +178,7 @@ export function renderExport(_route) {
     el("div", { class: "screen-head" }, el("h1", {}, "Export")),
   );
   if (!state.currentProjectId) {
-    screen.append(needsProject("Select a project in the top bar to render it."));
+    screen.append(needsProject("Choose a project from the Studio navigation to render it."));
     return screen;
   }
   screen.append(exportPanel());
@@ -194,8 +194,8 @@ function exportPanel() {
   const preflightBody = el("div");
   const deliveryBody = el("div", { class: "stack" });
   const delivery = el("div", { class: "delivery-layout" },
-    el("div", { class: "stack" }, monitor.element, preflightBody),
     deliveryBody,
+    monitor.element,
   );
   const refreshBtn = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Refresh");
   refreshBtn.onclick = () => load(body);
@@ -206,6 +206,7 @@ function exportPanel() {
       refreshBtn,
     ),
     delivery,
+    preflightBody,
     body,
   );
 
@@ -237,11 +238,14 @@ function exportPanel() {
       );
       const active = jobs.find((j) => !TERMINAL.includes(j.status)) || null;
       const last = jobs.slice().sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0] || null;
-      monitor.update(snap, { final: true });
       const stagesOpen = preflightBody.querySelector(".studio-disclosure")?.open || false;
-      const { settings, preflight, outputs } = build(snap, stages, active, last, thumbnails, history, stagesOpen);
+      const optionsOpen = deliveryBody.querySelector(".delivery-options")?.open || false;
+      const { actions, preflight, outputs, emptyContent } = build(
+        snap, stages, active, last, thumbnails, history, { stagesOpen, optionsOpen },
+      );
+      monitor.update(snap, { final: true, emptyContent });
       preflightBody.replaceChildren(preflight);
-      deliveryBody.replaceChildren(...settings);
+      deliveryBody.replaceChildren(actions);
       region.replaceChildren(outputs);
       hasContent = true;
     } catch (err) {
@@ -254,7 +258,12 @@ function exportPanel() {
 
   // Live path: render progress and final output update while the job runs
   // (no form state on this screen, so a full region rebuild is safe).
-  registerLiveUpdate(() => load(body, { skeleton: false }));
+  registerLiveUpdate((changes) => {
+    if (changes.some((job) => job.project_id === state.currentProjectId
+      && (!job.parameters?.parent_job_id || job.status === "completed"))) {
+      void load(body, { skeleton: false });
+    }
+  });
   load(body);
   return panel;
 }
@@ -266,13 +275,20 @@ function exportPanel() {
  * @param {import("../api.js").GenerationJob|null} last
  * @param {import("../api.js").ThumbnailStudioSnapshot} thumbnails
  * @param {{renders?: import("../api.js").RenderHistoryEntry[]}|null} history
- * @param {boolean} stagesOpen
+ * @param {{stagesOpen: boolean, optionsOpen: boolean}} disclosures
  */
-function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
+function build(snap, stages, active, last, thumbnails, history, { stagesOpen, optionsOpen }) {
   const project = snap.project;
   const mode = exportVideoMode(project);
   const parts = [];
   const onRerun = (stage) => doRerunStage(stage, project);
+  const finalStage = stages.render_final;
+  const qcStage = stages.quality_control;
+  const finalDone = finalStage?.status === "completed";
+  const finalAsset = currentRenderAsset(snap, "render_final");
+  const previewAsset = currentRenderAsset(snap, "render_preview");
+  const hasPreview = Boolean(finalAsset || previewAsset);
+  const report = snap.quality_report;
 
   const selected = (thumbnails.candidates || []).find((candidate) => candidate.selected);
   // Only a project-scoped local URL is rendered/downloadable; a candidate
@@ -340,34 +356,48 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
   const missingMedia = editorialMediaIssues(editorial).length;
   const fix = editorial?.has_narration === false ? ["#/voice", "Add narration"]
     : editorial?.has_edit_plan === false ? ["#/editorial", "Build Edit Plan"]
-      : missingMedia ? ["#/editorial", missingEditorialMediaLabel(missingMedia)] : null;
+      : missingMedia ? ["#/editorial", missingEditorialMediaLabel(missingMedia)]
+        : mode === "classic" && !snap.scenes?.length ? ["#/script", "Plan script scenes"]
+          : snap.has_render_narration === false ? ["#/voice", "Add narration"] : null;
   const renderDisabled = Boolean(active || fix);
-  const runBtn = el("button", {
-    class: "btn btn-primary", type: "button", disabled: renderDisabled,
+  const runBtn = finalAsset ? null : el("button", {
+    class: hasPreview && !fix ? "btn btn-primary" : "btn", type: "button", disabled: renderDisabled,
   }, "Render final video");
   const forceBtn = el("button", {
     class: "btn", type: "button", disabled: renderDisabled,
   }, "Re-render final video");
-  runBtn.onclick = () => doRender(false, project);
+  if (runBtn) runBtn.onclick = () => doRender(false, project);
   forceBtn.onclick = () => doRender(true, project);
 
-  const statusRegion = el("div", { class: "mt" },
-    active ? jobState(active)
-      : last ? lastJobNote(last)
-      : el("span", { class: "muted small" }, "No render has been queued yet."),
-  );
+  const previewBtn = el("button", {
+    class: hasPreview ? "btn" : "btn btn-primary", type: "button", disabled: renderDisabled,
+    onclick: () => doRerunStage("render_preview", project),
+  }, previewAsset ? "Re-render preview" : "Render preview");
+  const fixLink = fix ? el("a", { class: finalAsset ? "btn" : "btn btn-primary", href: fix[0] }, fix[1]) : null;
+  const emptyContent = hasPreview ? null : fixLink || (active
+    ? el("span", {}, "A render job is in progress.")
+    : previewBtn);
+  const statusRegion = active ? jobState(active) : last ? lastJobNote(last)
+    : hasPreview ? null : el("span", { class: "muted small" }, "No render has been queued yet.");
 
   const renderActions = el("section", { class: "panel delivery-actions" },
-    el("h2", { class: "panel-title" }, "Render controls"),
+    el("h2", { class: "panel-title" }, finalAsset ? "Final video ready" : "Render controls"),
     el("div", { class: "panel-body stack" },
-      fix ? el("a", { class: "btn btn-primary", href: fix[0] }, fix[1]) : null,
+      finalAsset ? el("a", {
+        class: "btn btn-primary", href: `${finalAsset.url}?download=true`,
+      }, "Download final MP4") : null,
+      report ? el("div", { class: "row small muted" },
+        badge(report.passed ? "good" : "critical", report.passed ? "Passed" : "Failed"),
+        "Preview quality check",
+      ) : null,
+      hasPreview && !finalAsset ? fixLink : null,
       runBtn,
-      forceBtn,
-      el("button", {
-        class: "btn", type: "button", disabled: renderDisabled,
-        onclick: () => doRerunStage("render_preview", project),
-      }, stages.render_preview?.status === "completed" ? "Re-render preview" : "Render preview"),
+      el("details", { class: "studio-disclosure delivery-options", open: optionsOpen },
+        el("summary", {}, "Render options"),
+        el("div", { class: "stack" }, finalAsset ? fixLink : null, forceBtn, hasPreview ? previewBtn : null),
+      ),
       statusRegion,
+      projectJobProgress(["render", "render_stage", "pipeline"], { initial: active, showTerminal: false }),
     ),
   );
 
@@ -396,12 +426,6 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
     );
 
   /* --- final output ------------------------------------------------------ */
-  const finalStage = stages.render_final;
-  const qcStage = stages.quality_control;
-  const finalDone = finalStage && finalStage.status === "completed";
-  const finalAsset = (snap.assets || [])
-    .filter((asset) => asset.settings && asset.settings.role === "final_render")
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
   parts.push(
     el("div", { class: "panel" },
       el("div", { class: "row" },
@@ -422,18 +446,9 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
                   ? `recorded at ${fullPath(snap.directory, (qcStage.outputs || [])[0])}`
                   : "not recorded yet",
               ),
-              finalAsset && finalAsset.url
-                ? el("dt", {}, "Playback / download")
-                : null,
-              finalAsset && finalAsset.url
-                ? el("dd", {}, el("a", {
-                    class: "btn btn-primary btn-sm",
-                    href: `${finalAsset.url}?download=true`,
-                  }, "Download final MP4"))
-                : null,
             )
-          : el("span", { class: "muted small" }, "The final render has not completed yet."),
-        finalDone && !(finalAsset && finalAsset.url)
+          : el("span", { class: "muted small" }, "No current final render."),
+        finalDone && !finalAsset
           ? el("p", { class: "muted small" }, "The final file is recorded but not currently available through the local API.")
           : null,
         renderHistorySection(history),
@@ -441,7 +456,6 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
     ),
   );
 
-  const report = snap.quality_report;
   const quality = el("section", { class: "panel" },
     el("h2", { class: "panel-title" }, "Preview quality report"),
     report ? el("div", { class: "stack" },
@@ -457,7 +471,8 @@ function build(snap, stages, active, last, thumbnails, history, stagesOpen) {
       ) : el("p", { class: "muted small" }, "No issues reported."),
     ) : el("p", { class: "muted small" }, "No quality report is available for the current preview."),
   );
-  return { settings: [renderActions, videoSpec], preflight, outputs: el("div", { class: "stack" }, quality, ...parts) };
+  return { actions: renderActions, preflight, emptyContent,
+    outputs: el("div", { class: "stack" }, quality, videoSpec, ...parts) };
 }
 
 /**
@@ -484,16 +499,7 @@ function jobState(job) {
       toastError(err, "cancel render");
     }
   };
-  return el("div", { class: "stack" },
-    el("div", { class: "row" },
-      jobStatusBadge(job.status),
-      badge("accent", renderStageLabel(job.parameters && job.parameters.current_stage)),
-      el("span", { class: "muted small" }, `job ${job.id}`),
-      el("span", { class: "spacer" }),
-      cancelBtn,
-    ),
-    progress(job.progress || 0),
-  );
+  return el("div", { class: "row" }, el("span", { class: "spacer" }), cancelBtn);
 }
 
 /**
@@ -502,9 +508,11 @@ function jobState(job) {
  */
 function lastJobNote(job) {
   const err = job.error ? (/** @type {any} */ (job.error).message || String(job.error)) : "";
+  const stage = job.stage === "render_stage" ? stageRerunLabel(job.parameters?.stage)
+    : job.stage === "render" ? "Final render job" : "Pipeline job";
   return el("div", { class: "row" },
     jobStatusBadge(job.status),
-    el("span", { class: "muted small" }, `last render: ${job.status}${err ? ` — ${err}` : ""}`),
+    el("span", { class: "muted small" }, `${stage}${err ? ` — ${err}` : ""}`),
   );
 }
 
@@ -750,7 +758,7 @@ function stageRerunCell(stage, st, { active, onRerun }) {
 export function renderInputSummary(snap, stages) {
   const editorial = exportVideoMode(snap.project) === "editorial";
   const assets = snap.assets || [];
-  const narrationReady = (editorial ? snap.editorial?.has_narration : undefined) ?? Boolean(
+  const narrationReady = (editorial ? snap.editorial?.has_narration : snap.has_render_narration) ?? Boolean(
     stages.narration && stages.narration.status === "completed"
     || assets.some((asset) => asset.settings && asset.settings.role === "narration")
   );
