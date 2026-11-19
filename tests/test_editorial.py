@@ -1157,6 +1157,10 @@ def _template_composition(template: EditorialTemplate, *, cid: str = "c1") -> Ed
         return _composition(cid, template, assets=[_asset("hero-1")], elements=[
             _element("hero-1", "illustration", EditorialElementType.IMAGE, asset_id="hero-1"),
         ])
+    if template is EditorialTemplate.READING_IMAGE:
+        return _composition(cid, template, assets=[_asset("still-1")], elements=[
+            _element("image-1", "image", EditorialElementType.IMAGE, asset_id="still-1"),
+        ])
     return _composition(cid, template, elements=[
         _element("head-1", "headline", EditorialElementType.TEXT, text="WORD"),
     ])
@@ -1628,6 +1632,51 @@ def test_every_template_compiles_with_shared_theme_and_seek_contract() -> None:
         # Every approved motion primitive stays available in the compiled runtime.
         for name in MOTION_NAMES:
             assert f"case '{name}':" in html, (template.value, name)
+
+
+def test_reading_plan_uses_script_and_shares_uploaded_icon(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from backend.editorial.reading import ReadingPlanRequest
+
+    pipeline = PipelineService(
+        load_config(environ={}), database_path=tmp_path / "studio.sqlite3",
+        project_root=tmp_path / "projects", temp_root=tmp_path / "temp", mock_mode=True,
+    )
+    project = pipeline.create_project(ProjectCreate(
+        title="A Merciful Heart", topic="A reading from St. Isaac", target_duration=10,
+        resolution=(640, 360), video_mode=VideoMode.EDITORIAL,
+    ))
+    pipeline.ensure_plan(project.id)
+    plan = pipeline.create_reading_edit_plan(project.id, ReadingPlanRequest(
+        opening_text="What is a merciful heart?", attribution="St. Isaac the Syrian",
+        closing_quote="After the example of God.", source_credit="Mystic Treatises, p. 341",
+    ))
+    assert plan.reading_layout and plan.caption_style is EditorialCaptionStyle.READING
+    assert plan.compositions[0].template is EditorialTemplate.READING_CARD
+    assert plan.compositions[-1].template is EditorialTemplate.READING_CARD
+    assert any(shot.template is EditorialTemplate.READING_IMAGE for shot in plan.compositions)
+    assert pipeline.create_reading_edit_plan(project.id, ReadingPlanRequest()) == plan
+    portrait = tmp_path / "icon.png"
+    Image.new("RGB", (36, 48), "red").save(portrait)
+    updated = pipeline.replace_editorial_asset(
+        project.id, plan.compositions[0].id, plan.compositions[0].assets[0].id,
+        portrait, original_filename=portrait.name,
+    )
+    assert updated.compositions[0].assets[0].source == updated.compositions[-1].assets[0].source
+    assert updated.compositions[-1].assets[0].locked
+    still = next(shot for shot in updated.compositions if shot.template is EditorialTemplate.READING_IMAGE)
+    updated = pipeline.replace_editorial_asset(
+        project.id, still.id, still.assets[0].id, portrait, original_filename=portrait.name,
+    )
+    assert next(shot for shot in updated.compositions if shot.id == still.id).assets[0].generation is None
+    preview = pipeline.retimed_editorial_plan(project.id)
+    assert preview is not None and preview.duration == pytest.approx(updated.duration + 2)
+    saved = pipeline.update_edit_plan_settings(project.id, closing_hold_seconds=3.5)
+    assert saved.duration == updated.duration
+    preview = pipeline.retimed_editorial_plan(project.id)
+    assert preview is not None and preview.duration == pytest.approx(updated.duration + 3.5)
+    assert "What is a merciful heart?" in compile_edit_plan_html(updated)
 
 
 def test_renderer_scales_vertical_preview_and_uses_landscape_layout() -> None:

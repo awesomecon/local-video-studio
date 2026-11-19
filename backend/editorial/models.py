@@ -19,6 +19,8 @@ class EditorialTemplate(StrEnum):
     COMPARISON_CANVAS = "comparisonCanvas"
     ILLUSTRATION_CANVAS = "illustrationCanvas"
     BIG_TEXT_REVEAL = "bigTextReveal"
+    READING_CARD = "readingCard"
+    READING_IMAGE = "readingImage"
 
 
 class MotionPrimitive(StrEnum):
@@ -100,6 +102,7 @@ class EditorialCaptionStyle(StrEnum):
 
     EDITORIAL_PHRASE = "editorialPhrase"
     QUIET_DOCUMENTARY = "quietDocumentary"
+    READING = "reading"
     ONE_LINE = "oneLine"
     ONE_WORD = "oneWord"
     STANDARD = "standard"
@@ -206,6 +209,13 @@ TEMPLATE_ELEMENT_SLOTS: dict[
         "cta": EditorialElementType.TEXT,
         "blackout": EditorialElementType.BLACK_SCREEN,
     },
+    EditorialTemplate.READING_CARD: {
+        "portrait": EditorialElementType.IMAGE,
+        "headline": EditorialElementType.TEXT,
+        "attribution": EditorialElementType.TEXT,
+        "source": EditorialElementType.TEXT,
+    },
+    EditorialTemplate.READING_IMAGE: {"image": EditorialElementType.IMAGE},
 }
 
 # These are semantic authoring limits, not a substitute for renderer-side
@@ -239,6 +249,12 @@ TEMPLATE_TEXT_CONSTRAINTS: dict[
         "kicker": EditorialTextConstraint(max_characters=32, max_lines=2),
         "cta": EditorialTextConstraint(max_characters=32, max_lines=2),
     },
+    EditorialTemplate.READING_CARD: {
+        "headline": EditorialTextConstraint(max_characters=134, max_lines=5),
+        "attribution": EditorialTextConstraint(max_characters=90, max_lines=2),
+        "source": EditorialTextConstraint(max_characters=180, max_lines=3),
+    },
+    EditorialTemplate.READING_IMAGE: {},
 }
 
 TEMPLATE_REQUIRED_ROLES: dict[EditorialTemplate, frozenset[str]] = {
@@ -247,6 +263,8 @@ TEMPLATE_REQUIRED_ROLES: dict[EditorialTemplate, frozenset[str]] = {
     EditorialTemplate.COMPARISON_CANVAS: frozenset({"left-image", "right-image"}),
     EditorialTemplate.ILLUSTRATION_CANVAS: frozenset({"illustration"}),
     EditorialTemplate.BIG_TEXT_REVEAL: frozenset({"headline"}),
+    EditorialTemplate.READING_CARD: frozenset({"headline"}),
+    EditorialTemplate.READING_IMAGE: frozenset({"image"}),
 }
 
 
@@ -399,6 +417,8 @@ class EditPlan(DomainModel):
     editorial_text_enabled: bool = True
     captions_enabled: bool = True
     sentence_hold_seconds: float = Field(default=0.5, ge=0, le=5)
+    reading_layout: bool = False
+    closing_hold_seconds: float = Field(default=0, ge=0, le=5)
     caption_style: EditorialCaptionStyle = EditorialCaptionStyle.EDITORIAL_PHRASE
     caption_emphasis: list[EditorialCaptionEmphasis] = Field(
         default_factory=list, max_length=50,
