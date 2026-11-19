@@ -29,7 +29,7 @@
  */
 
 import { el, fmtDate, fmtDuration, shortId } from "../dom.js";
-import { state } from "../state.js";
+import { state, persistCurrentProject } from "../state.js";
 import { listJobs, cancelJob, retryJob } from "../api.js";
 import {
   loadingState,
@@ -44,6 +44,8 @@ import {
   stageLabel,
 } from "../ui.js";
 import { registerLiveUpdate } from "../app.js";
+import { navigate, sceneEditorHash } from "../router.js";
+import { effectiveVideoMode } from "../video-mode.js";
 
 const TERMINAL = ["completed", "failed", "canceled"];
 /** Non-terminal states in which the job is actively consuming a worker. */
@@ -71,17 +73,55 @@ const CURRENT_STAGE_LABELS = {
 
 /** Status filter chips: [key, label, predicate]. */
 const STATUS_FILTERS = [
-  ["all", "All", () => true],
+  ["current", "Current work", () => true],
   ["active", "Active", (j) => ACTIVE.includes(j.status)],
   ["queued", "Queued", (j) => j.status === "queued"],
-  ["failed", "Failed", (j) => j.status === "failed"],
+  ["failed", "Failed history", (j) => j.status === "failed"],
   ["finished", "Finished", (j) => j.status === "completed" || j.status === "canceled"],
+  ["all", "All jobs", () => true],
 ];
 
 /** Session-scoped filter state, kept while navigating away and back. */
-let statusFilter = "all";
+let statusFilter = "current";
 /** Project id filter; empty string shows every project. */
 let projectFilter = "";
+
+export function currentJobFailures(jobs) {
+  const seen = new Set();
+  // A newer attempt for the same output supersedes an older failure. A
+  // canceled attempt leaves the most recent actual result relevant.
+  return [...jobs].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).filter((job) => {
+    if (job.status === "canceled") return false;
+    const params = job.parameters || {};
+    const target = JSON.stringify([job.project_id, job.stage, job.scene_id, job.shot_id,
+      params.stage, params.composition_id, params.editorial_asset_id, params.candidate_id,
+      params.take_id, params.chunk_index, params.cue_id]);
+    if (seen.has(target)) return false;
+    seen.add(target);
+    return job.status === "failed";
+  });
+}
+
+function recoveryDestination(job, project) {
+  if (job.stage.startsWith("thumbnail")) return ["#/thumbnails", "Open Thumbnails"];
+  if (job.stage === "plan") return ["#/script", "Open Script"];
+  if (job.stage.startsWith("narration")) return ["#/voice", "Open Voice"];
+  if (job.stage === "caption_alignment" || job.stage === "subtitles") return ["#/captions", "Open Captions"];
+  if (job.stage === "music" || job.stage === "score_mix") return ["#/music", "Open Music"];
+  if (job.stage.startsWith("editorial_")) return ["#/editorial", "Open Editorial"];
+  if (job.stage.startsWith("render") || job.stage === "pipeline" || job.stage === "quality_control") {
+    return ["#/export", "Open Export"];
+  }
+  if (job.stage === "timeline") return ["#/timeline", "Open Timeline"];
+  if (job.scene_id && effectiveVideoMode(project) === "classic") {
+    return [sceneEditorHash(job.scene_id, job.shot_id), "Open scene"];
+  }
+  if (["visuals", "visual_batch", "references"].includes(job.stage)) {
+    return effectiveVideoMode(project) === "editorial"
+      ? ["#/editorial", "Open Editorial"] : ["#/storyboard", "Open Storyboard"];
+  }
+  return ["#/project", "Open project"];
+}
 
 /**
  * @param {string} raw - `parameters.current_stage`; batch tokens like
@@ -120,6 +160,7 @@ export function renderJobs(_route) {
     "aria-label": "Filter by project",
     onchange: (ev) => {
       projectFilter = /** @type {HTMLSelectElement} */ (ev.target).value;
+      showAllJobs = false;
       renderList(state.jobs);
     },
   });
@@ -173,6 +214,7 @@ export function renderJobs(_route) {
       job.status, job.progress, job.updated_at, job.error || "",
       params.current_stage || "", params.parent_job_id || "",
       ctx.queuePos.get(job.id) || "", (project && project.title) || "",
+      job.scene_title || "", statusFilter,
       job.executable === false ? "no-retry" : "",
       job.attempt_count >= job.max_attempts ? "exhausted" : "",
     ].join("|");
@@ -192,6 +234,7 @@ export function renderJobs(_route) {
       }, label);
       chip.onclick = () => {
         statusFilter = key;
+        showAllJobs = false;
         renderList(state.jobs);
       };
       return chip;
@@ -229,43 +272,66 @@ export function renderJobs(_route) {
     syncControls();
     const all = Array.isArray(jobs) ? jobs : [];
     const predicate = (STATUS_FILTERS.find(([key]) => key === statusFilter) || STATUS_FILTERS[0])[2];
-    const filtered = all
-      .filter((j) => predicate(j) && (!projectFilter || j.project_id === projectFilter))
-      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
-    summary.textContent = summaryText(all, filtered.length);
+    const scoped = all.filter((job) => !projectFilter || job.project_id === projectFilter);
+    const current = statusFilter === "current";
+    const ctx = buildCtx(all);
+    const groups = current ? [
+      ["Running", scoped.filter((job) => ACTIVE.includes(job.status))],
+      ["Queued", scoped.filter((job) => job.status === "queued")
+        .sort((a, b) => ctx.queuePos.get(a.id) - ctx.queuePos.get(b.id))],
+      ["Needs attention", currentJobFailures(scoped)],
+    ] : [[null, scoped.filter(predicate)
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))]];
+    const count = groups.reduce((total, [, jobs]) => total + jobs.length, 0);
+    summary.textContent = current ? `${count} current` : summaryText(scoped, count);
     if (!all.length) {
       rows.clear();
       body.replaceChildren(emptyState("No jobs yet",
         "Jobs appear here when scenes are generated, narration is recorded, or a render runs."));
       return;
     }
-    if (!filtered.length) {
+    if (!count) {
       rows.clear();
-      body.replaceChildren(emptyState("Nothing matches",
-        "No jobs match the current filters."));
+      body.replaceChildren(current
+        ? emptyState("No work needs attention", "Running jobs, queued jobs, and unresolved failures appear here.",
+          [el("button", { class: "btn btn-sm", type: "button", onclick: () => {
+            statusFilter = "all";
+            renderList(state.jobs);
+          } }, "View job history")])
+        : emptyState("Nothing matches", "No jobs match the current filters."));
       return;
     }
-    const ctx = buildCtx(all);
-    const visible = showAllJobs || filtered.length <= JOB_ROW_CAP
-      ? filtered
-      : filtered.slice(0, JOB_ROW_CAP);
-    // Detach all children first; row nodes stay alive in `rows` and are
-    // re-appended in sorted order below (append() moves existing nodes).
-    body.replaceChildren();
+    const groupsStamp = JSON.stringify([statusFilter, showAllJobs, groups.map(([name, jobs]) =>
+      [name, jobs.length, (showAllJobs ? jobs : jobs.slice(0, JOB_ROW_CAP)).map((job) => job.id)])]);
+    const layoutChanged = body.dataset.groups !== groupsStamp || !body.querySelector(".job-row");
+    const sections = [];
     const seen = new Set();
-    for (const job of visible) {
-      seen.add(job.id);
-      let entry = rows.get(job.id);
-      if (!entry) {
-        entry = { node: el("article", { class: "job-row", "data-job": job.id }), stamp: "" };
-        rows.set(job.id, entry);
-      }
-      const stamp = rowStamp(job, ctx);
-      if (entry.stamp !== stamp) {
-        entry.node.replaceChildren(...jobBody(job, ctx));
-        entry.stamp = stamp;
-      }
-      body.append(entry.node);
+    for (const [name, jobs] of groups) {
+      if (!jobs.length) continue;
+      const visible = showAllJobs ? jobs : jobs.slice(0, JOB_ROW_CAP);
+      const nodes = visible.map((job) => {
+        seen.add(job.id);
+        let entry = rows.get(job.id);
+        if (!entry) {
+          entry = { node: el("article", { class: "job-row", "data-job": job.id }), stamp: "" };
+          rows.set(job.id, entry);
+        }
+        const stamp = rowStamp(job, ctx);
+        if (entry.stamp !== stamp) {
+          entry.node.replaceChildren(...jobBody(job, ctx));
+          entry.stamp = stamp;
+        }
+        return entry.node;
+      });
+      if (!layoutChanged) continue;
+      sections.push(el("section", { class: "jobs-group", "aria-label": name || "Job history" },
+        name ? el("h2", { class: "jobs-group-title" }, name, el("span", { class: "muted" }, String(jobs.length))) : null,
+        ...nodes,
+        visible.length < jobs.length ? el("button", {
+          class: "btn btn-ghost btn-sm", type: "button",
+          onclick: () => { showAllJobs = true; renderList(state.jobs); },
+        }, `Show all ${jobs.length} jobs`) : null,
+      ));
     }
     for (const [id, entry] of rows) {
       if (!seen.has(id)) {
@@ -273,11 +339,9 @@ export function renderJobs(_route) {
         rows.delete(id);
       }
     }
-    if (visible.length < filtered.length) {
-      body.append(el("button", {
-        class: "btn btn-ghost btn-sm", type: "button",
-        onclick: () => { showAllJobs = true; renderList(state.jobs); },
-      }, `Show all ${filtered.length} jobs`));
+    if (layoutChanged) {
+      body.dataset.groups = groupsStamp;
+      body.replaceChildren(...sections);
     }
   }
 
@@ -327,7 +391,7 @@ export function renderJobs(_route) {
       ),
       el("div", { class: "job-ctx" },
         project ? project.title : `project ${shortId(job.project_id)}`,
-        job.scene_id ? ` · scene ${shortId(job.scene_id)}` : "",
+        job.scene_title ? ` · ${job.scene_title}` : job.scene_id ? ` · scene ${shortId(job.scene_id)}` : "",
       ),
     );
     const meta = el("div", { class: "job-meta" },
@@ -363,6 +427,14 @@ export function renderJobs(_route) {
     }
 
     const actions = [];
+    if (job.status === "failed" && project) {
+      const [hash, label] = recoveryDestination(job, project);
+      actions.push(el("button", { class: "btn btn-sm", type: "button", onclick: () => {
+        state.currentProjectId = project.id;
+        persistCurrentProject(project.id);
+        navigate(hash);
+      } }, label));
+    }
     // The backend reports cancelable=false for pipeline bookkeeping rows:
     // canceling them mid-operation is a tolerated no-op, so no button.
     if (!isTerminal && job.cancelable !== false) {

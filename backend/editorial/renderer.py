@@ -29,7 +29,7 @@ from .models import (
     EditorialTemplate,
 )
 from .passages import locate_passage
-from .preview import PREVIEW_CSS, PREVIEW_SCRIPT, preview_controls
+from .preview import FIT_PICTURE_SCRIPT, PREVIEW_CSS, PREVIEW_SCRIPT, preview_controls
 
 
 AssetURLResolver = Callable[[EditorialAsset], str | None]
@@ -500,6 +500,7 @@ def compile_edit_plan_html(
     show_placeholders: bool = True,
     interactive_preview: bool = False,
     narration_url: str | None = None,
+    still_time: float | None = None,
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
 
@@ -507,7 +508,8 @@ def compile_edit_plan_html(
     supplies escaped text, resolved asset URLs, and element ids. ``captions``
     carries pre-computed caption beats (global or clip-local clock, matching the
     plan's composition clock) with renderer-assigned design-space positions;
-    when empty the composition carries no caption layer.
+    when empty the composition carries no caption layer. A still uses the
+    same compositor at one timestamp with a viewport-sized canvas.
     """
     unimplemented = sorted({
         item.template.value
@@ -711,6 +713,7 @@ font-size:58px;font-weight:700;text-shadow:none;
 const PLAN={payload};
 const CAPTIONS={captions_payload};
 const FONT_MANIFEST={font_manifest_payload};
+{FIT_PICTURE_SCRIPT if interactive_preview or still_time is not None else ""}
 const clamp=v=>Math.max(0,Math.min(1,v));
 const ease=v=>{{v=clamp(v);return v*v*(3-2*v)}};
 function fitSetting(el,name){{
@@ -932,13 +935,14 @@ const sourceImagesReady=Promise.all([...document.images].map(img=>
   img.decode().catch(()=>undefined)
 ));
 Promise.all([pinnedFontsReady,sourceImagesReady]).then(()=>document.fonts.ready).then(()=>{{
-  fitEditorialText();window.renderAt(0);window.__editorialReady=true;
+  fitEditorialText();window.renderAt({_script_json(still_time if still_time is not None else 0)});window.__editorialReady=true;
   {"window.dispatchEvent(new Event('editorial-ready'));" if interactive_preview else ""}
 }}).catch(error=>{{
   window.__editorialError=String(error&&error.message||error);
   showEditorialError(window.__editorialError);
 }});
 {PREVIEW_SCRIPT if interactive_preview else ""}
+{"new ResizeObserver(() => fitEditorialPicture(document.documentElement)).observe(document.documentElement);" if still_time is not None else ""}
 </script></body></html>"""
 
 

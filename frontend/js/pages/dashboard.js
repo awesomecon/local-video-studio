@@ -12,7 +12,7 @@ import {
   reconcileProjects,
   latestAssetForScene,
 } from "../state.js";
-import { listProjects, getProject, deleteProject } from "../api.js";
+import { listProjects, getProject, deleteProject, projectAssetUrl } from "../api.js";
 import {
   projectStatusBadge,
   loadingState,
@@ -31,8 +31,12 @@ import {
 import { navigate } from "../router.js";
 import { registerLiveUpdate, syncProjectChrome } from "../app.js";
 import { effectiveVideoMode, editorialMediaIssues, missingEditorialMediaLabel } from "../video-mode.js";
+import { currentRenderAsset } from "../render-monitor.js";
 
-export function editorialNextStep(snap) {
+export function editorialNextStep(snap, {
+  finalReady = snap.stage_state?.stages?.render_final?.status === "completed",
+  previewReady = snap.stage_state?.stages?.render_preview?.status === "completed",
+} = {}) {
   const editorial = snap.editorial;
   const stages = snap.stage_state?.stages || {};
   const hasNarration = editorial?.has_narration ?? (stages.narration?.status === "completed");
@@ -46,8 +50,8 @@ export function editorialNextStep(snap) {
   if (editorial.plan_status === "stale" || editorial.stale === true) {
     return ["#/editorial", "Review Edit Plan changes", "The script, brief, or timing has changed"];
   }
-  if (stages.render_final?.status === "completed") return ["#/export", "Open delivery", "Final video rendered"];
-  if (stages.render_preview?.status === "completed") return ["#/export", "Review preview and export", "Video preview rendered"];
+  if (finalReady) return ["#/export", "Open delivery", "Review the quality report and download the MP4."];
+  if (previewReady) return ["#/export", "Review preview and export", "Check playback before rendering the final MP4."];
   return ["#/editorial", "Review the cut", "Play the sequence with narration"];
 }
 
@@ -57,7 +61,7 @@ export function editorialNextStep(snap) {
  */
 export function renderDashboard(route) {
   const allProjects = route.name === "projects";
-  const overview = allProjects ? null : renderSelectedOverview((projectId, cover) => list.updateCover(projectId, cover));
+  const overview = allProjects ? null : renderSelectedOverview((projectId) => list.coverFor(projectId));
   const list = renderProjectList(overview?.refresh);
   const queue = allProjects ? null : el("aside", { class: "studio-aside", "aria-label": "Production activity" });
   if (queue) renderQueue(queue);
@@ -107,11 +111,11 @@ function renderQueue(queue) {
  * ==========================================================================*/
 
 /**
- * @returns {{panel: HTMLElement, refresh: () => void, updateCover: (projectId: string, cover: import("../api.js").Asset|null) => void}}
+ * @returns {{panel: HTMLElement, refresh: () => void, coverFor: (projectId: string) => string|null}}
  */
 function renderProjectList(onProjectsChanged) {
   const body = el("div", { class: "panel-body" });
-  const covers = new Map();
+  let covers = {};
   let grid = false;
   const query = el("input", { class: "input", type: "search", placeholder: "Find a project", "aria-label": "Find a project" });
   const listBtn = el("button", { class: "btn btn-sm", type: "button", "aria-pressed": "true" }, "List");
@@ -141,14 +145,7 @@ function renderProjectList(onProjectsChanged) {
   return {
     panel,
     refresh: () => load(body, { skeleton: false }),
-    updateCover(projectId, cover) {
-      if (covers.get(projectId)?.url === cover?.url) return;
-      if (cover) covers.set(projectId, cover);
-      else covers.delete(projectId);
-      const thumb = [...body.querySelectorAll(".project-thumb")]
-        .find((item) => item.dataset.projectId === projectId);
-      if (thumb) thumb.replaceChildren(coverImage(cover, 22));
-    },
+    coverFor: (projectId) => projectAssetUrl(projectId, covers[projectId]),
   };
 
   /**
@@ -159,9 +156,10 @@ function renderProjectList(onProjectsChanged) {
     const token = ++inflight;
     if (skeleton) region.replaceChildren(loadingState(3));
     try {
-      const list = await listProjects(state.config);
+      const list = await listProjects(state.config, { includeCovers: true });
       if (token !== inflight) return;
       reconcileProjects(Array.isArray(list.projects) ? list.projects : []);
+      covers = list.cover_urls || {};
       hasContent = true;
       renderResults();
       onProjectsChanged?.();
@@ -192,8 +190,8 @@ function renderProjectList(onProjectsChanged) {
       projects.map((p) => {
         const selected = p.id === state.currentProjectId;
         return el("article", { class: "project-row" },
-          el("div", { class: "project-thumb", dataset: { projectId: p.id }, "aria-hidden": "true" },
-            coverImage(covers.get(p.id), 22)),
+          el("div", { class: "project-thumb", "aria-hidden": "true" },
+            coverImage(projectAssetUrl(p.id, covers[p.id]), 22, true)),
           el("div", { class: "project-info" },
             el("button", { class: "project-title", type: "button", onclick: () => openProject(p.id) }, p.title),
             el("div", { class: "muted small" }, `${fmtDuration(p.target_duration)} · ${p.aspect_ratio} · ${fmtDate(p.updated_at || p.created_at)}`),
@@ -248,9 +246,9 @@ function openProject(id, hash = "#/project") {
   navigate(hash);
 }
 
-function coverImage(cover, iconSize) {
-  if (!cover) return icon("film", iconSize);
-  const image = el("img", { src: cover.url, alt: "" });
+function coverImage(url, iconSize, lazy = false) {
+  if (!url) return icon("film", iconSize);
+  const image = el("img", { src: url, alt: "", loading: lazy ? "lazy" : "eager" });
   image.onerror = () => image.replaceWith(icon("film", iconSize));
   return image;
 }
@@ -262,7 +260,7 @@ function coverImage(cover, iconSize) {
 /**
  * @returns {{panel: HTMLElement, refresh: () => void}|null}
  */
-function renderSelectedOverview(onCover) {
+function renderSelectedOverview(coverFor) {
   const body = el("div", {});
   /**
    * @param {HTMLElement} region
@@ -315,28 +313,39 @@ function renderSelectedOverview(onCover) {
     const stages = snap.stage_state?.stages || {};
     const approved = scenes.filter((scene) => ["approved", "locked"].includes(scene.status) && !scene.shot_summary?.stale).length;
     const editorial = effectiveVideoMode(p) === "editorial";
-    const [nextRoute, nextLabel, editorialSummary] = editorial ? editorialNextStep(snap)
-      : !scenes.length ? ["#/script", "Start with Script"]
-        : approved < scenes.length ? ["#/storyboard", "Review storyboard"]
-          : stages.render_final?.status === "completed" ? ["#/export", "Open delivery"]
-            : ["#/timeline", "Review the sequence"];
-    const localImage = (asset) => asset?.url?.startsWith(`/api/projects/${encodeURIComponent(p.id)}/assets/`) && ["image", "thumbnail"].includes(asset.type);
-    const cover = assets.find((asset) => asset.current !== false && asset.settings?.role === "thumbnail" && localImage(asset))
-      || scenes.map((scene) => latestAssetForScene(assets, scene.id, "visual")).find(localImage);
-    onCover(p.id, cover || null);
-    const summary = editorial ? editorialSummary
-      : scenes.length ? `${approved} of ${scenes.length} scenes approved` : "No scenes planned";
+    const final = currentRenderAsset(snap, "render_final");
+    const preview = currentRenderAsset(snap, "render_preview");
+    const previousFinal = assets.some((asset) => ["final_render", "final_render_history"].includes(asset.settings?.role));
+    const remaining = scenes.length - approved;
+    const [nextRoute, nextLabel, reason] = editorial ? editorialNextStep(snap, {
+      finalReady: Boolean(final), previewReady: Boolean(preview),
+    })
+      : !scenes.length ? ["#/script", "Start with Script", "Plan the scenes for this project."]
+        : final ? ["#/export", "Open delivery", "Review the quality report and download the MP4."]
+          : remaining ? ["#/storyboard", "Review storyboard", remaining === 1
+            ? "One scene still needs review." : `${remaining} scenes still need review.`]
+            : preview ? ["#/export", "Review preview and export", "Check playback before rendering the final MP4."]
+              : snap.has_render_narration === false ? ["#/voice", "Add narration", "Record, import, or generate narration to render the cut."]
+                : ["#/timeline", "Review the sequence", "Check the timing before export."];
+    const cover = coverFor(p.id) || scenes
+      .map((scene) => latestAssetForScene(assets, scene.id, "visual"))
+      .filter((asset) => asset?.type === "image")
+      .map((asset) => projectAssetUrl(p.id, asset.url)).find(Boolean);
     return el("div", {},
-      el("article", { class: "welcome-feature" },
-        el("div", { class: "welcome-image" },
-          coverImage(cover, 54),
-          el("div", { class: "image-corner" }, projectStatusBadge(p.status)),
-        ),
+      el("article", { class: `welcome-feature${cover ? "" : " without-cover"}` },
+        cover ? el("div", { class: "welcome-image" }, coverImage(cover, 54)) : null,
         el("div", { class: "welcome-copy" },
           el("h3", {}, p.title),
           el("p", { class: "small muted" }, `${scenes.length} scenes · ${fmtDuration(p.target_duration)} · ${p.aspect_ratio}`),
-          editorial || !scenes.length ? null : progress(approved / scenes.length),
-          el("p", { class: "small" }, summary),
+          el("div", { class: "row welcome-state" },
+            final ? badge("good", "Current final MP4")
+              : preview ? badge("good", "Current preview")
+                : previousFinal ? badge("neutral", "Previous final render") : null,
+            !editorial && scenes.length
+              ? el("span", { class: "small muted" }, `${approved} of ${scenes.length} scenes approved`)
+              : null,
+          ),
+          el("p", { class: "small" }, reason),
           el("button", { class: "btn btn-primary welcome-continue", type: "button", onclick: () => openProject(p.id, nextRoute) },
             nextLabel, icon("chevron", 14)),
         ),

@@ -269,6 +269,9 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 .jobs-filters { margin-bottom: 14px; }
 .jobs-filters select { width: auto; max-width: 100%; }
 .jobs-filters [aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
+.jobs-group + .jobs-group { margin-top: 22px; }
+.jobs-group-title { display: flex; align-items: baseline; gap: 10px; margin: 0 0 10px; font: 750 1.05rem var(--font-display); }
+.jobs-group-title .muted { font: var(--text-sm) var(--mono); }
 .job-row .job-what { min-width: 0; gap: 5px; }
 .job-row .job-stage { margin: 0; font: 750 1rem var(--font-display); }
 .job-row .job-ctx { font-size: var(--text-sm); color: var(--text-2); overflow-wrap: anywhere; }
@@ -282,9 +285,9 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
   color: var(--text-3);
   overflow-wrap: anywhere;
 }
-.job-state { display: grid; grid-template-columns: minmax(0, 1fr) 70px; align-items: start; gap: 8px; }
-.job-state > .badge { justify-self: start; max-width: 100%; white-space: normal; }
-.job-row .job-actions { display: flex; justify-content: flex-end; }
+.job-state { display: grid; justify-items: end; gap: 8px; }
+.job-state > .badge { max-width: 100%; white-space: normal; }
+.job-row .job-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .job-failure {
   color: var(--critical);
   background: var(--critical-ink);
@@ -294,9 +297,8 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2
 }
 .job-row .progress-row { max-width: 360px; }
 @media (max-width: 680px) {
-  .job-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
-  .job-state { grid-template-columns: 1fr; justify-items: end; }
-  .job-state > .badge { justify-self: end; }
+  .job-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .job-state { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
 }
 .job-row .job-id { font-family: var(--mono); font-size: var(--text-xs); color: var(--text-3); }
 

@@ -31,11 +31,22 @@ body.editorial-preview{display:grid;grid-template-rows:minmax(0,1fr) auto}
 #preview-narration{display:none}
 """
 
+FIT_PICTURE_SCRIPT = """
+function fitEditorialPicture(picture) {
+  const stage = document.getElementById("stage");
+  const scale = Math.min(
+    picture.clientWidth / PLAN.width, picture.clientHeight / PLAN.height,
+  ) * Math.min(PLAN.width / stage.offsetWidth, PLAN.height / stage.offsetHeight);
+  stage.style.transform = "scale(" + scale + ")";
+  stage.style.left = (picture.clientWidth - stage.offsetWidth * scale) / 2 + "px";
+  stage.style.top = (picture.clientHeight - stage.offsetHeight * scale) / 2 + "px";
+}
+"""
+
 
 PREVIEW_SCRIPT = """
 (() => {
   const picture = document.getElementById("preview-picture");
-  const stage = document.getElementById("stage");
   const button = document.getElementById("preview-play");
   const slider = document.getElementById("preview-time");
   const clock = document.getElementById("preview-clock");
@@ -43,7 +54,6 @@ PREVIEW_SCRIPT = """
   const narration = document.getElementById("preview-narration");
   const last = PLAN.compositions.at(-1);
   const duration = last.start + last.duration;
-  const designScale = Math.min(PLAN.width / stage.offsetWidth, PLAN.height / stage.offsetHeight);
   let time = 0;
   let playing = false;
   let frame = 0;
@@ -52,10 +62,7 @@ PREVIEW_SCRIPT = """
   let audioAvailable = Boolean(narration);
 
   function fitPicture() {
-    const scale = designScale * Math.min(picture.clientWidth / PLAN.width, picture.clientHeight / PLAN.height);
-    stage.style.transform = "scale(" + scale + ")";
-    stage.style.left = (picture.clientWidth - stage.offsetWidth * scale) / 2 + "px";
-    stage.style.top = (picture.clientHeight - stage.offsetHeight * scale) / 2 + "px";
+    fitEditorialPicture(picture);
   }
 
   function formatTime(seconds) {

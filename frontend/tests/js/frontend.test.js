@@ -201,6 +201,7 @@ import {
 } from "../../js/pages/editorial.js";
 import { renderNewProject } from "../../js/pages/new-project.js";
 import { editorialNextStep } from "../../js/pages/dashboard.js";
+import { currentJobFailures } from "../../js/pages/jobs.js";
 import { performancePanel, renderVoice } from "../../js/pages/voice.js";
 import { captionAssetOpenable, groupCaptionGenerations } from "../../js/pages/captions.js";
 import { state } from "../../js/state.js";
@@ -568,6 +569,20 @@ record("dashboard: Editorial guidance follows narration, visuals, review and del
   eq(editorialNextStep(snapshot)[1], "Review the cut");
   snapshot.stage_state = { stages: { render_final: { status: "completed" } } };
   eq(editorialNextStep(snapshot)[0], "#/export");
+});
+
+record("jobs: newer attempts clear only failures for the same target", () => {
+  const job = (id, shot, day, status) => ({
+    id, shot_id: shot, scene_id: "scene", project_id: "project", stage: "shot_generate",
+    created_at: `2026-01-0${day}T00:00:00Z`, status,
+  });
+  const jobs = [
+    job("older-failure", "shot-1", 1, "failed"),
+    job("still-failed", "shot-2", 2, "failed"),
+    job("successful-replacement", "shot-1", 3, "completed"),
+    job("canceled", "shot-2", 4, "canceled"),
+  ];
+  eq(currentJobFailures(jobs).map((item) => item.id), ["still-failed"]);
 });
 
 await recordAsync("video-mode: New Project POST carries the selected video_mode", async () => {
@@ -1088,6 +1103,29 @@ function chipRowBadges(panel) {
 function closeModals() {
   document.querySelectorAll("dialog.modal").forEach((d) => d.remove());
 }
+
+await recordAsync("export: primary download requires the available current final output", async () => {
+  const project = CLASSIC_EXPORT_PROJECT;
+  const final = {
+    id: "final-current", type: "video", filepath: "renders/final.mp4",
+    settings: { role: "final_render" }, url: `/api/projects/${project.id}/assets/final-current/file`,
+    available: true,
+  };
+  const stages = { render_final: { status: "completed", outputs: [final.filepath] } };
+  const ready = exportSnapshot(project, undefined, { scenes: CLASSIC_SCENES, stages, assets: [final] });
+  const { screen } = await renderExportScreen(project.id, { ...ready, has_render_narration: false });
+  eq(screen.querySelector(".delivery-actions .btn-primary").textContent, "Download final MP4");
+  eq(screen.querySelectorAll(".delivery-actions .btn-primary").length, 1,
+    "a missing input for a future render never competes with downloading the current deliverable");
+  eq(screen.querySelector(".render-monitor video").getAttribute("src"), final.url);
+  for (const unavailable of [{ ...final, available: false }, { ...final, filepath: "renders/previous.mp4" }]) {
+    const { screen: missing } = await renderExportScreen(project.id, exportSnapshot(project, undefined, {
+      scenes: CLASSIC_SCENES, stages, assets: [unavailable],
+    }));
+    assert(!missing.querySelector(".delivery-actions a.btn-primary"), "missing or previous files have no primary download");
+    eq(missing.querySelector(".render-monitor .btn-primary").textContent, "Render preview");
+  }
+});
 
 record("export: mode text helpers keep the classic presentation verbatim", () => {
   for (const project of [CLASSIC_EXPORT_PROJECT, LEGACY_EXPORT_PROJECT, { video_mode: "weird" }, {}]) {
@@ -2770,6 +2808,8 @@ await recordAsync("editorial-workspace: plan renders strip, detail, and a previe
   assert(screen.textContent.includes("1 locked"), "locked asset count surfaced on the card");
   // The detail panel opens on the first composition by default.
   assert(screen.textContent.includes("c1"), "first composition selected by default");
+  eq(screen.querySelector(".ed-still-frame").getAttribute("src"),
+    "/api/projects/proj-ws/editorial/preview?still=c1", "the selected composition has a still");
   assert(screen.querySelector('[data-ed-text="e1"]'), "deterministic text control exposed");
   assert(screen.querySelector('[data-ed-regen="c1"]'), "per-composition Regenerate available");
   // Selecting another card repaints the detail without any request.
@@ -2779,14 +2819,17 @@ await recordAsync("editorial-workspace: plan renders strip, detail, and a previe
   assert(screen.querySelector('[data-ed-regen="c2"]'), "detail follows the selection");
   const selectedCard = strip.querySelector(".ed-card.selected");
   assert(selectedCard && selectedCard.getAttribute("data-ed-comp-card") === "c2", "strip highlight follows the selection");
+  eq(screen.querySelector(".ed-still-frame").getAttribute("src"),
+    "/api/projects/proj-ws/editorial/preview?still=c2", "the still follows the selection");
   // The embedded preview stays off until the explicit toggle.
   const toggle = screen.querySelector("[data-ed-preview-toggle]");
   assert(toggle, "the preview toggle is present");
-  assert(!screen.querySelector("iframe"), "no iframe before the explicit toggle");
+  assert(!screen.querySelector(".ed-preview-frame"), "no player before the explicit toggle");
   toggle.click();
   await flush(2);
   const frame = screen.querySelector("iframe.ed-preview-frame");
   assert(frame, "the iframe mounts on toggle");
+  assert(screen.querySelector(".ed-still-host").hidden, "the player replaces the still in the layout");
   assert(String(frame.getAttribute("src")).startsWith("/api/projects/proj-ws/editorial/preview?ts="),
     "the frame loads the validated preview URL with a cache stamp");
   assert(!calls.some((c) => c.method !== "GET"), "no mutations are ever issued passively");

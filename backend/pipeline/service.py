@@ -408,6 +408,49 @@ class PipelineService:
                 "directory": str(directory),
             }
 
+    def project_cover_url(self, project: Project) -> str | None:
+        """Choose an existing image without compiling or rendering the project."""
+        root = self.store.project_path(project)
+        assets = self.database.list_assets(
+            project.id, asset_types=(AssetType.IMAGE, AssetType.THUMBNAIL),
+        )
+        priority = {
+            "thumbnail_selected": 0,
+            "visual": 1,
+            "thumbnail": 2,
+            "editorial_generated": 3,
+            "editorial_replacement": 3,
+            "thumbnail_candidate": 4,
+        }
+        candidates = [asset for asset in reversed(assets) if str(asset.settings.get("role")) in priority]
+        candidates.sort(key=lambda asset: priority[str(asset.settings["role"])])
+        if not candidates:
+            return None
+        scenes = {scene.id: scene for scene in self.database.list_scenes(project.id)}
+        try:
+            selection = self.store.load_thumbnail_selection(project.slug)
+        except (OSError, ValueError):
+            selection = None
+        for asset in candidates:
+            role = asset.settings.get("role")
+            if role == "thumbnail_selected" and (
+                selection is None or selection.project_id != project.id
+                or selection.composite_hash != asset.settings.get("source_composite_hash")
+                or Path(selection.composite_path) != asset.filepath
+            ):
+                continue
+            try:
+                if role == "visual":
+                    scene = scenes.get(asset.scene_id or "")
+                    if scene is None or not self._is_current_visual_asset(scene, asset):
+                        continue
+                path = resolve_asset_path(root, asset.filepath)
+                if path.is_file() and path.stat().st_size > 0:
+                    return f"/api/projects/{project.id}/assets/{asset.id}/file"
+            except (OSError, TypeError, ValueError):
+                continue
+        return None
+
     def project_snapshot(self, project_id: str) -> dict[str, Any]:
         project, recovery = self._project_with_recovery(project_id)
         scenes = self.database.list_scenes(project_id)
@@ -420,6 +463,8 @@ class PipelineService:
 
         assets = []
         assets_by_scene: dict[str, list[Asset]] = {}
+        root = self.store.project_path(project)
+        render_files: dict[Path, bool] = {}
         for asset in self.database.list_assets(project_id):
             payload = asset.model_dump(mode="json")
             payload["url"] = f"/api/projects/{project.id}/assets/{asset.id}/file"
@@ -429,6 +474,14 @@ class PipelineService:
                 if asset_scene is not None and asset.settings.get("role") == "visual"
                 else True
             )
+            if asset.settings.get("role") in ("preview_render", "final_render"):
+                if asset.filepath not in render_files:
+                    try:
+                        path = resolve_asset_path(root, asset.filepath)
+                        render_files[asset.filepath] = path.is_file() and path.stat().st_size > 0
+                    except (OSError, ValueError):
+                        render_files[asset.filepath] = False
+                payload["available"] = render_files[asset.filepath]
             assets.append(payload)
             if asset.scene_id:
                 assets_by_scene.setdefault(asset.scene_id, []).append(asset)
@@ -478,9 +531,10 @@ class PipelineService:
             "stage_state": stages,
             "quality_report": self._preview_quality_report(project, stages.get("stages", {}), jobs),
         }
+        if project.video_mode is not VideoMode.EDITORIAL:
+            snapshot["has_render_narration"] = (root / "narration" / "master.wav").is_file()
         if project.video_mode is VideoMode.EDITORIAL:
             plan_status = self._editorial_plan_status(project)
-            root = self.store.project_path(project)
             edit_plan: EditPlan | None = None
             if plan_status["has_edit_plan"]:
                 try:

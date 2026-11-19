@@ -301,15 +301,17 @@ def test_job_monitor_rows_are_keyed_and_survive_feed_frames() -> None:
 
     A full-list rebuild replaces every Cancel/Retry button once per second,
     which swallows clicks between mousedown and mouseup and resets hover,
-    focus, and text selection. Rows are keyed by job id and rebuilt only when
-    their stamp changes; ordering re-appends (moves) the surviving nodes.
+    focus, and text selection. Current work is grouped, and the group layout
+    is replaced only when membership or order changes.
     """
     source = _js("pages/jobs.js")
     assert "const rows = new Map();" in source
     assert "function rowStamp(job, ctx) {" in source
     assert "entry.stamp !== stamp" in source
-    assert "body.replaceChildren();" in source
-    assert "body.append(entry.node);" in source
+    assert "const layoutChanged = body.dataset.groups !== groupsStamp" in source
+    assert "return entry.node;" in source
+    assert "if (layoutChanged) {" in source
+    assert "body.replaceChildren(...sections);" in source
     # Elapsed time keeps ticking between feed frames without rebuilding rows.
     assert 'setInterval(' in source
     assert 'screen.querySelectorAll("[data-elapsed]")' in source
@@ -347,15 +349,16 @@ def test_job_monitor_filters_by_status_group_and_project() -> None:
     # Status-group chips plus a project filter, session-scoped.
     assert '"active", "Active"' in source
     assert '"queued", "Queued"' in source
-    assert '"failed", "Failed"' in source
+    assert '"failed", "Failed history"' in source
     assert '"finished", "Finished"' in source
-    assert 'let statusFilter = "all";' in source
+    assert 'let statusFilter = "current";' in source
+    assert '["Needs attention", currentJobFailures(scoped)]' in source
     assert '"aria-label": "Filter by project"' in source
     assert "state.projects.map" in source
-    # The summary counts always describe the full (unfiltered) list.
+    # History summaries use the selected project scope.
     assert "function summaryText(all, shown) {" in source
     # Filters never mutate the shared job list (top bar counts stay exact).
-    assert "const filtered = all" in source
+    assert "const scoped = all.filter(" in source
 
 
 def test_app_suppresses_toasts_for_parented_child_jobs() -> None:
