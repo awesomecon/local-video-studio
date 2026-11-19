@@ -684,7 +684,7 @@ const STALE_REASON_TEXT = {
  */
 export const EDITORIAL_TEMPLATES = [
   "archiveCanvas", "documentReveal", "comparisonCanvas",
-  "illustrationCanvas", "bigTextReveal",
+  "illustrationCanvas", "bigTextReveal", "readingCard", "readingImage",
 ];
 
 /**
@@ -801,7 +801,7 @@ export function localApiPath(value) {
  * queries, fragments, backslashes, and cross-project paths.
  * @param {unknown} value
  * @param {unknown} projectId
- * @param {"settings"|"edit-plan"} endpoint
+ * @param {"settings"|"edit-plan"|"reading-plan"} endpoint
  * @returns {string | null}
  */
 export function projectEditorialApiPath(value, projectId, endpoint) {
@@ -945,6 +945,7 @@ export function buildGeneratePlanButton(generateUrl, errors, onGenerated = null,
 const EDITORIAL_CAPTION_STYLE_OPTIONS = [
   ["editorialPhrase", "Editorial Phrase"],
   ["quietDocumentary", "Quiet Documentary"],
+  ["reading", "Reading"],
   ["oneLine", "One Line"],
   ["oneWord", "One Word"],
   ["standard", "Standard"],
@@ -959,11 +960,11 @@ export function buildEditorialDisplayControls(
   const textOk = typeof editorial.editorial_text_enabled === "boolean";
   const captionStyleOk =
     captionsOk && typeof editorial.caption_style === "string";
-  const sentenceHoldOk = typeof editorial.sentence_hold_seconds === "number"
-    && Number.isFinite(editorial.sentence_hold_seconds)
-    && editorial.sentence_hold_seconds >= 0
-    && editorial.sentence_hold_seconds <= 5;
-  if (!captionsOk && !textOk && !captionStyleOk && !sentenceHoldOk) return null;
+  const validHold = (value) => typeof value === "number"
+    && Number.isFinite(value) && value >= 0 && value <= 5;
+  const sentenceHoldOk = validHold(editorial.sentence_hold_seconds);
+  const closingHoldOk = validHold(editorial.closing_hold_seconds);
+  if (!captionsOk && !textOk && !captionStyleOk && !sentenceHoldOk && !closingHoldOk) return null;
 
   /** @type {HTMLInputElement[]} */
   const controls = [];
@@ -1008,12 +1009,12 @@ export function buildEditorialDisplayControls(
     }
     row.append(el("label", { class: "small" }, " Caption style", select));
   };
-  const makeSentenceHoldInput = (value) => {
+  const makeHoldInput = (key, label, value) => {
     const input = el("input", {
       type: "number", min: "0", max: "5", step: "0.1", value: String(value),
-      "aria-label": "Sentence hold in seconds",
+      "aria-label": `${label} in seconds`,
     });
-    input.dataset.editorialSetting = "sentence_hold_seconds";
+    input.dataset.editorialSetting = key;
     let current = value;
     input.addEventListener("change", () => {
       if (ctrl.busy !== "") { input.value = String(current); return; }
@@ -1022,19 +1023,20 @@ export function buildEditorialDisplayControls(
         input.value = String(current);
         return;
       }
-      void saveEditorialSetting("sentence_hold_seconds", input, current,
+      void saveEditorialSetting(key, input, current,
         { settingsUrl, ctrl, errors, onSaved, controls }
       ).then((saved) => {
         if (saved) current = next;
       });
     });
     controls.push(input);
-    row.append(el("label", { class: "small" }, " Sentence hold (seconds) ", input));
+    row.append(el("label", { class: "small" }, ` ${label} (seconds) `, input));
   };
   if (captionsOk) makeCheckbox("captions_enabled", "Captions", editorial.captions_enabled);
   if (textOk) makeCheckbox("editorial_text_enabled", "Editorial text", editorial.editorial_text_enabled);
   if (captionStyleOk) makeStyleSelect(editorial.caption_style);
-  if (sentenceHoldOk) makeSentenceHoldInput(editorial.sentence_hold_seconds);
+  if (sentenceHoldOk) makeHoldInput("sentence_hold_seconds", "Sentence hold", editorial.sentence_hold_seconds);
+  if (closingHoldOk) makeHoldInput("closing_hold_seconds", "Closing hold", editorial.closing_hold_seconds);
   return row;
 }
 
@@ -1043,7 +1045,7 @@ export function buildEditorialDisplayControls(
  * per region; every control stays disabled while the request runs. The Edit
  * Plan is never touched on this path. Returns whether the save succeeded so
  * select-based callers can track the last persisted value.
- * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"|"sentence_hold_seconds"} key
+ * @param {"captions_enabled"|"editorial_text_enabled"|"caption_style"|"sentence_hold_seconds"|"closing_hold_seconds"} key
  * @param {HTMLInputElement | HTMLSelectElement} control — the control that changed
  * @param {boolean | string | number} previous — value to restore on failure
  * @param {{settingsUrl: string, ctrl: EditorialController, errors: HTMLElement, onSaved: (() => any) | null, controls: (HTMLInputElement | HTMLSelectElement)[]}} ctx
@@ -1061,8 +1063,8 @@ async function saveEditorialSetting(key, control, previous, ctx) {
     ? { captions_enabled: control.checked }
     : key === "editorial_text_enabled"
       ? { editorial_text_enabled: control.checked }
-      : key === "sentence_hold_seconds"
-        ? { sentence_hold_seconds: control.valueAsNumber }
+      : key === "sentence_hold_seconds" || key === "closing_hold_seconds"
+        ? { [key]: control.valueAsNumber }
         : { caption_style: control.value };
   const isCheckbox = key === "captions_enabled" || key === "editorial_text_enabled";
   try {
@@ -1445,7 +1447,8 @@ function buildResolvedTiming(data, ctx) {
     && Number.isFinite(data.duration) && data.duration > 0;
   const start = validStart ? data.start : null;
   const end = validStart && validDuration ? data.start + data.duration : null;
-  const hold = ctx.ctrl?.plan?.sentence_hold_seconds;
+  const reading = ctx.ctrl?.plan?.reading_layout === true;
+  const hold = reading ? ctx.ctrl.plan.closing_hold_seconds : ctx.ctrl?.plan?.sentence_hold_seconds;
   const validHold = typeof hold === "number" && Number.isFinite(hold)
     && hold >= 0 && hold <= 5;
   return el("div", { class: "stack", "data-ed-resolved-timing": data.id },
@@ -1455,12 +1458,13 @@ function buildResolvedTiming(data, ctx) {
       el("span", { class: "small" }, `Resolved length ${validDuration ? seconds(data.duration) : "—"}`),
     ),
     el("div", { class: "muted small" },
-      "Read-only: cuts are recalculated from narration and caption timing during rendering.",
-      validHold ? ` Sentence hold: ${hold} seconds; change it in Editorial settings.` : ""),
+      reading ? "Cuts follow the selected narration take."
+        : "Read-only: cuts are recalculated from narration and caption timing during rendering.",
+      validHold ? ` ${reading ? "Closing hold" : "Sentence hold"}: ${hold} seconds; change it in Editorial settings.` : ""),
   );
 }
 
-/** Template selector restricted to the five-template allowlist. */
+/** Template selector restricted to the renderer's allowlist. */
 function buildTemplateControl(data, ctx) {
   const select = el("select", { "data-ed-template": data.id },
     ...EDITORIAL_TEMPLATES.map((t) => el("option", { value: t }, t)));

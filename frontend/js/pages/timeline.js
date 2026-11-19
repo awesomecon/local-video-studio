@@ -194,6 +194,8 @@ const COMP_TEMPLATE_LABELS = {
   comparisonCanvas: "Comparison canvas",
   illustrationCanvas: "Illustration canvas",
   bigTextReveal: "Big text reveal",
+  readingCard: "Reading card",
+  readingImage: "Reading still",
 };
 
 /** Template → CSS tint class. Unknown templates get a plain clip. */

@@ -44,6 +44,7 @@ _FONT_SIZES: dict[str, dict[EditorialCaptionStyle, tuple[int, int]]] = {
     "portrait": {
         EditorialCaptionStyle.EDITORIAL_PHRASE: (48, 58),
         EditorialCaptionStyle.QUIET_DOCUMENTARY: (44, 44),
+        EditorialCaptionStyle.READING: (52, 52),
         EditorialCaptionStyle.ONE_LINE: (46, 46),
         EditorialCaptionStyle.ONE_WORD: (44, 44),
         EditorialCaptionStyle.STANDARD: (100, 100),
@@ -51,6 +52,7 @@ _FONT_SIZES: dict[str, dict[EditorialCaptionStyle, tuple[int, int]]] = {
     "landscape": {
         EditorialCaptionStyle.EDITORIAL_PHRASE: (40, 46),
         EditorialCaptionStyle.QUIET_DOCUMENTARY: (36, 36),
+        EditorialCaptionStyle.READING: (54, 54),
         EditorialCaptionStyle.ONE_LINE: (38, 38),
         EditorialCaptionStyle.ONE_WORD: (36, 36),
         EditorialCaptionStyle.STANDARD: (56, 56),
@@ -134,6 +136,8 @@ CAPTION_REGIONS: dict[
             "cta": (80, 930, 1760, 90),
         },
     },
+    EditorialTemplate.READING_CARD: {"portrait": {}, "landscape": {}},
+    EditorialTemplate.READING_IMAGE: {"portrait": {}, "landscape": {}},
 }
 
 # Fullscreen "moment" elements that own the screen and suppress captions.
@@ -150,6 +154,7 @@ _REVEAL_ROLES: dict[EditorialTemplate, tuple[str, ...]] = {
     EditorialTemplate.COMPARISON_CANVAS: ("headline",),
     EditorialTemplate.ILLUSTRATION_CANVAS: ("headline",),
     EditorialTemplate.BIG_TEXT_REVEAL: ("headline", "kicker"),
+    EditorialTemplate.READING_CARD: ("headline", "attribution"),
 }
 _FULL_SCREEN_REVEALS: dict[EditorialTemplate, frozenset[str]] = {
     EditorialTemplate.ARCHIVE_CANVAS: frozenset({"reveal"}),
@@ -425,6 +430,8 @@ def build_editorial_caption_cues(
         return _cues_from_units(units, style, flags)
     if style is EditorialCaptionStyle.ONE_LINE:
         return _cues_from_units(_line_units(ordered), style)
+    if style is EditorialCaptionStyle.READING:
+        return _cues_from_units(_phrase_units(ordered, []), style)
     if style is EditorialCaptionStyle.ONE_WORD:
         return _cues_from_units(_word_units(ordered), style)
     raise ValueError(f"unsupported Editorial caption style: {style!r}")
@@ -588,13 +595,16 @@ def place_caption_cues(
     orientation = "landscape" if landscape else "portrait"
     payload: list[dict] = []
     for cue in cues:
-        box_width, box_height = estimate_caption_box(
-            cue.text, cue.style, orientation, highlight=cue.highlight,
-        )
-        anchor, x, y = choose_caption_position(
-            composition, orientation, design_width, design_height,
-            box_width, box_height,
-        )
+        if cue.style is EditorialCaptionStyle.READING:
+            anchor, x, y = "lower-center", design_width // 2, design_height - (88 if landscape else 330)
+        else:
+            box_width, box_height = estimate_caption_box(
+                cue.text, cue.style, orientation, highlight=cue.highlight,
+            )
+            anchor, x, y = choose_caption_position(
+                composition, orientation, design_width, design_height,
+                box_width, box_height,
+            )
         payload.append({
             "start": round(cue.start, 6),
             "end": round(cue.end, 6),
@@ -631,9 +641,9 @@ def _reveal_windows(compositions: Sequence[EditorialComposition]) -> list[_Revea
             events = [
                 event for event in composition.events if event.target in targets
             ]
-            if not events:
+            if not events and composition.template is not EditorialTemplate.READING_CARD:
                 continue
-            from_time = max(0.0, min(event.time for event in events) - 0.15)
+            from_time = max(0.0, min((event.time for event in events), default=0) - 0.15)
             to_time = composition.duration
             if (
                 composition.template is EditorialTemplate.BIG_TEXT_REVEAL

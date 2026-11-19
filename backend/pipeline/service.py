@@ -130,6 +130,7 @@ from backend.editorial.models import (
     EditorialImageModel, EditorialRevisionProposal, EvidenceClass, MotionPrimitive,
 )
 from backend.editorial.planner import EditorialPlanner
+from backend.editorial.reading import READING_PORTRAIT_ID, ReadingPlanRequest, build_reading_plan
 from backend.editorial.timing import retime_compositions_to_caption_sentences
 from backend.editorial.renderer import (
     EDITORIAL_RENDER_WORKFLOW_VERSION, EditorialRenderer, compile_edit_plan_html,
@@ -554,6 +555,7 @@ class PipelineService:
                 "edit_plan_url": f"/api/projects/{project.id}/editorial/edit-plan",
                 "timeline_plan_url": f"/api/projects/{project.id}/editorial/timeline-plan",
                 "generate_url": f"/api/projects/{project.id}/editorial/plan",
+                "reading_plan_url": f"/api/projects/{project.id}/editorial/reading-plan",
                 "preview_url": f"/api/projects/{project.id}/editorial/preview",
                 "settings_url": f"/api/projects/{project.id}/editorial/settings",
                 "captions_enabled": (
@@ -566,7 +568,10 @@ class PipelineService:
                     edit_plan.editorial_text_enabled if edit_plan is not None else None
                 ),
                 "sentence_hold_seconds": (
-                    edit_plan.sentence_hold_seconds if edit_plan is not None else None
+                    edit_plan.sentence_hold_seconds if edit_plan and not edit_plan.reading_layout else None
+                ),
+                "closing_hold_seconds": (
+                    edit_plan.closing_hold_seconds if edit_plan and edit_plan.reading_layout else None
                 ),
             }
         if recovery:
@@ -684,6 +689,7 @@ class PipelineService:
         editorial_text_enabled: bool | None = None,
         caption_style: str | None = None,
         sentence_hold_seconds: float | None = None,
+        closing_hold_seconds: float | None = None,
     ) -> EditPlan:
         """Update the supported display and sentence-timing settings on an existing plan.
 
@@ -698,6 +704,7 @@ class PipelineService:
             and editorial_text_enabled is None
             and caption_style is None
             and sentence_hold_seconds is None
+            and closing_hold_seconds is None
         ):
             raise PipelineError("At least one Editorial setting must be provided.")
         if caption_style is not None:
@@ -725,6 +732,11 @@ class PipelineService:
                 raise PipelineError("project is not in Editorial Mode")
             plan = self.store.load_edit_plan(project.slug)
             updates: dict[str, Any] = {}
+            if closing_hold_seconds is not None:
+                if not plan.reading_layout or not 0 <= closing_hold_seconds <= 5:
+                    raise PipelineError("Closing hold must be between 0 and 5 seconds for a Reading plan.")
+                if closing_hold_seconds != plan.closing_hold_seconds:
+                    updates["closing_hold_seconds"] = closing_hold_seconds
             if captions_enabled is not None and captions_enabled != plan.captions_enabled:
                 updates["captions_enabled"] = captions_enabled
             if (
@@ -742,7 +754,7 @@ class PipelineService:
             if not updates:
                 return plan
             updated = plan.model_copy(update=updates)
-            if "sentence_hold_seconds" in updates:
+            if "sentence_hold_seconds" in updates and not updated.reading_layout:
                 updated = self._retimed_editorial_plan(project, updated) or updated
             self.store.save_edit_plan(project.slug, updated)
             self.store.save_edit_plan_provenance(
@@ -757,7 +769,7 @@ class PipelineService:
             }
             if "editorial_text_enabled" in updates:
                 invalidated.add("editorial_visual")
-            if "sentence_hold_seconds" in updates:
+            if {"sentence_hold_seconds", "closing_hold_seconds"} & updates.keys():
                 invalidated.add("editorial_visual")
             old_master_captions = self._plan_uses_master_captions(plan)
             new_master_captions = self._plan_uses_master_captions(updated)
@@ -778,7 +790,7 @@ class PipelineService:
             return []
         plan = self.load_edit_plan(project.id)
         retimed = self._retimed_editorial_plan(project, plan) or plan
-        cues = self._editorial_caption_cues(project, plan)
+        cues = self._editorial_caption_cues(project, retimed)
         if not cues or not plan.compositions:
             return []
         design_width, design_height = (
@@ -931,6 +943,7 @@ class PipelineService:
             )
             replacement = planned_asset.model_copy(update={
                 "type": EditorialAssetType.USER_UPLOADED_IMAGE,
+                "generation": None,
                 "asset_id": registered.id,
                 "source": registered.filepath.as_posix(),
                 "evidence_class": (
@@ -944,6 +957,15 @@ class PipelineService:
                     "original_filename": Path(original_filename).name,
                 },
             })
+            if plan.reading_layout and editorial_asset_id == READING_PORTRAIT_ID:
+                cards = [
+                    item.model_copy(update={"assets": [
+                        replacement if asset.id == READING_PORTRAIT_ID else asset
+                        for asset in item.assets
+                    ]}) if item.template is EditorialTemplate.READING_CARD else item
+                    for item in plan.compositions
+                ]
+                return self.save_edit_plan(project_id, plan.model_copy(update={"compositions": cards}))
             assets = [
                 replacement if item.id == editorial_asset_id else item
                 for item in composition.assets
@@ -1337,6 +1359,22 @@ class PipelineService:
                     id=new_element_id("supporting-text"), type=EditorialElementType.TEXT,
                     text=second_text, role="supporting-text",
                 ))
+        elif template is EditorialTemplate.READING_CARD:
+            elements = [EditorialElement(
+                id=new_element_id("headline"), type=EditorialElementType.TEXT,
+                text=headline, role="headline",
+            )]
+            if images:
+                elements.append(images[0].model_copy(update={"role": "portrait"}))
+            if second_text:
+                elements.append(EditorialElement(
+                    id=new_element_id("attribution"), type=EditorialElementType.TEXT,
+                    text=second_text, role="attribution",
+                ))
+        elif template is EditorialTemplate.READING_IMAGE:
+            if not images:
+                raise PipelineError("Reading image requires an image asset")
+            elements = [images[0].model_copy(update={"role": "image"})]
         else:
             elements = [EditorialElement(
                 id=new_element_id("headline"), type=EditorialElementType.TEXT,
@@ -1369,6 +1407,22 @@ class PipelineService:
             "elements": elements,
             "events": events,
         })
+
+    def create_reading_edit_plan(self, project_id: str, request: ReadingPlanRequest) -> EditPlan:
+        with self._lock:
+            project = self._project(project_id)
+            if project.video_mode is not VideoMode.EDITORIAL:
+                raise PipelineError("Orthodox Reading requires the Editorial workflow.")
+            if self.store.edit_plan_exists(project.slug):
+                existing = self.store.load_edit_plan(project.slug)
+                if existing.reading_layout:
+                    return existing
+                raise PipelineError("This project already has an Edit Plan.")
+            try:
+                script = self.store.load_plan(project.slug)
+            except FileNotFoundError as exc:
+                raise PipelineError("Create the project script before starting an Orthodox Reading.") from exc
+            return self.save_edit_plan(project_id, build_reading_plan(project, script, request))
 
     def ensure_edit_plan(self, project_id: str) -> EditPlan:
         """Generate the first Edit Plan from the stored script and narration clock."""
@@ -1815,7 +1869,9 @@ class PipelineService:
             and self._incremental_hash(master) == recorded_hash
         )
 
-    def _narration_scene_bounds(self, project: Project) -> dict[str, tuple[float, float]] | None:
+    def _narration_scene_bounds(
+        self, project: Project, *, allow_script_clock: bool = False,
+    ) -> dict[str, tuple[float, float]] | None:
         """Per-scene (start, end) on the real audio clock, keyed by scene id.
 
         Scene-rendered takes record each scene's actual spoken duration plus
@@ -1840,14 +1896,17 @@ class PipelineService:
             )
             settings = meta.get("settings", {})
             timing_mode = settings.get("timing_mode")
-            if timing_mode not in {"scene_audio_v1", "recorded_master_v1"}:
+            estimated = timing_mode == "recorded_master_v1" or (
+                allow_script_clock and timing_mode == "script_audio_v1"
+            )
+            if timing_mode != "scene_audio_v1" and not estimated:
                 return None
             recorded_duration = float(settings["duration"])
             actual_duration = wav_duration(master)
             if abs(recorded_duration - actual_duration) > 0.2:
                 return None
             scenes = self.database.list_scenes(project.id)
-            if timing_mode == "recorded_master_v1":
+            if estimated:
                 planned_total = sum(scene.duration for scene in scenes)
                 if not scenes or planned_total <= 0:
                     return None
@@ -1866,7 +1925,7 @@ class PipelineService:
                 if not scene.narration.strip() or scene.id not in by_scene:
                     return None
                 duration = by_scene[scene.id]
-                if timing_mode == "recorded_master_v1" and index == len(scenes) - 1:
+                if estimated and index == len(scenes) - 1:
                     duration = actual_duration - cursor
                 bounds[scene.id] = (cursor, cursor + duration)
                 cursor += duration
@@ -1874,9 +1933,11 @@ class PipelineService:
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             return None
 
-    def _narration_scene_spans(self, project: Project) -> list[tuple[str, float, float]] | None:
+    def _narration_scene_spans(
+        self, project: Project, *, allow_script_clock: bool = False,
+    ) -> list[tuple[str, float, float]] | None:
         """Per-scene (narration, start, duration) spans on the real audio clock."""
-        bounds = self._narration_scene_bounds(project)
+        bounds = self._narration_scene_bounds(project, allow_script_clock=allow_script_clock)
         if bounds is None:
             return None
         spans: list[tuple[str, float, float]] = []
@@ -1885,7 +1946,7 @@ class PipelineService:
             spans.append((scene.narration, start, end - start))
         return spans
 
-    def _editorial_caption_words(self, project: Project) -> list[CaptionWord]:
+    def _editorial_caption_words(self, project: Project, *, reading_layout: bool = False) -> list[CaptionWord]:
         """Word timings for Editorial caption beats.
 
         Audio-aligned timings are preferred; without them the scenes' narration
@@ -1896,7 +1957,7 @@ class PipelineService:
         words = self._editorial_word_timings(project)
         if words:
             return words
-        spans = self._narration_scene_spans(project)
+        spans = self._narration_scene_spans(project, allow_script_clock=reading_layout)
         if spans is None:
             scenes = self.database.list_scenes(project.id)
             spans = []
@@ -1922,6 +1983,19 @@ class PipelineService:
     def _effective_editorial_plan(
         self, project: Project, plan: EditPlan,
     ) -> tuple[EditPlan, str]:
+        effective, basis = self._retime_editorial_plan_on_narration(project, plan)
+        if not plan.closing_hold_seconds:
+            return effective, basis
+        last = effective.compositions[-1]
+        last = last.model_copy(update={
+            "duration": min(120, last.duration + plan.closing_hold_seconds),
+        })
+        effective = effective.model_copy(update={"compositions": [*effective.compositions[:-1], last]})
+        return effective, basis
+
+    def _retime_editorial_plan_on_narration(
+        self, project: Project, plan: EditPlan,
+    ) -> tuple[EditPlan, str]:
         """One shared retiming operation: ``(effective plan, timing basis)``.
 
         Plans authored before the narration takes exist (or against planned
@@ -1942,9 +2016,9 @@ class PipelineService:
         consume this result so they describe the same composition
         boundaries. Nothing here is persisted and provenance is untouched.
         """
-        bounds = self._narration_scene_bounds(project)
+        bounds = self._narration_scene_bounds(project, allow_script_clock=plan.reading_layout)
         words = self._editorial_word_timings(project)
-        if words:
+        if words and not plan.reading_layout:
             timeline_duration: float | None = None
             master = self.store.project_path(project) / "narration" / "master.wav"
             try:
@@ -2035,7 +2109,7 @@ class PipelineService:
         authored clock (callers keep using the plan they passed in).
         """
         effective, basis = self._effective_editorial_plan(project, plan)
-        if basis == "authored_plan":
+        if basis == "authored_plan" and not plan.closing_hold_seconds:
             return None
         return effective
 
@@ -2060,19 +2134,19 @@ class PipelineService:
     def _editorial_caption_cues(self, project: Project, plan: EditPlan) -> list[EditorialCaptionCue]:
         """Compute and suppress Editorial caption beats on the narration clock.
 
+        The caller supplies the effective picture timeline.
         ``standard`` captions stay on the shared ASS path, so this returns no
         beats for them; the rendered master then carries no caption layer.
         """
         if not self._plan_uses_master_captions(plan):
             return []
-        words = self._editorial_caption_words(project)
+        words = self._editorial_caption_words(project, reading_layout=plan.reading_layout)
         cues = build_editorial_caption_cues(
             words,
             plan.caption_style,
             emphasis_texts=[item.text for item in plan.caption_emphasis],
         )
-        retimed = self._retimed_editorial_plan(project, plan)
-        return suppress_cues_for_reveals(cues, (retimed or plan).compositions)
+        return suppress_cues_for_reveals(cues, plan.compositions)
 
     def list_projects(self) -> tuple[list[Project], list[dict[str, Any]]]:
         """List projects reconciling the SQLite index with on-disk directories.
@@ -9767,8 +9841,11 @@ class PipelineService:
                     design_width,
                     design_height,
                 )
+                predecessor = plan.compositions[index - 1] if index and plan.reading_layout else None
+                if predecessor is not None and predecessor.transition_out is not MotionPrimitive.FADE:
+                    predecessor = None
                 digest = self._editorial_composition_render_hash(
-                    root, clip_plan, clip_captions,
+                    root, clip_plan, clip_captions, predecessor=predecessor,
                 )
                 cached = previous.get(composition.id)
                 recorded_media_hash = (
@@ -9784,9 +9861,8 @@ class PipelineService:
                     and self._incremental_hash(clip) == recorded_media_hash
                 )
                 if not reusable:
-                    renderer.render(
-                        clip_plan, clip, asset_root=root, captions=clip_captions,
-                    )
+                    transition = {"predecessor": predecessor} if predecessor is not None else {}
+                    renderer.render(clip_plan, clip, asset_root=root, captions=clip_captions, **transition)
                 media_hash = self._incremental_hash(clip)
                 entries[composition.id] = {
                     "index": index,
@@ -9842,15 +9918,18 @@ class PipelineService:
             "editorial_text_enabled": plan.editorial_text_enabled,
             "captions_enabled": plan.captions_enabled,
             "caption_style": plan.caption_style,
+            "reading_layout": plan.reading_layout,
             "created_at": plan.created_at,
         })
 
     def _editorial_composition_render_hash(
         self, root: Path, plan: EditPlan, captions: Sequence[dict[str, Any]] = (),
+        *, predecessor: EditorialComposition | None = None,
     ) -> str:
         composition = plan.compositions[0]
         asset_files: list[dict[str, str | None]] = []
-        for asset in composition.assets:
+        predecessor_assets = predecessor.assets if predecessor is not None else []
+        for asset in [*composition.assets, *predecessor_assets]:
             digest: str | None = None
             if asset.source and not asset.source.startswith(("http://", "https://")):
                 try:
@@ -9864,6 +9943,7 @@ class PipelineService:
             "workflow_version": EDITORIAL_RENDER_WORKFLOW_VERSION,
             "plan": plan.model_dump(mode="json", exclude={"created_at"}),
             "caption_cues": list(captions),
+            "predecessor": predecessor.model_dump(mode="json") if predecessor is not None else None,
             "asset_files": asset_files,
         })
 

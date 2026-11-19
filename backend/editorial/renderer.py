@@ -68,7 +68,7 @@ def _font_bundle_digest() -> str:
 
 EDITORIAL_FONT_BUNDLE_SHA256 = _font_bundle_digest()
 EDITORIAL_RENDER_WORKFLOW_VERSION = (
-    f"editorial-archive-dossier-v16-{EDITORIAL_FONT_BUNDLE_SHA256[:12]}"
+    f"editorial-archive-dossier-v17-{EDITORIAL_FONT_BUNDLE_SHA256[:12]}"
 )
 
 
@@ -483,12 +483,59 @@ def _big_text_markup(
     """
 
 
+def _reading_card_markup(
+    composition: EditorialComposition, resolver: AssetURLResolver | None,
+) -> str:
+    portrait = _element(composition, "portrait")
+    portrait_id = escape(portrait.id, quote=True) if portrait else "portrait"
+    variant = " reading-quote" if _element(composition, "source") else ""
+    parts = []
+    for role, maximum, height, lines in (
+        ("headline", 112, 550, 5), ("attribution", 38, 115, 2), ("source", 31, 135, 3),
+    ):
+        element = _element(composition, role)
+        if element is not None:
+            minimum = 25 if role == "headline" else 16
+            fit = _fit_attrs(minimum=minimum, maximum=maximum, height=height, lines=lines)
+            parts.append(
+                f'<div id="{escape(element.id, quote=True)}" class="reading-{role} fit-text '
+                f'editorial-element reading-rest editorial-type" {fit}>{escape(element.text)}</div>'
+            )
+    placeholder = (
+        '<div class="reading-placeholder preview-placeholder">Upload an icon or portrait</div>'
+        if portrait else ""
+    )
+    return (
+        f'<section class="composition reading-card{variant}" data-composition="{escape(composition.id, quote=True)}">'
+        f'<div class="reading-copy">{"".join(parts)}</div>'
+        f'<div id="{portrait_id}" class="reading-portrait editorial-element reading-rest">'
+        f'{_asset_image(composition, portrait, resolver, class_name="reading-portrait-image")}'
+        f'{placeholder}</div></section>'
+    )
+
+
+def _reading_image_markup(
+    composition: EditorialComposition, resolver: AssetURLResolver | None,
+) -> str:
+    image = _element(composition, "image")
+    image_id = escape(image.id, quote=True) if image else "image"
+    return (
+        f'<section class="composition reading-still" data-composition="{escape(composition.id, quote=True)}">'
+        f'<div id="{image_id}" class="reading-image editorial-element reading-rest">'
+        f'{_asset_image(composition, image, resolver, class_name="reading-image-cover")}'
+        '<div class="reading-placeholder preview-placeholder">Generate or upload an image</div>'
+        '</div></section>'
+    )
+
+
 _TEMPLATE_MARKUP: dict[EditorialTemplate, Callable[[EditorialComposition, AssetURLResolver | None], str]] = {
     EditorialTemplate.ARCHIVE_CANVAS: _archive_markup,
     EditorialTemplate.DOCUMENT_REVEAL: _document_reveal_markup,
     EditorialTemplate.COMPARISON_CANVAS: _comparison_markup,
     EditorialTemplate.ILLUSTRATION_CANVAS: _illustration_markup,
     EditorialTemplate.BIG_TEXT_REVEAL: _big_text_markup,
+    EditorialTemplate.READING_CARD: _reading_card_markup,
+    EditorialTemplate.READING_IMAGE: _reading_image_markup,
 }
 
 
@@ -502,6 +549,7 @@ def compile_edit_plan_html(
     interactive_preview: bool = False,
     narration_url: str | None = None,
     still_time: float | None = None,
+    predecessor: EditorialComposition | None = None,
 ) -> str:
     """Compile a validated plan into trusted, self-contained preview/render HTML.
 
@@ -529,9 +577,10 @@ def compile_edit_plan_html(
         )
     markup = "".join(
         _TEMPLATE_MARKUP[item.template](item, asset_url_resolver)
-        for item in plan.compositions
+        for item in ([predecessor] if predecessor else []) + plan.compositions
     )
     payload = _script_json(plan.model_dump(mode="json"))
+    predecessor_payload = _script_json(predecessor.model_dump(mode="json") if predecessor else None)
     captions_payload = _script_json(list(captions))
     font_manifest_payload = _script_json(editorial_font_manifest())
     landscape = plan.width >= plan.height
@@ -675,6 +724,24 @@ body{{font-family:"LVS Noto Sans",sans-serif}}
 .landscape .kicker-rule{{top:290px}} .landscape .big-kicker{{top:330px}}
 .landscape .big-headline{{top:430px;font-size:230px}}
 .landscape .big-cta{{top:930px;height:90px;font-size:36px;letter-spacing:4px}}
+.reading-card{{background:#f0e8d8;color:#1f2421}}
+.reading-card.reading-quote{{background:#1f2421;color:#fdf8ea}}
+.reading-copy{{position:absolute;inset:845px 100px 218px;display:flex;flex-direction:column;justify-content:center;gap:30px}}
+.reading-headline{{font-family:"LVS Noto Serif",serif;line-height:1.1;white-space:pre-line}}
+.reading-attribution{{color:#703629;line-height:1.2}}
+.reading-source{{color:#d0c8b8;line-height:1.3}}
+.reading-quote .reading-attribution{{color:#d5b377}}
+.reading-portrait{{position:absolute;inset:105px 0 auto;height:690px}}
+.reading-portrait-image{{width:100%;height:100%;object-fit:contain}}
+.reading-image,.reading-image-cover{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}
+.reading-placeholder{{display:grid;place-items:center;width:100%;height:100%;color:#c8ba9e;background:#30332d;font-size:32px;text-align:center}}
+.reading-image:has(img) .reading-placeholder,.reading-portrait:has(img) .reading-placeholder{{display:none}}
+.landscape .reading-copy{{inset:115px 850px 170px 120px}}
+.landscape .reading-portrait{{inset:0 0 0 auto;width:770px;height:100%}}
+.landscape .reading-portrait-image{{object-fit:cover;object-position:50% 35%}}
+.landscape .reading-quote .reading-portrait{{inset:96px auto 96px 108px;width:565px;height:auto}}
+.landscape .reading-quote .reading-portrait-image{{object-fit:contain}}
+.landscape .reading-quote .reading-copy{{inset:110px 106px 160px 776px}}
 .focus-mark{{box-shadow:inset 0 0 0 3px #b9532f}}
 .editorial-text-disabled .editorial-type{{visibility:hidden}}
 .editorial-text-disabled .ruler-node span{{visibility:hidden}}
@@ -707,11 +774,19 @@ background:#f0e5c9;color:#241f19;border-left:none;padding:6px 14px;
 font-size:58px;font-weight:700;text-shadow:none;
 }}
 .landscape .caption-style-editorialPhrase .cap.highlight{{font-size:46px;padding:4px 12px}}
+.caption-style-reading .cap{{
+  max-width:72%;width:max-content;border-radius:16px;padding:9px 26px;
+  color:#fffaf4;background:rgba(18,21,23,.72);text-align:center;text-wrap:balance;
+  font:700 52px/1.12 "LVS Noto Sans",sans-serif;
+}}
+.landscape .caption-style-reading .cap{{font-size:54px}}
 {PREVIEW_CSS if interactive_preview else ""}
 </style></head><body class="archive-dossier {placeholder_class} {text_class} {orientation}{caption_class}{preview_class}">{canvas}
 <script>
 "use strict";
 const PLAN={payload};
+const PREDECESSOR={predecessor_payload};
+const ROOTS=[...document.querySelectorAll('.composition')];
 const CAPTIONS={captions_payload};
 const FONT_MANIFEST={font_manifest_payload};
 {FIT_PICTURE_SCRIPT if interactive_preview or still_time is not None else ""}
@@ -828,6 +903,11 @@ function updateCaptions(t){{
     node.style.top=active.y+'px';
   }}
   if(!active||!capNode)return;
+  if(PLAN.caption_style==='reading'){{
+    capNode.style.opacity='1';
+    capNode.style.transform='translate(-50%,-100%)';
+    return;
+  }}
   const inP=clamp((t-active.start)/0.14);
   const outP=clamp((active.end-t)/0.14);
   capNode.style.opacity=String(Math.min(inP,outP));
@@ -847,7 +927,7 @@ function reset(root){{
       Object.assign(line.style,{{left:(img.offsetLeft+(w-iw)/2+x*iw)+'px',top:(img.offsetTop+(h-ih)/2+y*ih)+'px',width:(bw*iw)+'px',height:(bh*ih)+'px'}});
     }});
   }});
-  root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity='0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
+  root.querySelectorAll('.editorial-element').forEach(el=>{{el.style.opacity=el.classList.contains('reading-rest')?'1':'0';el.style.filter='none';el.style.transform='none';el.classList.remove('focus-mark')}});
   root.querySelectorAll('.document,.source-sheet').forEach(el=>{{el.style.transformOrigin=''}});
   root.querySelectorAll('.ruler-node').forEach(el=>{{
     el.style.opacity='0';el.style.transform='';el.style.zIndex='';el.classList.remove('focus','chief');
@@ -918,13 +998,29 @@ function applyEvent(root,event,t){{
     case 'hardCut': target.style.opacity='1';break;
   }}
 }}
+function paint(root, composition, time){{
+  root.style.display='block';
+  reset(root);
+  composition.events.forEach(event=>applyEvent(root,event,time));
+}}
 window.renderAt=function(globalTime){{
-  PLAN.compositions.forEach((composition,index)=>{{
-    const root=document.querySelectorAll('.composition')[index];
-    const active=globalTime>=composition.start&&globalTime<=composition.start+composition.duration;
-    root.style.display=active?'block':'none'; if(!active)return;
-    const t=globalTime-composition.start;reset(root);composition.events.forEach(event=>applyEvent(root,event,t));
-  }});
+  ROOTS.forEach(root=>{{root.style.display='none';root.style.opacity='1';}});
+  const index=PLAN.compositions.findLastIndex(item=>globalTime>=item.start&&globalTime<=item.start+item.duration);
+  if(index>=0){{
+    const offset=PREDECESSOR?1:0;
+    const composition=PLAN.compositions[index], root=ROOTS[index+offset];
+    const elapsed=globalTime-composition.start;
+    const prior=index>0?PLAN.compositions[index-1]:PREDECESSOR;
+    const overlap=PLAN.reading_layout&&prior?.transition_out==='fade'
+      ? Math.min(.48,composition.duration/2,prior.duration/2):0;
+    if(elapsed<overlap){{
+      paint(ROOTS[index+offset-1],prior,Math.max(0,prior.duration-1/PLAN.fps));
+      paint(root,composition,elapsed);
+      root.style.opacity=String(ease(elapsed/overlap));
+    }}else{{
+      paint(root,composition,elapsed);
+    }}
+  }}
   updateCaptions(globalTime);
   return true;
 }};
@@ -988,6 +1084,7 @@ class EditorialRenderer:
         preview_html: Path | None = None,
         asset_root: Path | None = None,
         captions: Sequence[dict[str, Any]] = (),
+        predecessor: EditorialComposition | None = None,
     ) -> Path:
         if self.chromium is None:
             raise RuntimeError("Chromium is required for Editorial Mode rendering")
@@ -1004,6 +1101,7 @@ class EditorialRenderer:
             ),
             captions=captions,
             show_placeholders=False,
+            predecessor=predecessor,
         )
         if preview_html is not None:
             preview_html.parent.mkdir(parents=True, exist_ok=True)

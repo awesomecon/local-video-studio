@@ -2784,6 +2784,46 @@ await recordAsync("editorial-workspace: no-plan state exposes the guarded Genera
   state.currentProjectId = null;
 });
 
+await recordAsync("editorial-workspace: Orthodox Reading submits a separate editable preset", async () => {
+  state.config = { apiBase: "", mediaBase: null };
+  state.currentProjectId = "proj-ws";
+  const url = "/api/projects/proj-ws/editorial/reading-plan";
+  let planExists = false;
+  const calls = stubFetch((call) => {
+    if (call.method === "GET" && call.url === "/api/projects/proj-ws") {
+      return { payload: projectSnapshot(WS_PROJECT, planExists ? WS_META : {
+        has_edit_plan: false, reading_plan_url: url,
+      }) };
+    }
+    if (call.method === "POST" && call.url === url) {
+      planExists = true;
+      return { payload: WS_PLAN };
+    }
+    if (call.method === "GET" && call.url === WS_META.edit_plan_url) {
+      return { payload: WS_PLAN };
+    }
+    return { status: 404, payload: { detail: `unexpected ${call.method} ${call.url}` } };
+  });
+  const screen = renderEditorial({ name: "editorial", param: null });
+  await flush();
+  const form = screen.querySelector("details form");
+  assert(form && screen.textContent.includes("Orthodox Reading"), "separate preset form");
+  form.querySelector("input").value = "What is a merciful heart?";
+  form.dispatchEvent(new Event("submit", { cancelable: true }));
+  form.dispatchEvent(new Event("submit", { cancelable: true }));
+  await flush();
+  const posts = calls.filter((call) => call.method === "POST");
+  eq(posts.length, 1);
+  eq(posts[0].url, url);
+  eq(posts[0].body, {
+    opening_text: "What is a merciful heart?", attribution: "", closing_quote: "",
+    source_credit: "", image_model: "qwen_image_21",
+  });
+  assert(screen.querySelector(".ed-strip"), "returns to the editable sequence");
+  screen.remove();
+  state.currentProjectId = null;
+});
+
 await recordAsync("editorial-workspace: plan renders strip, detail, and a preview gated behind the toggle", async () => {
   state.config = { apiBase: "", mediaBase: null };
   state.currentProjectId = "proj-ws";

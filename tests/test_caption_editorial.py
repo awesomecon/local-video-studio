@@ -386,7 +386,12 @@ def _minimal_content(template: EditorialTemplate) -> tuple[list, list]:
             )],
             [image],
         )
-    if template is EditorialTemplate.BIG_TEXT_REVEAL:
+    if template is EditorialTemplate.READING_IMAGE:
+        image = EditorialAsset(id="still-asset", type=EditorialAssetType.GENERATED_IMAGE)
+        return ([
+            EditorialElement(id="still", type=EditorialElementType.IMAGE, asset_id=image.id, role="image"),
+        ], [image])
+    if template in {EditorialTemplate.BIG_TEXT_REVEAL, EditorialTemplate.READING_CARD}:
         return (
             [EditorialElement(
                 id="head", type=EditorialElementType.TEXT, text="TEN MEN",
