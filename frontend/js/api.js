@@ -1056,6 +1056,10 @@ export function generateEditPlan(config, generateUrl, opts = {}) {
   return request(config, generateUrl, { method: "POST", timeoutMs: 600000, ...opts });
 }
 
+export function createReadingEditPlan(config, readingPlanUrl, body) {
+  return request(config, readingPlanUrl, { method: "POST", body, timeoutMs: 15000 });
+}
+
 /**
  * PATCH the snapshot-provided editorial settings URL
  * (`snap.editorial.settings_url`, e.g. "/api/projects/{id}/editorial/settings")

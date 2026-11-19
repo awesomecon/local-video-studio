@@ -24,6 +24,7 @@ from backend.core.ports import select_application_port
 from backend.editorial import (
     EditPlan, EditorialTemplate, MotionPrimitive, compile_edit_plan_html,
 )
+from backend.editorial.reading import ReadingPlanRequest
 from backend.models import LocalLLMBackend
 from backend.models.gemini_tts import GEMINI_TTS_MODELS, GeminiTTSBackend
 from backend.models.errors import BackendError, BackendErrorCode
@@ -80,6 +81,7 @@ class EditorialSettingsEdit(BaseModel):
     editorial_text_enabled: bool | None = None
     caption_style: str | None = None
     sentence_hold_seconds: float | None = Field(default=None, ge=0, le=5)
+    closing_hold_seconds: float | None = Field(default=None, ge=0, le=5)
 
 
 class EditorialAssetLockEdit(BaseModel):
@@ -1121,6 +1123,17 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
 
+    @application.post("/api/projects/{project_id}/editorial/reading-plan")
+    def create_orthodox_reading(project_id: str, request: ReadingPlanRequest) -> dict[str, Any]:
+        try:
+            return service.create_reading_edit_plan(project_id, request).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except PipelineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.post("/api/projects/{project_id}/editorial/plan")
     def generate_editorial_edit_plan(project_id: str) -> dict[str, Any]:
         try:
@@ -1215,6 +1228,7 @@ def create_app(
                 editorial_text_enabled=request.editorial_text_enabled,
                 caption_style=request.caption_style,
                 sentence_hold_seconds=request.sentence_hold_seconds,
+                closing_hold_seconds=request.closing_hold_seconds,
             ).model_dump(mode="json")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None

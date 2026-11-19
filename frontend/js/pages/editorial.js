@@ -52,7 +52,7 @@
 
 import { el, fmtDuration } from "../dom.js";
 import { state, needsProject } from "../state.js";
-import { getProject, getEditPlan } from "../api.js";
+import { createReadingEditPlan, getProject, getEditPlan } from "../api.js";
 import {
   badge,
   emptyState,
@@ -83,6 +83,8 @@ const TEMPLATE_LABELS = {
   comparisonCanvas: "Comparison canvas",
   illustrationCanvas: "Illustration canvas",
   bigTextReveal: "Big text reveal",
+  readingCard: "Reading card",
+  readingImage: "Reading still",
 };
 
 /**
@@ -272,6 +274,9 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
   function noPlanState(editorial) {
     const actions = [];
     const generateUrl = usableUrl(editorial.generate_url);
+    const readingUrl = projectEditorialApiPath(
+      editorial.reading_plan_url, projectId, "reading-plan",
+    );
     const needsScript = typeof editorial.has_narration === "boolean" && !snapRef?.scenes?.length;
     const needsNarration = editorial.has_narration === false && !needsScript;
     if (needsScript) {
@@ -296,6 +301,7 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
         actions,
       ),
       el("div", { class: "panel-body" },
+        readingUrl && !needsScript ? readingPlanForm(readingUrl) : null,
         el("div", { class: "small", style: { fontWeight: "650" } }, "How it works"),
         el("ol", { class: "ed-workflow" },
           el("li", {}, "Generate the Edit Plan from the script and narration."),
@@ -304,6 +310,54 @@ function loadBody(body, projectId, { skeleton = true } = {}) {
           el("li", {}, "Render the final video from the Export screen."),
         ),
       ),
+    );
+  }
+
+  function readingPlanForm(url) {
+    const opening = el("input", { type: "text", maxlength: 134, placeholder: "First question or project title" });
+    const name = el("input", { type: "text", maxlength: 90, placeholder: "St. Isaac the Syrian" });
+    const closing = el("input", { type: "text", maxlength: 134, placeholder: "Exact words from the passage" });
+    const source = el("input", { type: "text", maxlength: 180, placeholder: "Title, translator, year, and page" });
+    const model = el("select", {},
+      el("option", { value: "qwen_image_21" }, "Qwen Image 2.1"),
+      el("option", { value: "qwen_image" }, "Qwen Image"),
+      el("option", { value: "krea" }, "Krea"),
+      el("option", { value: "ideogram4_local" }, "Ideogram 4 Local"),
+    );
+    const submit = el("button", { type: "submit", class: "btn btn-primary" }, "Create Reading Edit Plan");
+    const form = el("form", { class: "stack mt" },
+      el("label", {}, "Opening text", opening),
+      el("label", {}, "Saint or author", name),
+      el("label", {}, "Closing quote", closing),
+      el("label", {}, "Source credit", source),
+      el("label", {}, "Image model", model),
+      submit,
+    );
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (ctrl.busy) return;
+      ctrl.busy = "reading-plan";
+      submit.disabled = true;
+      errors.replaceChildren();
+      try {
+        await createReadingEditPlan(state.config, url, {
+          opening_text: opening.value, attribution: name.value,
+          closing_quote: closing.value, source_credit: source.value, image_model: model.value,
+        });
+        ctrl.busy = "";
+        await load();
+      } catch (err) {
+        errors.replaceChildren(errorPanel(err));
+        toastError(err, "Could not create reading plan");
+      } finally {
+        ctrl.busy = "";
+        submit.disabled = false;
+      }
+    });
+    return el("details", { class: "studio-disclosure mb" },
+      el("summary", {}, "Orthodox Reading"),
+      el("p", { class: "muted small" }, "Create an icon-led reading with full-frame stills, gentle dissolves, and a closing source card. Upload the icon once and generate or upload the other images."),
+      form,
     );
   }
 
